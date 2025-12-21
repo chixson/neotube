@@ -1,0 +1,5 @@
+cutouts/
+*.fits
+*.csv
+*.log
+cache/

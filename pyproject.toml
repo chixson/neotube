@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=65.5.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neotube"
+version = "0.1.0"
+description = "Toolkit for polite ZTF data harvesting and eventual NEOTube planning."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31",
+]
+
+[project.scripts]
+neotube-ztf = "neotube.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
