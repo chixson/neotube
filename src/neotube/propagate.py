@@ -61,6 +61,14 @@ def _bulk_heliocentric_positions(body: str, times: Time, sun_coord: SkyCoord) ->
     return vec.to(u.km).value.T
 
 
+def _heliocentric_position(body: str, epoch: Time) -> np.ndarray:
+    """Return heliocentric (km) position for a single epoch."""
+    body_pos, _ = get_body_barycentric_posvel(body, epoch)
+    sun_pos, _ = get_body_barycentric_posvel("sun", epoch)
+    vec = body_pos.xyz - sun_pos.xyz
+    return vec.to(u.km).value
+
+
 def _build_perturber_table(
     epoch: Time,
     perturbers: Sequence[str],
