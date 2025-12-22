@@ -20,6 +20,8 @@ IBE_DATA_ROOT = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products/sci"
 DEFAULT_COLUMNS = [
     "obsjd",
     "obsdate",
+    "ra",
+    "dec",
     "filefracday",
     "field",
     "ccdid",
@@ -36,6 +38,8 @@ DEFAULT_COLUMNS = [
 class Exposure:
     obsjd: float
     obsdate: str
+    ra: float
+    dec: float
     filefracday: str
     field: int
     ccdid: int
@@ -57,6 +61,10 @@ def pad_field(field: int) -> str:
 
 def pad_ccd(ccdid: int) -> str:
     return f"{ccdid:02d}"
+
+
+def exposure_unique_id(exp: Exposure) -> str:
+    return f"ztf_{exp.filefracday}_f{pad_field(exp.field)}_{exp.filtercode}_c{pad_ccd(exp.ccdid)}_{exp.imgtypecode}_q{exp.qid}"
 
 
 def sci_image_url(exp: Exposure, suffix: str = "sciimg.fits") -> str:
@@ -218,6 +226,8 @@ def query_exposures(
             Exposure(
                 obsjd=float(row["obsjd"]),
                 obsdate=row.get("obsdate", ""),
+                ra=float(row["ra"]) if row.get("ra") else ra,
+                dec=float(row["dec"]) if row.get("dec") else dec,
                 filefracday=row["filefracday"],
                 field=int(row["field"]),
                 ccdid=int(row["ccdid"]),
@@ -243,6 +253,8 @@ def load_plan_exposures(path: Path) -> list[Exposure]:
                 Exposure(
                     obsjd=float(row["obsjd"]),
                     obsdate=row.get("obsdate", ""),
+                    ra=float(row["ra"]),
+                    dec=float(row["dec"]),
                     filefracday=row["filefracday"],
                     field=int(row["field"]),
                     ccdid=int(row["ccdid"]),
@@ -432,3 +444,7 @@ def main() -> int:
 
         logging.info("Downloaded %d cutouts into %s", downloaded, args.out)
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
