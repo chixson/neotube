@@ -155,12 +155,13 @@ def propagate_state_sun(
         return np.empty((0, 6), dtype=float)
 
     offsets = np.array([(target - epoch).to(u.s).value for target in targets], dtype=float)
-    order = np.argsort(offsets)
-    sorted_offsets = offsets[order]
-    if sorted_offsets[0] < 0:
-        raise ValueError("Backward propagation is not supported yet.")
-    if sorted_offsets[-1] < 1e-9:
-        return np.tile(state, (len(targets), 1))
+    neg_mask = offsets < -1e-9
+    pos_mask = offsets > 1e-9
+    zero_mask = ~(neg_mask | pos_mask)
+
+    results = np.empty((len(targets), 6), dtype=float)
+    if np.any(zero_mask):
+        results[zero_mask] = state
 
     def rhs(t: float, y: np.ndarray) -> np.ndarray:
         r = y[:3]
@@ -168,21 +169,39 @@ def propagate_state_sun(
         acc = -mu_km3_s2 * r / (norm**3 + 1e-18)
         return np.concatenate((y[3:], acc))
 
-    sol = solve_ivp(
-        rhs,
-        (0.0, sorted_offsets[-1]),
-        state,
-        t_eval=sorted_offsets,
-        max_step=max_step,
-        rtol=1e-9,
-        atol=1e-12,
-        method="DOP853",
-    )
-    if not sol.success:
-        raise RuntimeError(f"Sun-only propagation failed: {sol.message}")
-    results_sorted = sol.y.T
-    results = np.empty_like(results_sorted)
-    results[order] = results_sorted
+    def _solve(offsets_subset: np.ndarray) -> np.ndarray:
+        if offsets_subset.size == 0:
+            return np.empty((0, 6), dtype=float)
+        t_end = float(offsets_subset.min() if offsets_subset.min() < 0 else offsets_subset.max())
+        t_eval = np.sort(offsets_subset)
+        if t_end < 0:
+            t_eval = t_eval[::-1]
+        sol = solve_ivp(
+            rhs,
+            (0.0, t_end),
+            state,
+            t_eval=t_eval,
+            max_step=abs(max_step),
+            rtol=1e-9,
+            atol=1e-12,
+            method="DOP853",
+        )
+        if not sol.success:
+            raise RuntimeError(f"Sun-only propagation failed: {sol.message}")
+        return sol.y.T
+
+    if np.any(pos_mask):
+        pos_offsets = offsets[pos_mask]
+        pos_states = _solve(pos_offsets)
+        order_pos = np.argsort(pos_offsets)
+        results[np.where(pos_mask)[0][order_pos]] = pos_states
+
+    if np.any(neg_mask):
+        neg_offsets = offsets[neg_mask]
+        neg_states = _solve(neg_offsets)
+        order_neg = np.argsort(neg_offsets)[::-1]
+        results[np.where(neg_mask)[0][order_neg]] = neg_states
+
     return results
 
 
@@ -294,31 +313,92 @@ def propagate_state(
         return np.empty((0, 6), dtype=float)
 
     offsets = np.array([(target - epoch).to(u.s).value for target in targets], dtype=float)
-    order = np.argsort(offsets)
-    sorted_offsets = offsets[order]
-    if sorted_offsets[0] < 0:
-        raise ValueError("Backward propagation is not supported yet.")
+    neg_mask = offsets < -1e-9
+    pos_mask = offsets > 1e-9
+    zero_mask = ~(neg_mask | pos_mask)
 
-    if sorted_offsets[-1] < 1e-9:
-        return np.tile(state, (len(targets), 1))
+    results = np.empty((len(targets), 6), dtype=float)
+    if np.any(zero_mask):
+        results[zero_mask] = state
 
-    perturber_table = _build_perturber_table(epoch, perturbers, sorted_offsets[-1], max_step)
-    sol = solve_ivp(
-        lambda t, y: _rhs(t, y, perturber_table),
-        (0.0, sorted_offsets[-1]),
-        state,
-        t_eval=sorted_offsets,
-        max_step=max_step,
-        rtol=1e-9,
-        atol=1e-12,
-        method="DOP853",
-    )
-    if not sol.success:
-        raise RuntimeError(f"Propagation to targets failed: {sol.message}")
+    def _solve(offsets_subset: np.ndarray) -> np.ndarray:
+        if offsets_subset.size == 0:
+            return np.empty((0, 6), dtype=float)
+        t_end = float(offsets_subset.min() if offsets_subset.min() < 0 else offsets_subset.max())
+        t_eval = np.sort(offsets_subset)
+        if t_end < 0:
+            t_eval = t_eval[::-1]
 
-    results_sorted = sol.y.T
-    results = np.empty_like(results_sorted)
-    results[order] = results_sorted
+        # Build a perturber table spanning the integration interval.
+        if t_end < 0:
+            table_times = np.linspace(
+                t_end,
+                0.0,
+                max(2, int(ceil(abs(t_end) / max(abs(max_step), 1.0))) + 1),
+                dtype=float,
+            )
+        else:
+            table_times = np.linspace(
+                0.0,
+                t_end,
+                max(2, int(ceil(abs(t_end) / max(abs(max_step), 1.0))) + 1),
+                dtype=float,
+            )
+        times = epoch + TimeDelta(table_times * u.s)
+        sun_pos, _ = get_body_barycentric_posvel("sun", times)
+        bodies = []
+        position_list = []
+        gms = []
+        for body in perturbers:
+            gm = PLANET_GMS.get(body.lower())
+            if gm is None:
+                continue
+            body_pos = _bulk_heliocentric_positions(body, times, sun_pos)
+            bodies.append(body.lower())
+            position_list.append(body_pos)
+            gms.append(gm)
+        if bodies:
+            stacked_positions = np.stack(position_list, axis=0)
+            pert_table = PerturberTable(
+                times=table_times,
+                bodies=bodies,
+                gms=np.array(gms, dtype=float),
+                positions=stacked_positions,
+            )
+        else:
+            pert_table = PerturberTable(
+                times=table_times,
+                bodies=[],
+                gms=np.empty((0,), dtype=float),
+                positions=np.empty((0, len(table_times), 3), dtype=float),
+            )
+
+        sol = solve_ivp(
+            lambda t, y: _rhs(t, y, pert_table),
+            (0.0, t_end),
+            state,
+            t_eval=t_eval,
+            max_step=abs(max_step),
+            rtol=1e-9,
+            atol=1e-12,
+            method="DOP853",
+        )
+        if not sol.success:
+            raise RuntimeError(f"Propagation to targets failed: {sol.message}")
+        return sol.y.T
+
+    if np.any(pos_mask):
+        pos_offsets = offsets[pos_mask]
+        pos_states = _solve(pos_offsets)
+        order_pos = np.argsort(pos_offsets)
+        results[np.where(pos_mask)[0][order_pos]] = pos_states
+
+    if np.any(neg_mask):
+        neg_offsets = offsets[neg_mask]
+        neg_states = _solve(neg_offsets)
+        order_neg = np.argsort(neg_offsets)[::-1]
+        results[np.where(neg_mask)[0][order_neg]] = neg_states
+
     return results
 
 
