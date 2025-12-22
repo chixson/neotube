@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 from math import ceil
 from typing import Iterable, Sequence, Optional
 
@@ -40,33 +39,75 @@ PLANET_GMS = {
 }
 
 
-def _heliocentric_position(body: str, epoch: Time) -> np.ndarray:
-    """Return heliocentric (km) position for the requested body."""
-    body_pos, _ = get_body_barycentric_posvel(body, epoch)
-    sun_pos, _ = get_body_barycentric_posvel("sun", epoch)
-    vec = body_pos.xyz - sun_pos.xyz
-    return vec.to(u.km).value
+@dataclass
+class PerturberTable:
+    times: np.ndarray
+    positions: dict[str, np.ndarray]
+
+    def position(self, body: str, t: float) -> np.ndarray | None:
+        arr = self.positions.get(body.lower())
+        if arr is None:
+            return None
+        # interpolate each dimension
+        return np.array(
+            [
+                np.interp(t, self.times, arr[:, dim])
+                for dim in range(3)
+            ],
+            dtype=float,
+        )
 
 
-def _acceleration(r: np.ndarray, epoch: Time, perturbers: Sequence[str]) -> np.ndarray:
+def _bulk_heliocentric_positions(body: str, times: Time, sun_coord: SkyCoord) -> np.ndarray:
+    """Return heliocentric (km) positions for body over multiple epochs."""
+    body_pos, _ = get_body_barycentric_posvel(body, times)
+    vec = body_pos.xyz - sun_coord.xyz
+    return vec.to(u.km).value.T
+
+
+def _build_perturber_table(
+    epoch: Time,
+    perturbers: Sequence[str],
+    max_offset: float,
+    step: float,
+) -> PerturberTable:
+    """Precompute perturber positions on a regular grid of offsets (seconds)."""
+    if step <= 0:
+        step = 1.0
+
+    n_steps = max(2, int(ceil(max_offset / step)) + 1)
+    grid = np.linspace(0.0, max_offset, n_steps, dtype=float)
+    times = epoch + TimeDelta(grid * u.s)
+    sun_pos, _ = get_body_barycentric_posvel("sun", times)
+
+    positions = {}
+    for body in perturbers:
+        body_pos = _bulk_heliocentric_positions(body, times, sun_pos)
+        positions[body.lower()] = body_pos
+
+    return PerturberTable(times=grid, positions=positions)
+
+
+def _acceleration(r: np.ndarray, perturber_table: PerturberTable, t: float) -> np.ndarray:
     """Compute heliocentric acceleration on a test particle."""
     norm = np.linalg.norm(r)
     acc = -GM_SUN * r / (norm**3 + 1e-18)
-    for body in perturbers:
-        gm = PLANET_GMS.get(body.lower())
+    for body, arr in perturber_table.positions.items():
+        gm = PLANET_GMS.get(body)
         if gm is None:
             continue
-        body_pos = _heliocentric_position(body, epoch)
+        body_pos = perturber_table.position(body, t)
+        if body_pos is None:
+            continue
         diff = r - body_pos
         acc += -gm * diff / (np.linalg.norm(diff)**3 + 1e-18)
     return acc
 
 
-def _rhs(t: float, y: np.ndarray, epoch: Time, perturbers: Sequence[str]) -> np.ndarray:
+def _rhs(t: float, y: np.ndarray, perturber_table: PerturberTable) -> np.ndarray:
     """Ordinary differential equation for heliocentric motion."""
-    current_epoch = epoch + TimeDelta(t * u.s)
     r = y[:3]
-    acc = _acceleration(r, current_epoch, perturbers)
+    acc = _acceleration(r, perturber_table, t)
     return np.concatenate((y[3:], acc))
 
 
@@ -92,8 +133,9 @@ def propagate_state(
     if sorted_offsets[-1] < 1e-9:
         return np.tile(state, (len(targets), 1))
 
+    perturber_table = _build_perturber_table(epoch, perturbers, sorted_offsets[-1], max_step)
     sol = solve_ivp(
-        lambda t, y: _rhs(t, y, epoch, perturbers),
+        lambda t, y: _rhs(t, y, perturber_table),
         (0.0, sorted_offsets[-1]),
         state,
         t_eval=sorted_offsets,
