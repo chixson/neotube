@@ -42,20 +42,16 @@ PLANET_GMS = {
 @dataclass
 class PerturberTable:
     times: np.ndarray
-    positions: dict[str, np.ndarray]
+    bodies: list[str]
+    gms: np.ndarray
+    positions: np.ndarray  # shape (len(bodies), len(times), 3)
 
-    def position(self, body: str, t: float) -> np.ndarray | None:
-        arr = self.positions.get(body.lower())
-        if arr is None:
-            return None
-        # interpolate each dimension
-        return np.array(
-            [
-                np.interp(t, self.times, arr[:, dim])
-                for dim in range(3)
-            ],
-            dtype=float,
-        )
+    def position_vectors(self, t: float) -> np.ndarray:
+        out = np.empty((len(self.bodies), 3), dtype=float)
+        for i in range(len(self.bodies)):
+            for dim in range(3):
+                out[i, dim] = np.interp(t, self.times, self.positions[i, :, dim])
+        return out
 
 
 def _bulk_heliocentric_positions(body: str, times: Time, sun_coord: SkyCoord) -> np.ndarray:
@@ -80,27 +76,45 @@ def _build_perturber_table(
     times = epoch + TimeDelta(grid * u.s)
     sun_pos, _ = get_body_barycentric_posvel("sun", times)
 
-    positions = {}
+    bodies = []
+    position_list = []
+    gms = []
     for body in perturbers:
+        gm = PLANET_GMS.get(body.lower())
+        if gm is None:
+            continue
         body_pos = _bulk_heliocentric_positions(body, times, sun_pos)
-        positions[body.lower()] = body_pos
+        bodies.append(body.lower())
+        position_list.append(body_pos)
+        gms.append(gm)
 
-    return PerturberTable(times=grid, positions=positions)
+    if not bodies:
+        return PerturberTable(
+            times=grid,
+            bodies=[],
+            gms=np.empty((0,), dtype=float),
+            positions=np.empty((0, len(grid), 3), dtype=float),
+        )
+
+    stacked_positions = np.stack(position_list, axis=0)
+    return PerturberTable(
+        times=grid,
+        bodies=bodies,
+        gms=np.array(gms, dtype=float),
+        positions=stacked_positions,
+    )
 
 
 def _acceleration(r: np.ndarray, perturber_table: PerturberTable, t: float) -> np.ndarray:
     """Compute heliocentric acceleration on a test particle."""
     norm = np.linalg.norm(r)
     acc = -GM_SUN * r / (norm**3 + 1e-18)
-    for body, arr in perturber_table.positions.items():
-        gm = PLANET_GMS.get(body)
-        if gm is None:
-            continue
-        body_pos = perturber_table.position(body, t)
-        if body_pos is None:
-            continue
-        diff = r - body_pos
-        acc += -gm * diff / (np.linalg.norm(diff)**3 + 1e-18)
+    if perturber_table.bodies:
+        positions = perturber_table.position_vectors(t)
+        diffs = r - positions
+        norms = np.linalg.norm(diffs, axis=1)
+        coeff = -perturber_table.gms / (norms**3 + 1e-18)
+        acc += np.sum((coeff[:, np.newaxis] * diffs), axis=0)
     return acc
 
 
