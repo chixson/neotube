@@ -210,7 +210,11 @@ def query_exposures(
     text = resp.text
     resp.close()
 
-    reader = csv.DictReader(text.splitlines())
+    lines = text.splitlines()
+    reader = csv.DictReader(lines)
+    if not reader.fieldnames or "obsjd" not in reader.fieldnames:
+        snippet = "\n".join(lines[:20])
+        raise RuntimeError(f"Unexpected IRSA CSV response (missing obsjd header). First lines:\n{snippet}")
     exposures: List[Exposure] = []
     for row in reader:
         def parse_float(key: str) -> Optional[float]:

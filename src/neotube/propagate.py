@@ -18,6 +18,8 @@ import os
 
 __all__ = [
     "propagate_state",
+    "propagate_state_kepler",
+    "propagate_state_sun",
     "predict_radec",
     "ReplicaCloud",
     "propagate_replicas",
@@ -37,6 +39,151 @@ PLANET_GMS = {
     "pluto": 8.71e3,
     "moon": 4.9048695e3,
 }
+
+def _stumpff_C2(z: float) -> float:
+    if z > 1e-8:
+        s = np.sqrt(z)
+        return float((1.0 - np.cos(s)) / z)
+    if z < -1e-8:
+        s = np.sqrt(-z)
+        return float((np.cosh(s) - 1.0) / (-z))
+    # series expansion near 0
+    return 0.5
+
+
+def _stumpff_C3(z: float) -> float:
+    if z > 1e-8:
+        s = np.sqrt(z)
+        return float((s - np.sin(s)) / (s**3))
+    if z < -1e-8:
+        s = np.sqrt(-z)
+        return float((np.sinh(s) - s) / (s**3))
+    # series expansion near 0
+    return 1.0 / 6.0
+
+
+def propagate_state_kepler(
+    state: np.ndarray,
+    epoch: Time,
+    targets: Iterable[Time],
+    *,
+    mu_km3_s2: float = GM_SUN,
+    max_iter: int = 50,
+    tol: float = 1e-8,
+) -> np.ndarray:
+    """Propagate a heliocentric state assuming a pure two-body (Sun-only) Keplerian orbit.
+
+    Uses the universal variable formulation (Vallado-style f/g functions).
+    Input state is [x,y,z,vx,vy,vz] in km and km/s. Targets are astropy Times.
+    """
+    targets = list(targets)
+    if not targets:
+        return np.empty((0, 6), dtype=float)
+
+    r0 = np.array(state[:3], dtype=float)
+    v0 = np.array(state[3:], dtype=float)
+    r0_norm = float(np.linalg.norm(r0))
+    v0_sq = float(np.dot(v0, v0))
+    vr0 = float(np.dot(r0, v0)) / (r0_norm + 1e-30)
+    alpha = 2.0 / (r0_norm + 1e-30) - v0_sq / mu_km3_s2
+    sqrt_mu = np.sqrt(mu_km3_s2)
+
+    out = np.empty((len(targets), 6), dtype=float)
+    for i, t in enumerate(targets):
+        dt = float((t - epoch).to(u.s).value)
+        if abs(dt) < 1e-9:
+            out[i] = state
+            continue
+
+        # initial guess for chi
+        if alpha > 1e-12:
+            chi = sqrt_mu * dt * alpha
+        else:
+            chi = np.sign(dt) * sqrt_mu * abs(dt) * 1e-3
+
+        # Newton solve for universal anomaly chi
+        for _ in range(max_iter):
+            z = alpha * chi * chi
+            C2 = _stumpff_C2(z)
+            C3 = _stumpff_C3(z)
+            F = (
+                (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+                + (1.0 - alpha * r0_norm) * chi**3 * C3
+                + r0_norm * chi
+                - sqrt_mu * dt
+            )
+            dF = (
+                (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+                + (1.0 - alpha * r0_norm) * chi * chi * C2
+                + r0_norm
+            )
+            step = F / (dF + 1e-30)
+            chi -= step
+            if abs(step) < tol:
+                break
+
+        z = alpha * chi * chi
+        C2 = _stumpff_C2(z)
+        C3 = _stumpff_C3(z)
+        f = 1.0 - (chi * chi / (r0_norm + 1e-30)) * C2
+        g = dt - (chi**3 / sqrt_mu) * C3
+        r = f * r0 + g * v0
+        r_norm = float(np.linalg.norm(r))
+        gdot = 1.0 - (chi * chi / (r_norm + 1e-30)) * C2
+        fdot = (sqrt_mu / ((r_norm + 1e-30) * (r0_norm + 1e-30))) * chi * (z * C3 - 1.0)
+        v = fdot * r0 + gdot * v0
+        out[i, :3] = r
+        out[i, 3:] = v
+    return out
+
+
+def propagate_state_sun(
+    state: np.ndarray,
+    epoch: Time,
+    targets: Iterable[Time],
+    *,
+    mu_km3_s2: float = GM_SUN,
+    max_step: float = 3600.0,
+) -> np.ndarray:
+    """Propagate a heliocentric state using a Sun-only (2-body) ODE integration.
+
+    This is 'Keplerian' dynamics (no perturbers) but avoids universal-variable
+    numerical issues for pathological states by relying on solve_ivp.
+    """
+    targets = list(targets)
+    if not targets:
+        return np.empty((0, 6), dtype=float)
+
+    offsets = np.array([(target - epoch).to(u.s).value for target in targets], dtype=float)
+    order = np.argsort(offsets)
+    sorted_offsets = offsets[order]
+    if sorted_offsets[0] < 0:
+        raise ValueError("Backward propagation is not supported yet.")
+    if sorted_offsets[-1] < 1e-9:
+        return np.tile(state, (len(targets), 1))
+
+    def rhs(t: float, y: np.ndarray) -> np.ndarray:
+        r = y[:3]
+        norm = np.linalg.norm(r)
+        acc = -mu_km3_s2 * r / (norm**3 + 1e-18)
+        return np.concatenate((y[3:], acc))
+
+    sol = solve_ivp(
+        rhs,
+        (0.0, sorted_offsets[-1]),
+        state,
+        t_eval=sorted_offsets,
+        max_step=max_step,
+        rtol=1e-9,
+        atol=1e-12,
+        method="DOP853",
+    )
+    if not sol.success:
+        raise RuntimeError(f"Sun-only propagation failed: {sol.message}")
+    results_sorted = sol.y.T
+    results = np.empty_like(results_sorted)
+    results[order] = results_sorted
+    return results
 
 
 @dataclass
