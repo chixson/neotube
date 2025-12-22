@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Optional
 
 import numpy as np
 from astropy import units as u
@@ -12,7 +12,9 @@ from astropy.coordinates import (
     get_body_barycentric_posvel,
 )
 from astropy.time import Time, TimeDelta
+from concurrent.futures import ProcessPoolExecutor
 from scipy.integrate import solve_ivp
+import os
 
 __all__ = [
     "propagate_state",
@@ -76,25 +78,36 @@ def propagate_state(
     max_step: float = 300.0,
 ) -> np.ndarray:
     """Propagate a single heliocentric state to multiple epochs."""
-    results = []
-    for target in targets:
-        delta = (target - epoch).to(u.s).value
-        if abs(delta) < 1e-8:
-            results.append(state.copy())
-            continue
-        sol = solve_ivp(
-            lambda t, y: _rhs(t, y, epoch, perturbers),
-            (0.0, delta),
-            state,
-            max_step=max_step,
-            rtol=1e-9,
-            atol=1e-12,
-            method="RK45",
-        )
-        if not sol.success:
-            raise RuntimeError(f"Propagation to {target.iso} failed: {sol.message}")
-        results.append(sol.y[:, -1])
-    return np.stack(results, axis=0)
+    targets = list(targets)
+    if not targets:
+        return np.empty((0, 6), dtype=float)
+
+    offsets = np.array([(target - epoch).to(u.s).value for target in targets], dtype=float)
+    order = np.argsort(offsets)
+    sorted_offsets = offsets[order]
+    if sorted_offsets[0] < 0:
+        raise ValueError("Backward propagation is not supported yet.")
+
+    if sorted_offsets[-1] < 1e-9:
+        return np.tile(state, (len(targets), 1))
+
+    sol = solve_ivp(
+        lambda t, y: _rhs(t, y, epoch, perturbers),
+        (0.0, sorted_offsets[-1]),
+        state,
+        t_eval=sorted_offsets,
+        max_step=max_step,
+        rtol=1e-9,
+        atol=1e-12,
+        method="DOP853",
+    )
+    if not sol.success:
+        raise RuntimeError(f"Propagation to targets failed: {sol.message}")
+
+    results_sorted = sol.y.T
+    results = np.empty_like(results_sorted)
+    results[order] = results_sorted
+    return results
 
 
 def predict_radec(state: np.ndarray, epoch: Time) -> tuple[float, float]:
@@ -119,17 +132,58 @@ class ReplicaCloud:
     states: np.ndarray  # shape (6, N)
 
 
+def _chunk_propagate(args):
+    chunk, epoch, targets, perturbers, max_step = args
+    results = []
+    for idx in range(chunk.shape[1]):
+        results.append(
+            propagate_state(
+                chunk[:, idx],
+                epoch,
+                targets,
+                perturbers=perturbers,
+                max_step=max_step,
+            )
+        )
+    return np.stack(results, axis=2)
+
+
 def propagate_replicas(
     cloud: ReplicaCloud,
     targets: Iterable[Time],
     perturbers: Sequence[str],
+    *,
+    max_step: float = 300.0,
+    workers: Optional[int] = None,
+    batch_size: int = 50,
 ) -> list[np.ndarray]:
-    """Return propagated states (shape (6,N)) for each target epoch."""
-    propagated = []
-    for target in targets:
-        per_epoch: list[np.ndarray] = []
-        for col in cloud.states.T:
-            state_at = propagate_state(col, cloud.epoch, [target], perturbers=perturbers)[0]
-            per_epoch.append(state_at)
-        propagated.append(np.stack(per_epoch, axis=1))
-    return propagated
+    """Return propagated states for each target epoch with parallel replica batches."""
+    targets_list = list(targets)
+    if not targets_list:
+        return []
+
+    total = cloud.states.shape[1]
+    schedule = []
+    for start in range(0, total, batch_size):
+        chunk = cloud.states[:, start : min(start + batch_size, total)]
+        schedule.append((chunk, cloud.epoch, targets_list, perturbers, max_step))
+
+    if workers is None:
+        workers = min(len(schedule), os.cpu_count() or 1)
+
+    outputs = np.empty((len(targets_list), 6, total), dtype=float)
+    cursor = 0
+    if workers <= 1 or len(schedule) == 1:
+        for unit in schedule:
+            result = _chunk_propagate(unit)
+            size = result.shape[2]
+            outputs[:, :, cursor : cursor + size] = result
+            cursor += size
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            for result in executor.map(_chunk_propagate, schedule):
+                size = result.shape[2]
+                outputs[:, :, cursor : cursor + size] = result
+                cursor += size
+
+    return [outputs[idx] for idx in range(len(targets_list))]
