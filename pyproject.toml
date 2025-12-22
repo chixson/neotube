@@ -10,10 +10,20 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "requests>=2.31",
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "astropy>=6.0",
+  "astroquery>=0.4.6",
 ]
 
 [project.scripts]
+neotube-fit = "neotube.fit_cli:main"
+neotube-replicas = "neotube.replica_cli:main"
+neotube-propcloud = "neotube.propcloud_cli:main"
+neotube-tube = "neotube.tube_cli:main"
 neotube-ztf = "neotube.cli:main"
+neotube-plan = "neotube.plan_cli:main"
+neotube-diag = "neotube.diag_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

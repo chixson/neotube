@@ -8,6 +8,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, urlencode
 
@@ -44,6 +45,10 @@ class Exposure:
     maglimit: Optional[float]
     seeing: Optional[float]
     airmass: Optional[float]
+    planned_center_ra: float | None = None
+    planned_center_dec: float | None = None
+    planned_radius_arcsec: float | None = None
+    node_time_utc: str | None = None
 
 
 def pad_field(field: int) -> str:
@@ -229,6 +234,33 @@ def query_exposures(
     return exposures
 
 
+def load_plan_exposures(path: Path) -> list[Exposure]:
+    exposures: list[Exposure] = []
+    with path.open() as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            exposures.append(
+                Exposure(
+                    obsjd=float(row["obsjd"]),
+                    obsdate=row.get("obsdate", ""),
+                    filefracday=row["filefracday"],
+                    field=int(row["field"]),
+                    ccdid=int(row["ccdid"]),
+                    qid=int(row["qid"]),
+                    filtercode=row["filtercode"],
+                    imgtypecode=row["imgtypecode"],
+                    maglimit=float(row["maglimit"]) if row.get("maglimit") else None,
+                    seeing=float(row["seeing"]) if row.get("seeing") else None,
+                    airmass=float(row["airmass"]) if row.get("airmass") else None,
+                    planned_center_ra=float(row["planned_center_ra"]) if row.get("planned_center_ra") else None,
+                    planned_center_dec=float(row["planned_center_dec"]) if row.get("planned_center_dec") else None,
+                    planned_radius_arcsec=float(row["planned_radius_arcsec"]) if row.get("planned_radius_arcsec") else None,
+                    node_time_utc=row.get("node_time_utc"),
+                )
+            )
+    return exposures
+
+
 def download_cutout(
     session: requests.Session,
     exposure: Exposure,
@@ -296,6 +328,8 @@ def main() -> int:
     parser.add_argument("--max-rps", type=float, default=0.8, help="Max requests per second")
     parser.add_argument("--max-cutouts", type=int, default=0, help="Stop after downloading this many cutouts")
     parser.add_argument("--user-agent", type=str, default=None, help="Custom User-Agent header")
+    parser.add_argument("--plan", type=Path, default=None, help="Plan CSV describing exposures + centers.")
+    parser.add_argument("--plan-margin-arcsec", type=float, default=5.0, help="Additional margin when using plan centers.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level (DEBUG|INFO|WARN)")
 
     args = parser.parse_args()
@@ -304,28 +338,33 @@ def main() -> int:
     headers = {"User-Agent": args.user_agent or "neotube-ztf/0.1 (contact: chixson@fourshadows.org)"}
     limiter = GlobalRateLimiter(args.max_rps)
 
+    exposures: list[Exposure]
     with requests.Session() as session:
-        exposures = query_exposures(
-            session,
-            ra=args.ra,
-            dec=args.dec,
-            jd_start=args.jd_start,
-            jd_end=args.jd_end,
-            columns=DEFAULT_COLUMNS,
-            headers=headers,
-            limiter=limiter,
-            size_deg=args.search_size_deg,
-            filtercode=args.filter,
-        )
+        if args.plan:
+            exposures = load_plan_exposures(args.plan)
+            logging.info("Loaded %d exposures from plan %s", len(exposures), args.plan)
+        else:
+            exposures = query_exposures(
+                session,
+                ra=args.ra,
+                dec=args.dec,
+                jd_start=args.jd_start,
+                jd_end=args.jd_end,
+                columns=DEFAULT_COLUMNS,
+                headers=headers,
+                limiter=limiter,
+                size_deg=args.search_size_deg,
+                filtercode=args.filter,
+            )
+            logging.info(
+                "Found %d exposures for %.5f, %.5f between JD %.2f and %.2f",
+                len(exposures),
+                args.ra,
+                args.dec,
+                args.jd_start,
+                args.jd_end,
+            )
 
-        logging.info(
-            "Found %d exposures for %.5f, %.5f between JD %.2f and %.2f",
-            len(exposures),
-            args.ra,
-            args.dec,
-            args.jd_start,
-            args.jd_end,
-        )
         if not exposures:
             return 0
 
@@ -342,6 +381,9 @@ def main() -> int:
                     "field",
                     "ccdid",
                     "qid",
+                    "planned_center_ra",
+                    "planned_center_dec",
+                    "planned_radius_arcsec",
                     "cutout_path",
                 ]
             )
@@ -350,12 +392,21 @@ def main() -> int:
                 if args.max_cutouts and downloaded >= args.max_cutouts:
                     break
 
+                if exposure.planned_center_ra is not None and exposure.planned_center_dec is not None:
+                    center_ra = exposure.planned_center_ra
+                    center_dec = exposure.planned_center_dec
+                    radius = exposure.planned_radius_arcsec or 0.0
+                    size_arcsec = max(args.size_arcsec, radius * 2.0 + args.plan_margin_arcsec)
+                else:
+                    center_ra = args.ra
+                    center_dec = args.dec
+                    size_arcsec = args.size_arcsec
                 path = download_cutout(
                     session,
                     exposure,
-                    center_ra=args.ra,
-                    center_dec=args.dec,
-                    size_arcsec=args.size_arcsec,
+                    center_ra=center_ra,
+                    center_dec=center_dec,
+                    size_arcsec=size_arcsec,
                     out_dir=args.out,
                     suffix=args.suffix,
                     headers=headers,
@@ -370,6 +421,9 @@ def main() -> int:
                         exposure.field,
                         exposure.ccdid,
                         exposure.qid,
+                        exposure.planned_center_ra or "",
+                        exposure.planned_center_dec or "",
+                        exposure.planned_radius_arcsec or "",
                         path,
                     ]
                 )
