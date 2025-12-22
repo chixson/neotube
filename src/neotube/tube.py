@@ -36,7 +36,7 @@ def build_tube(
         center_ra = np.rad2deg(
             np.arctan2(np.sum(np.sin(np.deg2rad(ras))), np.sum(np.cos(np.deg2rad(ras))))
         ) % 360.0
-        center_dec = float(np.mean(decs))
+        center_dec = float(np.median(decs))
         delta_ra = ((ras - center_ra + 180.0) % 360.0) - 180.0
         delta_tile = np.sqrt(
             (delta_ra * np.cos(np.deg2rad(center_dec))) ** 2 + (decs - center_dec) ** 2

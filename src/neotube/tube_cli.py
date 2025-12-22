@@ -44,7 +44,7 @@ def main() -> int:
             ras = np.array([p[0] for p in points])
             decs = np.array([p[1] for p in points])
             center_ra = circular_mean(ras)
-            center_dec = float(np.mean(decs))
+            center_dec = float(np.median(decs))
             delta_ra = ((ras - center_ra + 180.0) % 360.0) - 180.0
             distances = np.hypot(delta_ra * np.cos(np.deg2rad(center_dec)), decs - center_dec) * 3600.0
             radius = float(np.quantile(distances, args.cred)) + args.margin_arcsec
