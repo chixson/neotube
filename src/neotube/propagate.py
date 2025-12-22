@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from math import ceil
 from typing import Iterable, Sequence, Optional
 
 import numpy as np
@@ -155,7 +156,7 @@ def propagate_replicas(
     *,
     max_step: float = 300.0,
     workers: Optional[int] = None,
-    batch_size: int = 50,
+    batch_size: Optional[int] = None,
 ) -> list[np.ndarray]:
     """Return propagated states for each target epoch with parallel replica batches."""
     targets_list = list(targets)
@@ -163,24 +164,33 @@ def propagate_replicas(
         return []
 
     total = cloud.states.shape[1]
+    if total == 0:
+        return []
+
+    cpu_count = os.cpu_count() or 1
+    requested_workers = workers if workers is not None else cpu_count
+    requested_workers = max(1, requested_workers)
+
+    if batch_size is None or batch_size <= 0:
+        batch_size = max(1, ceil(total / requested_workers))
+
     schedule = []
     for start in range(0, total, batch_size):
         chunk = cloud.states[:, start : min(start + batch_size, total)]
         schedule.append((chunk, cloud.epoch, targets_list, perturbers, max_step))
 
-    if workers is None:
-        workers = min(len(schedule), os.cpu_count() or 1)
+    actual_workers = min(requested_workers, len(schedule))
 
     outputs = np.empty((len(targets_list), 6, total), dtype=float)
     cursor = 0
-    if workers <= 1 or len(schedule) == 1:
+    if actual_workers <= 1 or len(schedule) == 1:
         for unit in schedule:
             result = _chunk_propagate(unit)
             size = result.shape[2]
             outputs[:, :, cursor : cursor + size] = result
             cursor += size
     else:
-        with ProcessPoolExecutor(max_workers=workers) as executor:
+        with ProcessPoolExecutor(max_workers=actual_workers) as executor:
             for result in executor.map(_chunk_propagate, schedule):
                 size = result.shape[2]
                 outputs[:, :, cursor : cursor + size] = result

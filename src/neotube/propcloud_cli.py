@@ -54,7 +54,12 @@ def main() -> int:
     parser.add_argument("--perturbers", nargs="+", default=["earth", "mars", "jupiter"], help="Perturbers for propagation.")
     parser.add_argument("--output", type=Path, default=Path("cloud.csv"), help="Output cloud CSV path.")
     parser.add_argument("--workers", type=int, default=None, help="ProcessPool workers for propagation.")
-    parser.add_argument("--batch-size", type=int, default=50, help="Number of replicas per batch.")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Number of replicas per batch; by default the code divides replicas evenly across the requested workers.",
+    )
     parser.add_argument("--max-step", type=float, default=300.0, help="Max step size (seconds) for propagate_state.")
     args = parser.parse_args()
 
