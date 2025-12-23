@@ -258,6 +258,38 @@ def load_posterior(path: str | Path) -> OrbitPosterior:
     )
 
 
+def load_posterior_json(path: str | Path) -> OrbitPosterior:
+    import json
+
+    with open(path) as fh:
+        data = json.load(fh)
+
+    epoch = Time(str(data["epoch_utc"]), scale="utc")
+    state = np.array(data["state_km"], dtype=float)
+    cov = np.array(data["cov_km2"], dtype=float)
+
+    fit = data.get("fit") or {}
+    converged = bool(fit.get("converged", True))
+    rms = float(fit.get("rms_arcsec", float("nan")))
+    seed_rms = fit.get("seed_rms_arcsec", None)
+    seed_rms = float(seed_rms) if seed_rms is not None else None
+
+    residuals = np.array([], dtype=float)
+    if not np.isfinite(rms):
+        # JSON may not record residuals; keep this as informational only.
+        rms = float("nan")
+
+    return OrbitPosterior(
+        epoch=epoch,
+        state=state,
+        cov=cov,
+        residuals=residuals,
+        rms_arcsec=rms,
+        converged=converged,
+        seed_rms_arcsec=seed_rms if (seed_rms is None or np.isfinite(seed_rms)) else None,
+    )
+
+
 def sample_replicas(post: OrbitPosterior, n: int, seed: int | None = None) -> np.ndarray:
     rng = np.random.default_rng(seed)
     try:

@@ -24,6 +24,7 @@ NEOTube now exposes a small CLI suite that mirrors how the pipeline should be ru
 3. `neotube-propcloud` — propagates those replicas to requested epochs and emits RA/Dec clouds.
 4. `neotube-tube` — compresses the clouds into tube nodes (center + radius at a quantile), which are the inputs to `neotube-ztf`.
 5. `neotube-ztf`/`neotube-plan` — fetch metadata + cutouts for the exposures the tube intersects.
+6. `neotube-infer` — propagate replicas to each cutout epoch and reweight them using a matched-filter SNR likelihood (v0).
 
 Here's a high-level example run directory layout you can reproduce:
 
@@ -135,6 +136,21 @@ neotube-ztf \
 ```
 
 The command writes `cutouts_index.csv` and downloads FITS cutouts to the `--out` directory. Logs include request identifiers and server timing when available.
+
+### `neotube-infer`
+
+This is the v0 inference loop: for each exposure in `cutouts_index.csv`, propagate replicas to the exposure time and update replica weights using a local matched-filter SNR peak near each predicted position.
+
+```
+neotube-infer \
+  --posterior-json runs/ceres/00_fit/posterior.json \
+  --replicas runs/ceres/01_replicas/replicas.csv \
+  --cutouts-index runs/ceres/cutouts/cutouts_index.csv \
+  --out-dir runs/ceres/06_infer/ \
+  --workers 50 \
+  --fwhm-arcsec 2.0 \
+  --search-radius-px 6
+```
 
 ## How to extend
 
