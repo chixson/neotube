@@ -471,6 +471,8 @@ def fit_orbit(
     max_kappa: float = 10.0,
     estimate_site_scales_method: str = "mad",
     estimate_site_scales_iters: int = 5,
+    estimate_site_scales_alpha: float = 0.4,
+    estimate_site_scales_tol: float = 1e-3,
     sigma_floor: float = 0.0,
     internal_run: bool = False,
 ) -> OrbitPosterior:
@@ -519,10 +521,16 @@ def fit_orbit(
             return kappas
 
         method = estimate_site_scales_method
-        if method not in ("mad", "chi2", "iterative"):
+        if method not in ("mad", "chi2", "iterative", "studentt_em"):
             method = "mad"
 
-        site_kappas: dict[str, float] = {(ob.site or "UNK"): 1.0 for ob in observations}
+        alpha = float(estimate_site_scales_alpha)
+        tol_kappa = float(estimate_site_scales_tol)
+        sigma_floor_val = float(sigma_floor)
+        nu_val_local = max(1.0, float(nu))
+
+        sites = sorted({(ob.site or "UNK") for ob in observations})
+        site_kappas: dict[str, float] = {s: 1.0 for s in sites}
 
         if method in ("mad", "chi2"):
             try:
@@ -548,6 +556,82 @@ def fit_orbit(
                 prelim = None
             if prelim is not None:
                 site_kappas = _compute_site_kappas_from_prelim(prelim, method=method)
+        elif method == "studentt_em":
+            for _ in range(max(1, estimate_site_scales_iters)):
+                obs_scaled = copy.deepcopy(observations)
+                for ob in obs_scaled:
+                    s = ob.site or "UNK"
+                    ob.sigma_arcsec = max(
+                        sigma_floor_val,
+                        float(ob.sigma_arcsec) * float(site_kappas.get(s, 1.0)),
+                    )
+                try:
+                    prelim = fit_orbit(
+                        target,
+                        obs_scaled,
+                        perturbers=perturbers,
+                        max_iter=max(3, max_iter // 2),
+                        tol=tol,
+                        max_step=max_step,
+                        use_kepler=use_kepler,
+                        seed_method=seed_method,
+                        likelihood="studentt",
+                        nu=nu,
+                        estimate_site_scales=False,
+                        internal_run=True,
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        f"Student-t EM preliminary fit failed: {exc}",
+                        RuntimeWarning,
+                    )
+                    prelim = None
+                if prelim is None:
+                    break
+
+                res = prelim.residuals
+                weights = np.zeros_like(res, dtype=float)
+                for i, ob in enumerate(observations):
+                    s = ob.site or "UNK"
+                    sigma_i = max(
+                        sigma_floor_val,
+                        float(ob.sigma_arcsec) * float(site_kappas.get(s, 1.0)),
+                    )
+                    for comp in (0, 1):
+                        idx = 2 * i + comp
+                        tval = res[idx] / sigma_i
+                        weights[idx] = (nu_val_local + 1.0) / (nu_val_local + tval * tval)
+
+                new_kappas: dict[str, float] = {}
+                for s in sites:
+                    idxs = [i for i, ob in enumerate(observations) if (ob.site or "UNK") == s]
+                    if not idxs:
+                        new_kappas[s] = site_kappas[s]
+                        continue
+                    wsum = 0.0
+                    rss = 0.0
+                    for i in idxs:
+                        for comp in (0, 1):
+                            idx = 2 * i + comp
+                            rss += weights[idx] * (res[idx] ** 2)
+                            wsum += weights[idx]
+                    if wsum <= 0:
+                        new_kappas[s] = site_kappas[s]
+                        continue
+                    s_j = (rss / wsum) ** 0.5
+                    sigma_med = float(
+                        np.median(
+                            [ob.sigma_arcsec for ob in observations if (ob.site or "UNK") == s]
+                        )
+                    )
+                    k_est = max(1.0, s_j / max(1e-12, sigma_med))
+                    k_est = float(np.clip(k_est, 1.0, max_kappa))
+                    new_kappas[s] = (1.0 - alpha) * site_kappas[s] + alpha * k_est
+
+                max_change = max(abs(new_kappas[s] - site_kappas[s]) for s in sites)
+                site_kappas = new_kappas
+                if max_change < tol_kappa:
+                    break
         else:
             prev_kappas: dict[str, float] | None = None
             for _ in range(max(1, estimate_site_scales_iters)):
@@ -580,14 +664,16 @@ def fit_orbit(
                 if prev_kappas is not None:
                     all_sites = set(prev_kappas.keys()) | set(computed.keys())
                     max_change = max(abs(prev_kappas.get(s, 1.0) - computed.get(s, 1.0)) for s in all_sites)
-                    if max_change < 1e-3:
+                    if max_change < tol_kappa:
                         site_kappas = computed
                         break
                 prev_kappas = computed
                 for ob in observations:
                     s = ob.site or "UNK"
                     kappa = computed.get(s, 1.0)
-                    ob.sigma_arcsec = max(float(sigma_floor), float(ob.sigma_arcsec) * float(kappa))
+                    ob.sigma_arcsec = max(
+                        sigma_floor_val, float(ob.sigma_arcsec) * float(kappa)
+                    )
             if prev_kappas is not None:
                 site_kappas = prev_kappas
 
@@ -598,7 +684,9 @@ def fit_orbit(
         for ob in obs_scaled:
             site = ob.site or "UNK"
             kappa = site_kappas.get(site, 1.0)
-            ob.sigma_arcsec = max(float(sigma_floor), float(ob.sigma_arcsec) * float(kappa))
+            ob.sigma_arcsec = max(
+                sigma_floor_val, float(ob.sigma_arcsec) * float(kappa)
+            )
 
         posterior = fit_orbit(
             target,

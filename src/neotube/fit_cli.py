@@ -92,15 +92,27 @@ def main() -> int:
     )
     parser.add_argument(
         "--estimate-site-scales-method",
-        choices=["mad", "chi2", "iterative"],
+        choices=["mad", "chi2", "iterative", "studentt_em"],
         default="mad",
-        help="Method to estimate per-site scale factors: 'mad' (robust MAD), 'chi2' (single-pass sqrt(chi2/dof)), or 'iterative' (iterative chi2-rescale).",
+        help="Method to estimate per-site scale factors: 'mad', 'chi2', 'iterative', or 'studentt_em' (EM Student-t).",
     )
     parser.add_argument(
         "--estimate-site-scales-iters",
         type=int,
         default=5,
         help="Maximum iterations for the 'iterative' site-scale estimator (default 5).",
+    )
+    parser.add_argument(
+        "--estimate-site-scales-alpha",
+        type=float,
+        default=0.4,
+        help="Damping factor (0..1) applied to kappa updates in iterative estimators (default 0.4).",
+    )
+    parser.add_argument(
+        "--estimate-site-scales-tol",
+        type=float,
+        default=1e-3,
+        help="Convergence tolerance for per-site kappa changes (default 1e-3).",
     )
     parser.add_argument(
         "--sigma-floor",
@@ -141,6 +153,8 @@ def main() -> int:
             max_kappa=args.max_kappa,
             estimate_site_scales_method=args.estimate_site_scales_method,
             estimate_site_scales_iters=args.estimate_site_scales_iters,
+            estimate_site_scales_alpha=args.estimate_site_scales_alpha,
+            estimate_site_scales_tol=args.estimate_site_scales_tol,
             sigma_floor=args.sigma_floor,
             use_kepler=not args.no_kepler,
         )
