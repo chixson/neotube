@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import shutil
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -77,6 +78,13 @@ def plot_pca(
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
 
+def mirror_to_data_dir(*paths: Path) -> None:
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for path in paths:
+        if path.exists():
+            shutil.copy2(path, data_dir / path.name)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Plot RA/Dec and PCA spread of replicas.")
@@ -109,6 +117,7 @@ def main() -> int:
     if jpl_offset is not None:
         jpl_pc = tuple((eigvecs.T @ np.array(jpl_offset)).tolist())
     plot_pca(pc1, pc2, pca_path, jpl_pc)
+    mirror_to_data_dir(radec_path, pca_path)
     return 0
 
 
