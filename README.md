@@ -1,31 +1,16 @@
-# FITSAlongFit / NEOTube
+# NEOTube CLI Bundle
 
-FITSAlongFit is the structured driver for the **NEOTube / SSO precovery** ecosystem: start with observations, build a probabilistic orbit/tube, query archives, download cutouts (science/reference/difference), and then stack/detect along candidate paths. The polite downloader is one piece of this stack, but the **primary mission** is to coordinate uncertainty-aware search plans + inference across archives such as ZTF, NOIRLab, and future services.
+This package implements the complete NEOTube / SSO precovery pipeline: ingest observations, solve for an orbit posterior (with Horizons/observation/Gauss/attributable seeds), sample replicas, propagate them across exposures, compress them into tube nodes, query ZTF IRSA (with optional ZOGY subtraction), and run matched-filter inference to flag strong candidates.
 
-## Project overview
+## Quick orientation
 
-- **Observation ingestion** (`runs/ceres/obs.csv` is an example): capture `t_utc`, `ra_deg`, `dec_deg`, `sigma_arcsec`, and `site` (MPC code). All downstream steps rely on this canonical input.
-- **Orbit posterior**: `neotube-fit` solves the orbit via LM, supports seeds from Horizons/observations/Gauss/attributable, and writes `posterior.{npz,json}` plus residuals so replicas can be sampled reproducibly.
-- **Replica/tube workflow**: `neotube-replicas`, `neotube-propcloud`, and `neotube-tube` turn the posterior into spatial tubes (per-exposure center + radius quantiles) that safely describe where your object could be.
-- **Archive planning**: `neotube-plan` and `neotube-ztf` (with ZOGY subtraction support) query ZTF/IRSA, download cutouts, and cache metadata for later inference.
-- **Inference & diagnostics**: `neotube-infer` reweights replicas per exposure using matched-filter SNR statistics, and `neotube-diag`/`neotube-diag-overlay` visualize coverage and the replica-to-image alignment.
+- **Observation ingestion**: input CSV must include `t_utc`, `ra_deg`, `dec_deg`, `sigma_arcsec`, `site` (MPC code). Example: `runs/ceres/obs.csv`.
+- **Orbit posterior**: `neotube-fit` produces `posterior.npz/json`, logs residuals, and now supports deterministic seeds (`horizons`, `observations`, `gauss`, `attributable`).
+- **Replica/tube**: `neotube-replicas`, `neotube-propcloud`, and `neotube-tube` convert the posterior into per-exposure tube nodes that drive planning.
+- **Archive planning**: `neotube-plan` plus `neotube-ztf` fetch metadata + science/reference/ZOGY cutouts while respecting IRSA rate limits and caching.
+- **Inference**: `neotube-infer` reweights replicas using matched-filter SNR maps (ZOGY when available), and the diagnostic CLIs expose coverage plots and overlays.
 
-## Getting started
-
-1. Create a venv and install dependencies:
-
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -e .
-   ```
-
-2. Prepare your observation CSV (a sample is `runs/ceres/obs.csv`). `sigma_arcsec` defaults to 0.5″ if absent, but the fitter logs problems when all measurements share the same error.
-3. Run the CLI stack. The README below documents the full command chain, but the most critical commands are `neotube-fit`, `neotube-plan`, `neotube-ztf`, and `neotube-infer`.
-
-## CLI workflow
-
-Each command writes artifacts that feed the next stage. A high-level run looks like:
+## Run example (Ceres)
 
 ```bash
 neotube-fit --obs runs/ceres/obs.csv --target 00001 --seed-method attributable --out-dir runs/ceres/fit_seed_attributable
@@ -37,21 +22,15 @@ neotube-ztf --plan runs/ceres/plan_attributable.csv --out runs/ceres/cutouts --s
 neotube-infer --posterior-json runs/ceres/fit_seed_attributable/posterior.json --replicas runs/ceres/replicas_attributable.csv --cutouts-index runs/ceres/cutouts/cutouts_index.csv --out-dir runs/ceres/infer_attributable
 ```
 
-## Tip highlights
+## Philosophy
 
-- **Seed strategy**: `neotube-fit` now defaults to the attributable grid initializer; `--seed-method` lets you switch between Horizons/observation-based/Gauss seeds when appropriate.
-- **Polite archive usage**: `neotube-plan` caches metadata, respects rate limits/Retry-After, and logs `Server-Timing` when available. `neotube-ztf` downloads science/reference/ZOGY outputs and records request IDs for observability.
-- **ZOGY awareness**: When ZOGY difference cutouts exist, inference uses the matched-filter SNR maps to evaluate each replica’s predicted position.
-- **Diagnostics**: `neotube-diag` compares planned centers vs. metadata, `neotube-diag-overlay` paints replica clouds on cutouts, and `runs/ceres/replica_spread_vs_jpl.png` and `attributable_spread_first_image.png` are concrete outputs you can inspect.
+- **Seed flexibility**: use the attributable grid by default, or switch to Horizons/observations/Gauss seeds via `--seed-method`.
+- **Replica/tube clarity**: propagate once per replica, compute tube nodes (time + radius), and use them for targeted metadata queries.
+- **Polite IRSA usage**: `neotube-plan` caches requests, respects rate limits, and logs request IDs/`Server-Timing`; `neotube-ztf` exposes the downloaded cutouts and ZOGY outputs.
+- **Inference diagnostics**: overlay replica clouds via `neotube-diag-overlay`, inspect spreads with the provided plots, and monitor evidence logs in `runs/ceres/`.
 
-## Repo organization
+## Development notes
 
-- `neotube/`: Python package implementing clients, fit/infer logic, propagation, tube planning, and CLI anchors.
-- `runs/`: example pipelines (Ceres, fit artifacts, cached cutouts, diagnostic plots, etc.). Big cutout directories are ignored via `.gitignore`.
-- `docs/`: architectural notes plus CLI reference documentation for NEOTube steps.
-- `deprecated/`: legacy SSOIS/Scout prototypes for historical reference.
-
-## See also
-
-- `docs/ARCHITECTURE.md` for a deep dive into the NEOTube pipeline shape.
-- `runs/ceres/` for concrete experiments (fit outputs, propagation logs, cutouts, inference traces).
+- `pyproject.toml` declares the CLI entry points.
+- Install dev dependencies with `pip install -e .[dev]`. Tests rely on `pytest`, formatting on `black`, linting on `ruff`.
+*** End Patch***  
