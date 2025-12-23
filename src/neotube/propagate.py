@@ -46,25 +46,39 @@ PLANET_GMS = {
 }
 
 def _stumpff_C2(z: float) -> float:
-    if z > 1e-8:
-        s = np.sqrt(z)
-        return float((1.0 - np.cos(s)) / z)
-    if z < -1e-8:
-        s = np.sqrt(-z)
-        return float((np.cosh(s) - 1.0) / (-z))
-    # series expansion near 0
-    return 0.5
+    try:
+        if z > 1e-8:
+            s = np.sqrt(z)
+            if s > 1e6:
+                raise OverflowError("stumpff C2 input s too large")
+            return float((1.0 - np.cos(s)) / z)
+        if z < -1e-8:
+            s = np.sqrt(-z)
+            if s > 1e6:
+                raise OverflowError("stumpff C2 input s too large")
+            return float((np.cosh(s) - 1.0) / (-z))
+        # series expansion near 0
+        return 0.5
+    except FloatingPointError as exc:
+        raise ValueError(f"stumpff_C2 overflow for z={z}") from exc
 
 
 def _stumpff_C3(z: float) -> float:
-    if z > 1e-8:
-        s = np.sqrt(z)
-        return float((s - np.sin(s)) / (s**3))
-    if z < -1e-8:
-        s = np.sqrt(-z)
-        return float((np.sinh(s) - s) / (s**3))
-    # series expansion near 0
-    return 1.0 / 6.0
+    try:
+        if z > 1e-8:
+            s = np.sqrt(z)
+            if s > 1e6:
+                raise OverflowError("stumpff C3 input s too large")
+            return float((s - np.sin(s)) / (s**3))
+        if z < -1e-8:
+            s = np.sqrt(-z)
+            if s > 1e6:
+                raise OverflowError("stumpff C3 input s too large")
+            return float((np.sinh(s) - s) / (s**3))
+        # series expansion near 0
+        return 1.0 / 6.0
+    except FloatingPointError as exc:
+        raise ValueError(f"stumpff_C3 overflow for z={z}") from exc
 
 
 def propagate_state_kepler(
@@ -110,8 +124,8 @@ def propagate_state_kepler(
         success = False
         for _ in range(max_iter):
             z = alpha * chi * chi
-            if not np.isfinite(z):
-                raise ValueError(f"Kepler solver produced non-finite z for dt={dt}")
+            if not np.isfinite(z) or abs(z) > 1.0e6:
+                raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
             C2 = _stumpff_C2(z)
             C3 = _stumpff_C3(z)
             F = (
@@ -129,6 +143,8 @@ def propagate_state_kepler(
             if not np.isfinite(step):
                 raise ValueError(f"Kepler update became non-finite for dt={dt}")
             chi -= step
+            if not np.isfinite(chi) or abs(chi) > 1.0e8:
+                raise ValueError(f"Kepler universal-anomaly chi unstable (chi={chi:.3e}) for dt={dt}")
             if abs(step) < tol:
                 success = True
                 break

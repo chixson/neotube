@@ -5,7 +5,7 @@ This package implements the complete NEOTube / SSO precovery pipeline: ingest ob
 ## Quick orientation
 
 - **Observation ingestion**: input CSV must include `t_utc`, `ra_deg`, `dec_deg`, `sigma_arcsec`, `site` (MPC code). Example: `runs/ceres/obs.csv`.
-- **Orbit posterior**: `neotube-fit` produces `posterior.npz/json`, logs residuals, and now supports deterministic seeds (`horizons`, `observations`, `gauss`, `attributable`).
+- **Orbit posterior**: `neotube-fit` produces `posterior.npz/json`, logs residuals, supports deterministic seeds (`horizons`, `observations`, `gauss`, `attributable`), and can estimate per-site sigma scales (`--estimate-site-scales`).
 - **Replica/tube**: `neotube-replicas`, `neotube-propcloud`, and `neotube-tube` convert the posterior into per-exposure tube nodes that drive planning.
 - **Archive planning**: `neotube-plan` plus `neotube-ztf` fetch metadata + science/reference/ZOGY cutouts while respecting IRSA rate limits and caching.
 - **Inference**: `neotube-infer` reweights replicas using matched-filter SNR maps (ZOGY when available), and the diagnostic CLIs expose coverage plots and overlays.
@@ -14,7 +14,7 @@ This package implements the complete NEOTube / SSO precovery pipeline: ingest ob
 ## Run example (Ceres)
 
 ```bash
-neotube-fit --obs runs/ceres/obs.csv --target 00001 --seed-method attributable --out-dir runs/ceres/fit_seed_attributable
+neotube-fit --obs runs/ceres/obs.csv --target 00001 --seed-method attributable --out-dir runs/ceres/fit_seed_attributable --estimate-site-scales
 neotube-replicas --posterior runs/ceres/fit_seed_attributable/posterior.npz --n 2000 --output runs/ceres/replicas_attributable.csv
 neotube-propcloud --replicas runs/ceres/replicas_attributable.csv --meta runs/ceres/replicas_attributable_meta.json --times runs/ceres/times_first_cutout.csv --output runs/ceres/cloud_attributable.csv
 neotube-tube --cloud runs/ceres/cloud_attributable.csv --cred 0.99 --margin-arcsec 20 --output runs/ceres/tube_attributable.csv

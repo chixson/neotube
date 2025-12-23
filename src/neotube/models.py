@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from astropy.time import Time
@@ -26,3 +26,4 @@ class OrbitPosterior:
     seed_rms_arcsec: float | None = None
     fit_scale: float = 1.0
     nu: float | None = None
+    site_kappas: dict[str, float] = field(default_factory=dict)

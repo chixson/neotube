@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import warnings
 from pathlib import Path
@@ -245,6 +246,7 @@ def _initial_state_from_attributable(
     typical_speeds = np.logspace(np.log10(5.0), np.log10(40.0), 5)
     for speed in typical_speeds:
         rho = speed / max(np.linalg.norm(s_dot), 1e-8)
+        rho = float(np.clip(rho, 1e4, 5e8))
         r_gc = site_offset + rho * s
         v_gc = rho * s_dot
         r_helio = earth_pos_helio + r_gc
@@ -365,6 +367,14 @@ def load_posterior(path: Path | str) -> OrbitPosterior:
     seed_rms_val = float(seed_rms) if np.isfinite(seed_rms) else None
     fit_scale = float(data.get("fit_scale", 1.0))
     nu = float(data.get("nu", 4.0))
+    site_kappas = {}
+    site_kappas_json = data.get("site_kappas", None)
+    if site_kappas_json is not None:
+        try:
+            raw = site_kappas_json.tolist() if hasattr(site_kappas_json, "tolist") else site_kappas_json
+            site_kappas = json.loads(raw)
+        except Exception:
+            site_kappas = {}
     return OrbitPosterior(
         epoch=epoch,
         state=state,
@@ -375,6 +385,7 @@ def load_posterior(path: Path | str) -> OrbitPosterior:
         seed_rms_arcsec=seed_rms_val,
         fit_scale=fit_scale,
         nu=nu,
+        site_kappas=site_kappas,
     )
 
 
@@ -391,7 +402,7 @@ def _predict_batch(
     if use_kepler:
         try:
             propagated = propagate_state_kepler(state, epoch, times)
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             warnings.warn(
                 f"Kepler propagation failed; falling back to full propagation ({exc})",
                 RuntimeWarning,
@@ -456,6 +467,9 @@ def fit_orbit(
     seed_method: str | None = None,
     likelihood: str = "gaussian",
     nu: float = 4.0,
+    estimate_site_scales: bool = False,
+    max_kappa: float = 10.0,
+    internal_run: bool = False,
 ) -> OrbitPosterior:
     observations = sorted(observations, key=lambda ob: ob.time)
     epoch = observations[len(observations) // 2].time
@@ -471,6 +485,75 @@ def fit_orbit(
         state = _initial_state_from_attributable(observations, epoch)
     else:
         raise ValueError(f"Unknown seed_method '{seed_method}'")
+
+    if estimate_site_scales and not internal_run:
+        try:
+            prelim = fit_orbit(
+                target,
+                observations,
+                perturbers=perturbers,
+                max_iter=max(3, max_iter // 2),
+                tol=tol,
+                max_step=max_step,
+                use_kepler=use_kepler,
+                seed_method=seed_method,
+                likelihood=likelihood,
+                nu=nu,
+                estimate_site_scales=False,
+                internal_run=True,
+            )
+        except Exception as exc:
+            warnings.warn(
+                f"Preliminary fit for site-scale estimation failed: {exc}",
+                RuntimeWarning,
+            )
+            prelim = None
+
+        site_kappas: dict[str, float] = {}
+        if prelim is not None:
+            res = prelim.residuals
+            site_groups: dict[str, list[float]] = {}
+            for i, ob in enumerate(observations):
+                site = ob.site or "UNK"
+                ra_norm = float(res[2 * i] / ob.sigma_arcsec)
+                dec_norm = float(res[2 * i + 1] / ob.sigma_arcsec)
+                site_groups.setdefault(site, []).extend([abs(ra_norm), abs(dec_norm)])
+            for site, vals in site_groups.items():
+                arr = np.array(vals, dtype=float)
+                if arr.size == 0:
+                    kappa = 1.0
+                else:
+                    mad = float(np.median(np.abs(arr - np.median(arr))))
+                    kappa = max(1.0, mad / 0.6744898)
+                kappa = float(np.clip(kappa, 1.0, max_kappa))
+                site_kappas[site] = kappa
+
+        if not site_kappas:
+            for ob in observations:
+                site_kappas[ob.site or "UNK"] = 1.0
+
+        obs_scaled = copy.deepcopy(observations)
+        for ob in obs_scaled:
+            site = ob.site or "UNK"
+            kappa = site_kappas.get(site, 1.0)
+            ob.sigma_arcsec = float(ob.sigma_arcsec) * float(kappa)
+
+        posterior = fit_orbit(
+            target,
+            obs_scaled,
+            perturbers=perturbers,
+            max_iter=max_iter,
+            tol=tol,
+            max_step=max_step,
+            use_kepler=use_kepler,
+            seed_method=seed_method,
+            likelihood=likelihood,
+            nu=nu,
+            estimate_site_scales=False,
+            internal_run=True,
+        )
+        posterior.site_kappas = site_kappas
+        return posterior
 
     base_eps = np.array([10.0, 10.0, 10.0, 1e-4, 1e-4, 1e-4], dtype=float)
     prior_variances = np.array([1e6, 1e6, 1e6, 1e-2, 1e-2, 1e-2], dtype=float)
@@ -603,6 +686,9 @@ def load_posterior_json(path: str | Path) -> OrbitPosterior:
     rms = float(fit.get("rms_arcsec", float("nan")))
     seed_rms = fit.get("seed_rms_arcsec", None)
     seed_rms = float(seed_rms) if seed_rms is not None else None
+    fit_scale = float(data.get("fit_scale", fit.get("fit_scale", 1.0)))
+    nu = float(data.get("nu", fit.get("nu", 4.0)))
+    site_kappas = data.get("site_kappas", fit.get("site_kappas", {}))
 
     residuals = np.array([], dtype=float)
     if not np.isfinite(rms):
@@ -617,5 +703,7 @@ def load_posterior_json(path: str | Path) -> OrbitPosterior:
         rms_arcsec=rms,
         converged=converged,
         seed_rms_arcsec=seed_rms if (seed_rms is None or np.isfinite(seed_rms)) else None,
+        fit_scale=fit_scale,
+        nu=nu,
+        site_kappas=site_kappas,
     )
-

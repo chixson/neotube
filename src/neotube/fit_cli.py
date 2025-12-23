@@ -74,6 +74,22 @@ def main() -> int:
         default=4.0,
         help="Degrees of freedom for Student-t likelihood (used when --likelihood studentt).",
     )
+    parser.add_argument(
+        "--no-kepler",
+        action="store_true",
+        help="Disable Kepler propagation and force the full ODE integrator.",
+    )
+    parser.add_argument(
+        "--estimate-site-scales",
+        action="store_true",
+        help="Estimate per-site sigma scaling factors via a preliminary fit and re-fit with scaled sigmas.",
+    )
+    parser.add_argument(
+        "--max-kappa",
+        type=float,
+        default=10.0,
+        help="Maximum allowed per-site kappa when estimating site scales.",
+    )
     parser.add_argument("--out-dir", type=Path, required=True, help="Directory to write artifacts.")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARN"], default="INFO", help="Logging level.")
     args = parser.parse_args()
@@ -103,6 +119,9 @@ def main() -> int:
             seed_method=args.seed_method,
             likelihood=args.likelihood,
             nu=args.nu,
+            estimate_site_scales=args.estimate_site_scales,
+            max_kappa=args.max_kappa,
+            use_kepler=not args.no_kepler,
         )
     except RuntimeError as exc:
         summary = {
@@ -162,6 +181,9 @@ def main() -> int:
         "fit_scale": float(getattr(posterior, "fit_scale", 1.0)),
         "nu": float(getattr(posterior, "nu", 4.0)),
     }
+    if getattr(posterior, "site_kappas", None):
+        posterior_json["fit"]["site_kappas"] = posterior.site_kappas
+        posterior_json["site_kappas"] = posterior.site_kappas
 
     npz_path = args.out_dir / "posterior.npz"
     np.savez(
@@ -175,6 +197,7 @@ def main() -> int:
         seed_rms=posterior.seed_rms_arcsec if posterior.seed_rms_arcsec is not None else np.nan,
         fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
         nu=float(getattr(posterior, "nu", 4.0)),
+        site_kappas=json.dumps(getattr(posterior, "site_kappas", {})),
     )
 
     with open(args.out_dir / "posterior.json", "w") as fh:
