@@ -10,6 +10,8 @@ from astropy import units as u
 from astropy.coordinates import (
     CartesianDifferential,
     CartesianRepresentation,
+    GCRS,
+    ICRS,
     get_body_barycentric_posvel,
     HeliocentricTrueEcliptic,
     SkyCoord,
@@ -116,43 +118,6 @@ def _initial_state_from_two_points(observations: list[Observation]) -> np.ndarra
 
 
 def _initial_state_from_observations(observations: list[Observation]) -> np.ndarray:
-    if len(observations) < 3:
-        return _initial_state_from_two_points(observations)
-
-    t1 = observations[0]
-    t2 = observations[len(observations) // 2]
-    t3 = observations[-1]
-    R2, rho2 = _observation_line_of_sight(t2)
-
-    ra1 = observations[0].ra_deg
-    ra3 = observations[-1].ra_deg
-    dec1 = observations[0].dec_deg
-    dec3 = observations[-1].dec_deg
-    delta_ra = (((ra3 - ra1 + 180.0) % 360.0) - 180.0) * np.deg2rad
-    delta_dec = (dec3 - dec1) * np.deg2rad
-    dt_total = float((t3.time - t1.time).to(u.s).value)
-    if abs(dt_total) < 1.0:
-        dt_total = 1.0
-
-    ra_rate = delta_ra / dt_total
-    dec_rate = delta_dec / dt_total
-
-    cos_dec = np.cos(np.deg2rad(t2.dec_deg))
-    ang_rate = np.hypot(ra_rate * cos_dec, dec_rate)
-    typical_speed = 30.0  # km/s (approx)
-    range_km = typical_speed / max(ang_rate, 1e-10)
-    range_km = np.clip(range_km, 1e5, 5e8)
-
-    ra_rad = np.deg2rad(t2.ra_deg)
-    dec_rad = np.deg2rad(t2.dec_deg)
-    east = np.array([-np.sin(ra_rad), np.cos(ra_rad), 0.0], dtype=float)
-    north = np.array([-np.sin(dec_rad) * np.cos(ra_rad), -np.sin(dec_rad) * np.sin(ra_rad), np.cos(dec_rad)], dtype=float)
-
-    v_tang = range_km * (ra_rate * cos_dec * east + dec_rate * north)
-    return np.concatenate([R2 + range_km * rho2, v_tang])
-
-
-def _initial_state_from_observations(observations: list[Observation]) -> np.ndarray:
     if len(observations) < 2:
         raise ValueError("Need at least two observations to build an initial state.")
 
@@ -176,6 +141,128 @@ def _initial_state_from_observations(observations: list[Observation]) -> np.ndar
         dt = 1.0
     vel = (pos1 - pos0) / dt
     return np.concatenate([pos0, vel])
+
+
+def _compute_attributable(observations: list[Observation], epoch: Time):
+    times = np.array([(ob.time - epoch).to(u.s).value for ob in observations], dtype=float)
+    ra_rad = np.unwrap(np.deg2rad(np.array([ob.ra_deg for ob in observations], dtype=float)))
+    dec_rad = np.deg2rad(np.array([ob.dec_deg for ob in observations], dtype=float))
+
+    A = np.vstack([np.ones_like(times), times]).T
+    coeffs_ra, *_ = np.linalg.lstsq(A, ra_rad, rcond=None)
+    coeffs_dec, *_ = np.linalg.lstsq(A, dec_rad, rcond=None)
+
+    ra0, ra_dot = coeffs_ra
+    dec0, dec_dot = coeffs_dec
+    return ra0, dec0, ra_dot, dec_dot
+
+
+def _s_and_sdot_from_ra_dec(ra: float, dec: float, ra_dot: float, dec_dot: float) -> tuple[np.ndarray, np.ndarray]:
+    cr = np.cos(ra)
+    sr = np.sin(ra)
+    cd = np.cos(dec)
+    sd = np.sin(dec)
+    s = np.array([cd * cr, cd * sr, sd], dtype=float)
+    s_dot = np.array(
+        [
+            -cd * sr * ra_dot - sd * cr * dec_dot,
+            cd * cr * ra_dot - sd * sr * dec_dot,
+            cd * dec_dot,
+        ],
+        dtype=float,
+    )
+    return s, s_dot
+
+
+def _line_intersection(
+    p1: np.ndarray, d1: np.ndarray, p2: np.ndarray, d2: np.ndarray
+) -> np.ndarray | None:
+    cross_d = np.cross(d1, d2)
+    denom = np.dot(cross_d, cross_d)
+    if denom < 1e-12:
+        return None
+    t = np.dot(np.cross(p2 - p1, d2), cross_d) / denom
+    return p1 + d1 * t
+
+
+def _initial_state_from_gauss(observations: list[Observation]) -> np.ndarray:
+    if len(observations) < 3:
+        return _initial_state_from_observations(observations)
+
+    obs1, obs2, obs3 = observations[0], observations[len(observations) // 2], observations[-1]
+    p1, d1 = _observation_line_of_sight(obs1)
+    p2, d2 = _observation_line_of_sight(obs2)
+    p3, d3 = _observation_line_of_sight(obs3)
+
+    points = []
+    for (p_a, d_a), (p_b, d_b) in (( (p1, d1), (p2, d2) ), ( (p1, d1), (p3, d3) ), ( (p2, d2), (p3, d3) )):
+        pt = _line_intersection(p_a, d_a, p_b, d_b)
+        if pt is not None:
+            points.append(pt)
+    if not points:
+        center = p2
+        start = p1
+        end = p3
+    else:
+        center = np.mean(points, axis=0)
+        start = points[0]
+        end = points[-1] if len(points) > 1 else points[0]
+
+    dt = float((obs3.time - obs1.time).to(u.s).value)
+    if abs(dt) < 1e-2:
+        dt = 1.0
+    vel = end - start
+    vel = vel / dt
+    return np.concatenate([center, vel])
+
+
+def _initial_state_from_attributable(
+    observations: list[Observation],
+    epoch: Time,
+    perturbers: Sequence[str] = ("earth", "mars", "jupiter"),
+    max_step: float = 3600.0,
+    site_choice: str | None = None,
+) -> np.ndarray:
+    ra0, dec0, ra_dot, dec_dot = _compute_attributable(observations, epoch)
+    s, s_dot = _s_and_sdot_from_ra_dec(ra0, dec0, ra_dot, dec_dot)
+
+    earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
+    sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
+    earth_pos_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
+    earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+
+    site_code = site_choice or observations[0].site
+    site_offset = np.zeros(3, dtype=float)
+    if site_code:
+        loc = get_site_location(site_code)
+        if loc is not None:
+            gcrs = loc.get_gcrs(obstime=epoch)
+            icrs = gcrs.transform_to(ICRS())
+            site_offset = icrs.cartesian.xyz.to(u.km).value.flatten()
+
+    best_state = None
+    best_rms = np.inf
+    typical_speeds = np.logspace(np.log10(5.0), np.log10(40.0), 5)
+    for speed in typical_speeds:
+        rho = speed / max(np.linalg.norm(s_dot), 1e-8)
+        r_gc = site_offset + rho * s
+        v_gc = rho * s_dot
+        r_helio = earth_pos_helio + r_gc
+        v_helio = earth_vel_helio + v_gc
+        cand_state = np.concatenate([r_helio, v_helio])
+        try:
+            pred_ra, pred_dec = _predict_batch(cand_state, epoch, observations, perturbers, max_step, use_kepler=True)
+        except Exception:
+            continue
+        res = _tangent_residuals(pred_ra, pred_dec, observations)
+        rms = np.sqrt(np.mean(res**2))
+        if rms < best_rms:
+            best_rms = rms
+            best_state = cand_state
+
+    if best_state is None:
+        raise RuntimeError("Could not find an attributable-based initial state.")
+    return best_state
 
 
 def _tangent_residuals(
@@ -279,15 +366,20 @@ def fit_orbit(
     tol: float = 1.0,
     max_step: float = 3600.0,
     use_kepler: bool = True,
-    use_horizons_seed: bool = False,
+    seed_method: str = "attributable",
 ) -> OrbitPosterior:
     observations = sorted(observations, key=lambda ob: ob.time)
     epoch = observations[len(observations) // 2].time
-    state = (
-        _initial_state_from_horizons(target, epoch)
-        if use_horizons_seed
-        else _initial_state_from_observations(observations)
-    )
+    if seed_method == "horizons":
+        state = _initial_state_from_horizons(target, epoch)
+    elif seed_method == "observations":
+        state = _initial_state_from_observations(observations)
+    elif seed_method == "gauss":
+        state = _initial_state_from_gauss(observations)
+    elif seed_method == "attributable":
+        state = _initial_state_from_attributable(observations, epoch, perturbers=perturbers, max_step=max_step)
+    else:
+        raise ValueError(f"Unknown seed_method '{seed_method}'")
 
     base_eps = np.array([10.0, 10.0, 10.0, 1e-4, 1e-4, 1e-4], dtype=float)
     prior_variances = np.array([1e6, 1e6, 1e6, 1e-2, 1e-2, 1e-2], dtype=float)

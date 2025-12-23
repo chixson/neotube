@@ -56,7 +56,12 @@ def main() -> int:
     parser.add_argument("--perturbers", nargs="+", default=["earth", "mars", "jupiter"], help="Perturbers for fit.")
     parser.add_argument("--max-step", type=float, default=3600.0, help="Max step (seconds) for integration.")
     parser.add_argument("--max-iter", type=int, default=6, help="Max Gauss-Newton iterations.")
-    parser.add_argument("--use-horizons-seed", action="store_true", help="Seed the initial state from Horizons.")
+    parser.add_argument(
+        "--seed-method",
+        choices=["horizons", "observations", "gauss", "attributable"],
+        default="attributable",
+        help="Seed initializer: horizons, observations, gauss, or attributable.",
+    )
     parser.add_argument("--out-dir", type=Path, required=True, help="Directory to write artifacts.")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARN"], default="INFO", help="Logging level.")
     args = parser.parse_args()
@@ -69,6 +74,7 @@ def main() -> int:
         "perturbers": args.perturbers,
         "sigma_arcsec": args.sigma_arcsec,
         "obs_file": str(args.obs),
+        "seed_method": args.seed_method,
     }
     with open(args.out_dir / "fit_params.json", "w") as fh:
         json.dump(params, fh, indent=2)
@@ -80,7 +86,7 @@ def main() -> int:
             perturbers=tuple(args.perturbers),
             max_step=args.max_step,
             max_iter=args.max_iter,
-            use_horizons_seed=args.use_horizons_seed,
+            seed_method=args.seed_method,
         )
     except RuntimeError as exc:
         summary = {
