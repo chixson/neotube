@@ -56,6 +56,7 @@ def main() -> int:
     parser.add_argument("--perturbers", nargs="+", default=["earth", "mars", "jupiter"], help="Perturbers for fit.")
     parser.add_argument("--max-step", type=float, default=3600.0, help="Max step (seconds) for integration.")
     parser.add_argument("--max-iter", type=int, default=6, help="Max Gauss-Newton iterations.")
+    parser.add_argument("--use-horizons-seed", action="store_true", help="Seed the initial state from Horizons.")
     parser.add_argument("--out-dir", type=Path, required=True, help="Directory to write artifacts.")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARN"], default="INFO", help="Logging level.")
     args = parser.parse_args()
@@ -79,6 +80,7 @@ def main() -> int:
             perturbers=tuple(args.perturbers),
             max_step=args.max_step,
             max_iter=args.max_iter,
+            use_horizons_seed=args.use_horizons_seed,
         )
     except RuntimeError as exc:
         summary = {

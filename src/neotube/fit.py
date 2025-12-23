@@ -10,6 +10,7 @@ from astropy import units as u
 from astropy.coordinates import (
     CartesianDifferential,
     CartesianRepresentation,
+    get_body_barycentric_posvel,
     HeliocentricTrueEcliptic,
     SkyCoord,
 )
@@ -22,6 +23,7 @@ from .propagate import (
     propagate_state,
     propagate_state_kepler,
 )
+from .sites import get_site_location
 
 __all__ = ["fit_orbit", "sample_replicas", "predict_orbit", "load_posterior"]
 
@@ -77,6 +79,105 @@ def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
     )
 
 
+def _site_offset(obs: Observation) -> np.ndarray:
+    if not obs.site:
+        return np.zeros(3, dtype=float)
+    loc = get_site_location(obs.site)
+    if loc is None:
+        return np.zeros(3, dtype=float)
+    gcrs = loc.get_gcrs(obstime=obs.time)
+    return gcrs.cartesian.xyz.to(u.km).value
+
+
+def _observation_line_of_sight(obs: Observation) -> tuple[np.ndarray, np.ndarray]:
+    coord = SkyCoord(
+        ra=obs.ra_deg * u.deg,
+        dec=obs.dec_deg * u.deg,
+        distance=1.0 * u.au,
+        frame="icrs",
+        obstime=obs.time,
+    )
+    direction = coord.cartesian.xyz.to(u.km).value
+    direction = direction / np.linalg.norm(direction)
+    earth_pos, _ = get_body_barycentric_posvel("earth", obs.time)
+    earth_km = earth_pos.xyz.to(u.km).value
+    offset = _site_offset(obs)
+    return earth_km + offset, direction
+
+
+def _initial_state_from_two_points(observations: list[Observation]) -> np.ndarray:
+    pos, _ = _observation_line_of_sight(observations[0])
+    pos1, _ = _observation_line_of_sight(observations[-1])
+    dt = float((observations[-1].time - observations[0].time).to(u.s).value)
+    if abs(dt) < 1e-3:
+        dt = 1.0
+    vel = (pos1 - pos) / dt
+    return np.concatenate([pos, vel])
+
+
+def _initial_state_from_observations(observations: list[Observation]) -> np.ndarray:
+    if len(observations) < 3:
+        return _initial_state_from_two_points(observations)
+
+    t1 = observations[0]
+    t2 = observations[len(observations) // 2]
+    t3 = observations[-1]
+    R2, rho2 = _observation_line_of_sight(t2)
+
+    ra1 = observations[0].ra_deg
+    ra3 = observations[-1].ra_deg
+    dec1 = observations[0].dec_deg
+    dec3 = observations[-1].dec_deg
+    delta_ra = (((ra3 - ra1 + 180.0) % 360.0) - 180.0) * np.deg2rad
+    delta_dec = (dec3 - dec1) * np.deg2rad
+    dt_total = float((t3.time - t1.time).to(u.s).value)
+    if abs(dt_total) < 1.0:
+        dt_total = 1.0
+
+    ra_rate = delta_ra / dt_total
+    dec_rate = delta_dec / dt_total
+
+    cos_dec = np.cos(np.deg2rad(t2.dec_deg))
+    ang_rate = np.hypot(ra_rate * cos_dec, dec_rate)
+    typical_speed = 30.0  # km/s (approx)
+    range_km = typical_speed / max(ang_rate, 1e-10)
+    range_km = np.clip(range_km, 1e5, 5e8)
+
+    ra_rad = np.deg2rad(t2.ra_deg)
+    dec_rad = np.deg2rad(t2.dec_deg)
+    east = np.array([-np.sin(ra_rad), np.cos(ra_rad), 0.0], dtype=float)
+    north = np.array([-np.sin(dec_rad) * np.cos(ra_rad), -np.sin(dec_rad) * np.sin(ra_rad), np.cos(dec_rad)], dtype=float)
+
+    v_tang = range_km * (ra_rate * cos_dec * east + dec_rate * north)
+    return np.concatenate([R2 + range_km * rho2, v_tang])
+
+
+def _initial_state_from_observations(observations: list[Observation]) -> np.ndarray:
+    if len(observations) < 2:
+        raise ValueError("Need at least two observations to build an initial state.")
+
+    def _heliocentric_pos(obs: Observation) -> np.ndarray:
+        coord = SkyCoord(
+            ra=obs.ra_deg * u.deg,
+            dec=obs.dec_deg * u.deg,
+            distance=1.0 * u.au,
+            frame="icrs",
+            obstime=obs.time,
+        )
+        direction = coord.cartesian.xyz.to(u.km).value
+        earth_pos, _ = get_body_barycentric_posvel("earth", obs.time)
+        earth_km = earth_pos.xyz.to(u.km).value
+        return earth_km + direction
+
+    pos0 = _heliocentric_pos(observations[0])
+    pos1 = _heliocentric_pos(observations[-1])
+    dt = float((observations[-1].time - observations[0].time).to(u.s).value)
+    if abs(dt) < 1e-2:
+        dt = 1.0
+    vel = (pos1 - pos0) / dt
+    return np.concatenate([pos0, vel])
+
+
 def _tangent_residuals(
     pred_ra: np.ndarray, pred_dec: np.ndarray, obs: list[Observation]
 ) -> np.ndarray:
@@ -93,6 +194,14 @@ def _ensure_finite(name: str, *arrays: np.ndarray) -> None:
     for arr in arrays:
         if not np.all(np.isfinite(arr)):
             raise RuntimeError(f"{name} contains non-finite values.")
+
+
+def _huber_weights(res: np.ndarray, sigma: np.ndarray, c: float = 1.345) -> np.ndarray:
+    t = np.abs(res / sigma)
+    w = np.ones_like(t)
+    large = t > c
+    w[large] = c / t[large]
+    return w
 
 
 def _predict_batch(
@@ -170,25 +279,25 @@ def fit_orbit(
     tol: float = 1.0,
     max_step: float = 3600.0,
     use_kepler: bool = True,
+    use_horizons_seed: bool = False,
 ) -> OrbitPosterior:
     observations = sorted(observations, key=lambda ob: ob.time)
     epoch = observations[len(observations) // 2].time
-    state = _initial_state_from_horizons(target, epoch)
-    # Finite-difference step sizes must be large enough to dominate numeric noise
-    # from propagation + coordinate transforms.
-    eps = np.array([10.0, 10.0, 10.0, 1e-4, 1e-4, 1e-4], dtype=float)  # km, km/s
-    prior_variances = np.array(
-        [1e6, 1e6, 1e6, 1e-2, 1e-2, 1e-2], dtype=float
-    )  # km^2, (km/s)^2
-    prior_inv = np.diag(1.0 / prior_variances)
-    W = np.diag(
-        [
-            1.0 / (obs.sigma_arcsec**2)
-            for obs in observations
-            for _ in range(2)
-        ]
+    state = (
+        _initial_state_from_horizons(target, epoch)
+        if use_horizons_seed
+        else _initial_state_from_observations(observations)
     )
-    residuals = np.zeros(2 * len(observations))
+
+    base_eps = np.array([10.0, 10.0, 10.0, 1e-4, 1e-4, 1e-4], dtype=float)
+    prior_variances = np.array([1e6, 1e6, 1e6, 1e-2, 1e-2, 1e-2], dtype=float)
+    prior_inv = np.diag(1.0 / prior_variances)
+
+    sigma_vec = np.array([obs.sigma_arcsec for obs in observations for _ in range(2)], dtype=float)
+    sigma_vec = np.maximum(sigma_vec, 1e-3)
+    W_base_diag = 1.0 / (sigma_vec**2)
+
+    residuals = np.zeros(2 * len(observations), dtype=float)
     seed_rms: float | None = None
     try:
         seed_ra, seed_dec = _predict_batch(
@@ -199,33 +308,130 @@ def fit_orbit(
             seed_rms = float(np.sqrt(np.mean(seed_residuals**2)))
     except Exception:
         seed_rms = None
+
+    lam = 1e-3
+    lam_up = 10.0
+    lam_down = 0.1
+    cond_J_warn = 1e12
+    cond_A_warn = 1e15
     converged = False
-    for _ in range(max_iter):
+    A = np.eye(6, dtype=float)
+
+    for it in range(max_iter):
+        eps = np.maximum(np.abs(state) * 1e-8, base_eps)
         H, residuals = _jacobian_fd(
             state, epoch, observations, perturbers, eps, max_step, use_kepler=use_kepler
         )
-        lamb = 1e-3
-        A = prior_inv + H.T @ W @ H + np.eye(6) * lamb
-        # Gauss-Newton / LM step solves: (H^T W H + λI) δ = -H^T W r
-        b = -H.T @ W @ residuals
-        _ensure_finite("normal system", A, b)
+
         try:
-            delta = np.linalg.solve(A, b)
+            cond_J = np.linalg.cond(H)
+        except Exception:
+            cond_J = float("inf")
+        try:
+            _, s_h, _ = np.linalg.svd(H, full_matrices=False)
+        except Exception:
+            s_h = np.array([])
+
+        col_norm = np.linalg.norm(H, axis=0)
+        col_norm = np.maximum(col_norm, 1e-12)
+        scale = 1.0 / col_norm
+        Hs = H * scale
+        S = np.diag(scale)
+        prior_inv_scaled = S @ prior_inv @ S
+
+        w_robust = _huber_weights(residuals, sigma_vec)
+        W_total_diag = W_base_diag * w_robust
+        W_total = np.diag(W_total_diag)
+
+        A = prior_inv_scaled + Hs.T @ (W_total @ Hs)
+        try:
+            cond_A = np.linalg.cond(A)
+        except Exception:
+            cond_A = float("inf")
+
+        print(f"[fit_orbit] it={it} cond(J)={cond_J:.3e} cond(A)={cond_A:.3e} lam={lam:.3e}")
+        if s_h.size > 0:
+            print(f"[fit_orbit]  sv(min..): {s_h[-6:].tolist()}")
+        normed = np.abs(residuals / sigma_vec)
+        top_inds = np.argsort(-normed)[:6]
+        print("[fit_orbit]  top residuals (idx, normed, arcsec):")
+        for idx in top_inds:
+            print(
+                f"   {idx:3d}  {normed[idx]:6.2f}  {residuals[idx]:7.2f}\"  "
+                f"(sigma={sigma_vec[idx]:.3f}\")"
+            )
+
+        if cond_J > cond_J_warn or cond_A > cond_A_warn:
+            lam *= 1e3
+            print(f"[fit_orbit]  condition too large, pushing lam -> {lam:.3e}")
+
+        A_lm = A + lam * np.diag(np.diag(A))
+        b = -Hs.T @ (W_total @ residuals)
+
+        try:
+            delta_prime = np.linalg.solve(A_lm, b)
         except np.linalg.LinAlgError:
-            delta = np.linalg.lstsq(A, b, rcond=None)[0]
-        _ensure_finite("delta", delta)
-        state += delta
+            print("[fit_orbit]  normal matrix singular; switching to lstsq")
+            delta_prime = np.linalg.lstsq(A_lm, b, rcond=None)[0]
+
+        delta = delta_prime * scale
+        if not np.all(np.isfinite(delta)):
+            raise RuntimeError("delta contains non-finite values.")
+
+        candidate_state = state + delta
+        try:
+            cand_ra, cand_dec = _predict_batch(
+                candidate_state, epoch, observations, perturbers, max_step, use_kepler=use_kepler
+            )
+            cand_residuals = _tangent_residuals(cand_ra, cand_dec, observations)
+            _ensure_finite("candidate residuals", cand_residuals)
+        except Exception as exc:
+            print(f"[fit_orbit]  candidate prediction failed: {exc}")
+            cand_residuals = residuals.copy() + 1e6
+
+        cost = 0.5 * float(residuals.T @ (W_total @ residuals))
+        cost_new = 0.5 * float(cand_residuals.T @ (W_total @ cand_residuals))
+
+        if cost_new < cost:
+            state = candidate_state
+            residuals = cand_residuals
+            lam = max(lam * lam_down, 1e-16)
+            print(f"[fit_orbit]  step accepted cost {cost:.3e}->{cost_new:.3e}, lam->{lam:.3e}")
+        else:
+            lam *= lam_up
+            print(f"[fit_orbit]  step rejected cost {cost:.3e}->{cost_new:.3e}, lam->{lam:.3e}")
+            if lam > 1e12:
+                print("[fit_orbit]  lambda huge; using damped pseudo-inverse fallback")
+                try:
+                    U, svals, Vt = np.linalg.svd(A, full_matrices=False)
+                    s_reg = svals / (svals**2 + (lam * 1e-6))
+                    delta_prime = Vt.T @ (s_reg * (U.T @ b))
+                    delta = delta_prime * scale
+                    state = state + delta
+                    ra, dec = _predict_batch(
+                        state, epoch, observations, perturbers, max_step, use_kepler=use_kepler
+                    )
+                    residuals = _tangent_residuals(ra, dec, observations)
+                    lam *= 10.0
+                    print("[fit_orbit]  fallback step taken")
+                except Exception as exc:
+                    print(f"[fit_orbit]  fallback failed: {exc}")
+
         if np.linalg.norm(delta) < tol:
             converged = True
+            print(f"[fit_orbit] convergence reached (delta norm {np.linalg.norm(delta):.3e} < tol)")
             break
+
     try:
         cov = np.linalg.inv(A)
     except np.linalg.LinAlgError:
         cov = np.linalg.pinv(A)
+
     _ensure_finite("residuals", residuals)
-    rms = np.sqrt(np.mean(residuals**2))
+    rms = float(np.sqrt(np.mean(residuals**2)))
     if not np.isfinite(rms):
         raise RuntimeError("Residual RMS is non-finite.")
+
     return OrbitPosterior(
         epoch=epoch,
         state=state,
@@ -238,7 +444,7 @@ def fit_orbit(
 
 
 def load_posterior(path: str | Path) -> OrbitPosterior:
-    data = np.load(path)
+    data = np.load(path, allow_pickle=True)
     state = np.array(data["state"])
     cov = np.array(data["cov"])
     residuals = np.array(data["residuals"])

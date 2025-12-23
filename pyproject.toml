@@ -27,6 +27,7 @@ neotube-plan = "neotube.plan_cli:main"
 neotube-diag = "neotube.diag_cli:main"
 neotube-diag-overlay = "neotube.diag_overlay_cli:main"
 neotube-infer = "neotube.infer_cli:main"
+neotube-zogy = "neotube.zogy_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

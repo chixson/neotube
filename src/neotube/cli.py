@@ -22,6 +22,8 @@ from astropy.nddata.utils import NoOverlapError
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
 
+from .zogy import zogy_subtract
+
 IBE_SCI_BASE = "https://irsa.ipac.caltech.edu/ibe/search/ztf/products/sci"
 IBE_DATA_ROOT = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products/sci"
 
@@ -403,6 +405,10 @@ def main() -> int:
     parser.add_argument("--max-rps", type=float, default=0.8, help="Max requests per second")
     parser.add_argument("--max-cutouts", type=int, default=0, help="Stop after downloading this many cutouts")
     parser.add_argument("--user-agent", type=str, default=None, help="Custom User-Agent header")
+    parser.add_argument("--ref-suffix", type=str, default="refimg.fits", help="Suffix for reference image cutouts (empty to disable).")
+    parser.add_argument("--run-zogy", action="store_true", help="Run ZOGY on science + reference cutouts.")
+    parser.add_argument("--zogy-fwhm-sci-arcsec", type=float, default=None, help="Fallback PSF FWHM for science cutouts (arcsec).")
+    parser.add_argument("--zogy-fwhm-ref-arcsec", type=float, default=None, help="Fallback PSF FWHM for reference cutouts (arcsec).")
     parser.add_argument("--plan", type=Path, default=None, help="Plan CSV describing exposures + centers.")
     parser.add_argument("--plan-margin-arcsec", type=float, default=5.0, help="Additional margin when using plan centers.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level (DEBUG|INFO|WARN)")
@@ -464,6 +470,12 @@ def main() -> int:
                     "status",
                     "error",
                     "cutout_path",
+                    "ref_cutout_path",
+                    "zogy_diff_path",
+                    "zogy_s_path",
+                    "zogy_pd_path",
+                    "zogy_status",
+                    "zogy_error",
                 ]
             )
 
@@ -501,6 +513,50 @@ def main() -> int:
                     logging.warning("Failed exposure %s: %s", exposure_unique_id(exposure), err)
                     if args.log_level.upper() != "DEBUG":
                         raise
+                ref_path = ""
+                zogy_diff_path = ""
+                zogy_s_path = ""
+                zogy_pd_path = ""
+                zogy_status = ""
+                zogy_err = ""
+                if args.ref_suffix and status == "ok":
+                    try:
+                        ref_path = download_cutout(
+                            session,
+                            exposure,
+                            center_ra=center_ra,
+                            center_dec=center_dec,
+                            size_arcsec=size_arcsec,
+                            out_dir=args.out,
+                            suffix=args.ref_suffix,
+                            headers=headers,
+                            limiter=limiter,
+                        )
+                    except Exception as exc:
+                        logging.warning("Failed reference cutout %s: %s", exposure_unique_id(exposure), str(exc))
+                if args.run_zogy and path and ref_path:
+                    try:
+                        sci_p = Path(path)
+                        d_out = sci_p.with_name(sci_p.stem + "_zogy_D.fits")
+                        s_out = sci_p.with_name(sci_p.stem + "_zogy_S.fits")
+                        pd_out = sci_p.with_name(sci_p.stem + "_zogy_Pd.fits")
+                        zogy_subtract(
+                            sci_p,
+                            Path(ref_path),
+                            fwhm_sci_arcsec=args.zogy_fwhm_sci_arcsec,
+                            fwhm_ref_arcsec=args.zogy_fwhm_ref_arcsec,
+                            out_diff=d_out,
+                            out_s=s_out,
+                            out_pd=pd_out,
+                        )
+                        zogy_diff_path = str(d_out)
+                        zogy_s_path = str(s_out)
+                        zogy_pd_path = str(pd_out)
+                        zogy_status = "ok"
+                    except Exception as exc:
+                        zogy_status = "error"
+                        zogy_err = str(exc)
+                        logging.warning("ZOGY failed for %s: %s", exposure_unique_id(exposure), zogy_err)
                 writer.writerow(
                     [
                         exposure.obsjd,
@@ -516,6 +572,12 @@ def main() -> int:
                         status,
                         err,
                         path,
+                        ref_path,
+                        zogy_diff_path,
+                        zogy_s_path,
+                        zogy_pd_path,
+                        zogy_status,
+                        zogy_err,
                     ]
                 )
                 if status == "ok":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import math
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
@@ -80,6 +81,16 @@ def matched_filter_snr_map(img: np.ndarray, *, fwhm_px: float) -> np.ndarray:
     return snr.astype(np.float64)
 
 
+def load_detection_map(path: Path) -> np.ndarray:
+    with fits.open(path, memmap=False) as hdul:
+        data = np.asarray(hdul[0].data, dtype=np.float64)
+        if data.ndim == 3 and data.shape[0] == 1:
+            data = data[0]
+        if data.ndim != 2:
+            raise ValueError(f"{path} detection map expected 2D data; got {data.shape}")
+        return data
+
+
 def bilinear_interp(a: np.ndarray, x: float, y: float) -> float:
     h, w = a.shape
     if not (0 <= x < w - 1 and 0 <= y < h - 1):
@@ -151,6 +162,10 @@ class Exposure:
     cutout_path: Path
     planned_center_ra: float | None = None
     planned_center_dec: float | None = None
+    detection_path: Path | None = None
+    diff_path: Path | None = None
+    ref_cutout_path: Path | None = None
+    zogy_status: str | None = None
 
 
 def _iter_cutouts_index(path: Path) -> Iterator[dict]:
@@ -162,30 +177,41 @@ def _iter_cutouts_index(path: Path) -> Iterator[dict]:
 
 def load_exposures_from_cutouts_index(path: Path) -> list[Exposure]:
     out: list[Exposure] = []
-    for row in _iter_cutouts_index(path):
-        status = (row.get("status") or "").strip().lower()
-        cutout_path = row.get("cutout_path")
-        if status != "ok" or not cutout_path:
-            continue
-        obsjd = row.get("obsjd")
-        if not obsjd:
-            continue
-        t = Time(float(obsjd), format="jd", scale="utc")
-        exposure_id = row.get("exposure_id")
-        if not exposure_id:
-            # best-effort ID
-            exposure_id = f"ztf_{row.get('filefracday','unknown')}_f{row.get('field','')}_c{row.get('ccdid','')}_q{row.get('qid','')}"
-        planned_ra = float(row["planned_center_ra"]) if row.get("planned_center_ra") else None
-        planned_dec = float(row["planned_center_dec"]) if row.get("planned_center_dec") else None
-        out.append(
-            Exposure(
-                exposure_id=exposure_id,
-                t=t,
-                cutout_path=Path(cutout_path),
-                planned_center_ra=planned_ra,
-                planned_center_dec=planned_dec,
+        for row in _iter_cutouts_index(path):
+            status = (row.get("status") or "").strip().lower()
+            cutout_path = row.get("cutout_path")
+            if status != "ok" or not cutout_path:
+                continue
+            obsjd = row.get("obsjd")
+            if not obsjd:
+                continue
+            t = Time(float(obsjd), format="jd", scale="utc")
+            exposure_id = row.get("exposure_id")
+            if not exposure_id:
+                # best-effort ID
+                exposure_id = f"ztf_{row.get('filefracday','unknown')}_f{row.get('field','')}_c{row.get('ccdid','')}_q{row.get('qid','')}"
+            planned_ra = float(row["planned_center_ra"]) if row.get("planned_center_ra") else None
+            planned_dec = float(row["planned_center_dec"]) if row.get("planned_center_dec") else None
+            detection_value = row.get("zogy_s_path") or row.get("detection_path")
+            detection_path = Path(detection_value) if detection_value else None
+            diff_value = row.get("zogy_diff_path")
+            diff_path = Path(diff_value) if diff_value else None
+            ref_value = row.get("ref_cutout_path")
+            ref_path = Path(ref_value) if ref_value else None
+            zogy_status = row.get("zogy_status")
+            out.append(
+                Exposure(
+                    exposure_id=exposure_id,
+                    t=t,
+                    cutout_path=Path(cutout_path),
+                    planned_center_ra=planned_ra,
+                    planned_center_dec=planned_dec,
+                    detection_path=detection_path,
+                    diff_path=diff_path,
+                    ref_cutout_path=ref_path,
+                    zogy_status=zogy_status,
+                )
             )
-        )
     out.sort(key=lambda e: e.t.jd)
     return out
 
@@ -394,7 +420,28 @@ def infer_cutouts(
             miss_logl=miss_logl,
         )
 
-        snr_map = matched_filter_snr_map(img, fwhm_px=fwhm_px)
+        detection_map = None
+        if exp.detection_path:
+            try:
+                if exp.detection_path.exists():
+                    detection_map = load_detection_map(exp.detection_path)
+                    if detection_map.shape != img.shape:
+                        logging.warning(
+                            "Detection map %s shape %s differs from science %s, falling back to matched filter",
+                            exp.detection_path,
+                            detection_map.shape,
+                            img.shape,
+                        )
+                        detection_map = None
+                else:
+                    logging.warning("Detection map not found: %s", exp.detection_path)
+            except Exception as exc:
+                logging.warning("Failed to load detection map %s: %s", exp.detection_path, exc)
+
+        if detection_map is not None:
+            snr_map = detection_map
+        else:
+            snr_map = matched_filter_snr_map(img, fwhm_px=fwhm_px)
 
         cloud = ReplicaCloud(epoch=posterior.epoch, states=states)
         propagated = propagate_replicas(
@@ -439,4 +486,3 @@ def infer_cutouts(
         print(f"[infer] {idx+1}/{len(exposures)} exp={exp.exposure_id} jd={exp.t.jd:.5f} ESS={e:.1f}/{len(wnorm)} maxw={float(np.max(wnorm)):.4f}")
 
     return replicas_out_path, evidence_path
-
