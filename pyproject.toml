@@ -14,6 +14,7 @@ dependencies = [
   "scipy>=1.11",
   "astropy>=6.0",
   "astroquery>=0.4.6",
+  "matplotlib>=3.8",
 ]
 
 [project.scripts]
@@ -24,6 +25,7 @@ neotube-tube = "neotube.tube_cli:main"
 neotube-ztf = "neotube.cli:main"
 neotube-plan = "neotube.plan_cli:main"
 neotube-diag = "neotube.diag_cli:main"
+neotube-diag-overlay = "neotube.diag_overlay_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
