@@ -5,29 +5,36 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "neotube"
 version = "0.1.0"
-description = "Toolkit for polite ZTF data harvesting and eventual NEOTube planning."
+description = "Toolkit for polite ZTF data harvesting and sequential SSO precovery."
 readme = "README.md"
 requires-python = ">=3.10"
+authors = [{name = "chixson", email = "chixson@fourshadows.org"}]
+license = {text = "MIT"}
 dependencies = [
   "requests>=2.31",
   "numpy>=1.26",
   "scipy>=1.11",
   "astropy>=6.0",
   "astroquery>=0.4.6",
+  "pandas>=2.0",
   "matplotlib>=3.8",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest", "black", "ruff"]
 
 [project.scripts]
 neotube-fit = "neotube.fit_cli:main"
 neotube-replicas = "neotube.replica_cli:main"
 neotube-propcloud = "neotube.propcloud_cli:main"
 neotube-tube = "neotube.tube_cli:main"
-neotube-ztf = "neotube.cli:main"
 neotube-plan = "neotube.plan_cli:main"
 neotube-diag = "neotube.diag_cli:main"
 neotube-diag-overlay = "neotube.diag_overlay_cli:main"
-neotube-infer = "neotube.infer_cli:main"
+neotube-ztf = "neotube.cli:main"
+neotube-ztf-plan = "neotube.plan_cli:main"
 neotube-zogy = "neotube.zogy_cli:main"
+neotube-infer = "neotube.infer_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

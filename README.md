@@ -1,159 +1,52 @@
-# NEOTube (ZTF Data Harvester)
+# NEOTube / SSO Precovery
 
-This repository now hosts the polite ZTF metadata + cutout downloader that feeds the next stage of the NEOTube workflow.
-It is **not** the old SSOIS/Scout prototype (that work lives under `deprecated/neotube_legacy` and is ignored by git).
+NEOTube is the NEA-focused precovery toolchain sitting on top of IRSA ZTF and the broader SSO archive ecosystem. It implements polite metadata queries, cutout downloads, replica propagation, and pixel-level inference to help you find archival detections of Solar System objects.
 
-## Key behaviour
+## Getting started
 
-1. Query IRSA’s ZTF IBE science table with a single normalized metadata request (filtered by JD range, RA/Dec, optional filter code).
-2. Construct the documented science product URLs from the resulting rows.
-3. Download cutouts via the same URL with `center=RA,Dec`, `size=...`, `gzip=false`, and polite rate-limiting + backoff.
-4. Cache cutouts and write an index CSV so repeated runs resume without re-downloading.
-5. Log the CADC-style headers you need (request IDs, payload size, `Server-Timing`), and the code gracefully backs off on `429`/`5xx` responses.
+1. Create an environment and install dependencies.
 
-## Requirements
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -e .
+   ```
 
-Primarily this tool depends on `requests`. Install it via your preferred workflow (a virtualenv, `pip install -e .`, etc.).
+2. Prep your observations (CSV with `t_utc, ra_deg, dec_deg, sigma_arcsec, site`), or use the provided `runs/ceres/obs.csv`.
+3. Run the CLI suite (fit → replicas → propagation → tube → plan → ztf → infer) in order; each stage writes JSON/CSV artifacts describing its inputs/outputs.
 
-## Workflow
+## CLI summary
 
-NEOTube now exposes a small CLI suite that mirrors how the pipeline should be run:
+| Command | Purpose |
+| --- | --- |
+| `neotube-fit` | Walks MPC-style astrometry to an orbit posterior, optionally seeding from Horizons, observations, Gauss, or the new attributable grid. |
+| `neotube-replicas` | Samples replicas from the posterior and optionally annotates them with RA/Dec. |
+| `neotube-propcloud` | Propagates replicas through requested times (few exposures) with multiprocessing. |
+| `neotube-tube` | Compresses clouds into 2D “tube” nodes (center + radius) that drive metadata queries. |
+| `neotube-plan` | Queries the archive (ZTF IRSA) for exposures whose foot-prints intersect the tube nodes. |
+| `neotube-ztf` | Downloads the science, reference, and ZOGY difference cutouts for the planned rows. |
+| `neotube-infer` | Updates replica weights exposure-by-exposure via matched-filter SNR statistics, optionally running ZOGY when reference cutouts exist. |
+| `neotube-diag` | Produces diagnostics for coverage, plus overlays and metadata reports. |
 
-1. `neotube-fit` — ingests MPC-style astrometry and produces an orbit posterior + covariance.
-2. `neotube-replicas` — samples an ensemble of `x_0` replicas from the posterior.
-3. `neotube-propcloud` — propagates those replicas to requested epochs and emits RA/Dec clouds.
-4. `neotube-tube` — compresses the clouds into tube nodes (center + radius at a quantile), which are the inputs to `neotube-ztf`.
-5. `neotube-ztf`/`neotube-plan` — fetch metadata + cutouts for the exposures the tube intersects.
-6. `neotube-infer` — propagate replicas to each cutout epoch and reweight them using a matched-filter SNR likelihood (v0).
-
-Here's a high-level example run directory layout you can reproduce:
-
-```
-runs/ceres/
-  00_fit/
-    posterior.npz
-    posterior.json
-    fit_summary.json
-    residuals.csv
-  01_replicas/
-    replicas.csv
-    replicas_meta.json
-  02_cloud/
-    cloud.csv
-  03_tube/
-    tube_nodes.csv
-  cutouts/
-    cutouts_index.csv
-```
-
-## CLI reference
-
-### `neotube-fit`
-
-Inputs: CSV with `t_utc`, `ra_deg`, `dec_deg`, `sigma_arcsec`.
+## Example workflow
 
 ```
-neotube-fit \
-  --obs runs/ceres/obs.csv \
-  --target 00001 \
-  --perturbers earth mars jupiter saturn \
-  --out-dir runs/ceres/00_fit/
+neotube-fit --obs runs/ceres/obs.csv --target 00001 --seed-method attributable --out-dir runs/ceres/fit_seed_attributable
+neotube-replicas --posterior runs/ceres/fit_seed_attributable/posterior.npz --n 2000 --output runs/ceres/replicas_attributable.csv
+neotube-propcloud --replicas runs/ceres/replicas_attributable.csv --meta runs/ceres/replicas_attributable_meta.json --times runs/ceres/times_first_cutout.csv --output runs/ceres/cloud_attributable.csv
+neotube-tube --cloud runs/ceres/cloud_attributable.csv --cred 0.99 --margin-arcsec 20 --output runs/ceres/tube_attributable.csv
+neotube-plan --tube runs/ceres/tube_attributable.csv --out runs/ceres/plan_attributable.csv --filter zr --slot-s 1800
+neotube-ztf --plan runs/ceres/plan_attributable.csv --out runs/ceres/cutouts --size-arcsec 120 --user-agent "neotube/0.1 (contact: chixson@fourshadows.org)"
+neotube-infer --posterior-json runs/ceres/fit_seed_attributable/posterior.json --replicas runs/ceres/replicas_attributable.csv --cutouts-index runs/ceres/cutouts/cutouts_index.csv --out-dir runs/ceres/infer_attributable
 ```
 
-Outputs: `posterior.npz`, `posterior.json`, `fit_summary.json`, `residuals.csv`, `fit_params.json`.
-`fit_summary.json` includes `converged` plus an optional `error` message, and `posterior.npz` now records the `converged` flag to keep downstream runs honest.
+## Philosophy
 
-### `neotube-replicas`
+- **Data-first seeds:** `neotube-fit` now defaults to the attributable initializer, scans a small range + range-rate grid, and falls back to observation heuristics or Horizons only when requested.
+- **Replica propagation:** `neotube-propcloud` + `propagate_replicas` batch the expensive propagation once per replica, then `neotube-tube` summarizes the clouds as centers + radii.
+- **Polite IRSA usage:** `neotube-plan` and `neotube-ztf` add rate limiting, caching, and logging of server timing/IDs to avoid bot detection.
+- **Inference readiness:** `neotube-infer` works with matched-filter SNR maps (ZOGY when available) and enforces a miss model so it can reject exposures that lacked data.
 
-```
-neotube-replicas \
-  --posterior runs/ceres/00_fit/posterior.npz \
-  --n 2000 \
-  --seed 42 \
-  --output runs/ceres/01_replicas/replicas.csv
-```
+## Contributions
 
-Outputs: CSV of state vectors + RA/Dec, plus `replicas_meta.json` describing the epoch and seed.
-
-### `neotube-propcloud`
-
-```
-neotube-propcloud \
-  --replicas runs/ceres/01_replicas/replicas.csv \
-  --meta runs/ceres/01_replicas/replicas_meta.json \
-  --times runs/ceres/times.csv \
-  --output runs/ceres/02_cloud/cloud.csv
-```
-
-`times.csv` only needs a `time_utc` column describing the exposures/midpoints you care about.
-
-### `neotube-tube`
-
-```
-neotube-tube \
-  --cloud runs/ceres/02_cloud/cloud.csv \
-  --cred 0.99 \
-  --margin-arcsec 10 \
-  --output runs/ceres/03_tube/tube_nodes.csv
-```
-
-`tube_nodes.csv` becomes the canonical input for `neotube-ztf`.
-
-### `neotube-plan`
-
-```
-neotube-plan \
-  --tube runs/ceres/03_tube/tube_nodes.csv \
-  --out runs/ceres/03_plan/plan.csv \
-  --slot-s 1800 \
-  --min-size-arcsec 30 \
-  --filter zr
-```
-
-It queries IRSA for each tube node, records per-exposure planned centers + radii, and deduplicates repeated hits. The resulting `plan.csv` becomes the direct input to `neotube-ztf` via `--plan`.
-
-### `neotube-diag`
-
-```
-neotube-diag \
-  --plan runs/ceres/03_plan/plan.csv \
-  --clean-index results/ceres_precise_cutouts_clean_index.csv \
-  --output runs/ceres/diag/coverage.json
-```
-
-This command compares each planned exposure center against the observed metadata (and optionally the cleaned index) to verify the tube actually covers the expected frames.
-
-### `neotube-ztf`
-
-```
-neotube-ztf \
-  --ra 255.57691 --dec 12.28378 \
-  --jd-start 2460000.0 --jd-end 2460005.0 \
-  --filter zr \
-  --size-arcsec 50 \
-  --out cutouts \
-  --user-agent "neotube/0.1 (contact: chixson@fourshadows.org)"
-```
-
-The command writes `cutouts_index.csv` and downloads FITS cutouts to the `--out` directory. Logs include request identifiers and server timing when available.
-
-### `neotube-infer`
-
-This is the v0 inference loop: for each exposure in `cutouts_index.csv`, propagate replicas to the exposure time and update replica weights using a local matched-filter SNR peak near each predicted position.
-
-```
-neotube-infer \
-  --posterior-json runs/ceres/00_fit/posterior.json \
-  --replicas runs/ceres/01_replicas/replicas.csv \
-  --cutouts-index runs/ceres/cutouts/cutouts_index.csv \
-  --out-dir runs/ceres/06_infer/ \
-  --workers 50 \
-  --fwhm-arcsec 2.0 \
-  --search-radius-px 6
-```
-
-## How to extend
-
-- Add ephemeris-driven centers so each exposure is retrieved at the predicted location.
-- Use the resulting index to seed the planner’s tube quantiles and motion-model logic.
-- Cache the metadata query results if you plan to iterate over the same time span.
+Contributions are welcome. Please file issues for new archives, improved inference, or CLI refinements. The pipeline assumes ZTF/IRSA for now but the architecture can host additional sources (SSOIS, NOIRLab) via the `neotube.plan` + `neotube-ztf` adapters.

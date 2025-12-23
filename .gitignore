@@ -5,3 +5,15 @@ cutouts/
 cache/
 __pycache__/
 *.pyc
+.venv/
+build/
+dist/
+*.egg-info/
+runs/ceres/05_cutouts_first_new/
+runs/ceres_archive_20251222222344/02_cloud_first/cutouts/
+runs/ceres_archive_20251222222344/05_cutouts_first/
+runs/ceres_archive_20251222222344/05_cutouts_fit_nov18/
+runs/ceres_archive_20251222222344/05_cutouts_horizons_all/
+runs/ceres_archive_20251222222344/07_cutouts_dec123/
+runs/ceres_archive_20251222222344/07_cutouts_dec5_11/
+runs/ceres_archive_20251222222344/*/_full/
