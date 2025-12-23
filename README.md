@@ -1,10 +1,18 @@
-# NEOTube / SSO Precovery
+# FITSAlongFit / NEOTube
 
-NEOTube is the NEA-focused precovery toolchain sitting on top of IRSA ZTF and the broader SSO archive ecosystem. It implements polite metadata queries, cutout downloads, replica propagation, and pixel-level inference to help you find archival detections of Solar System objects.
+FITSAlongFit is the structured driver for the **NEOTube / SSO precovery** ecosystem: start with observations, build a probabilistic orbit/tube, query archives, download cutouts (science/reference/difference), and then stack/detect along candidate paths. The polite downloader is one piece of this stack, but the **primary mission** is to coordinate uncertainty-aware search plans + inference across archives such as ZTF, NOIRLab, and future services.
+
+## Project overview
+
+- **Observation ingestion** (`runs/ceres/obs.csv` is an example): capture `t_utc`, `ra_deg`, `dec_deg`, `sigma_arcsec`, and `site` (MPC code). All downstream steps rely on this canonical input.
+- **Orbit posterior**: `neotube-fit` solves the orbit via LM, supports seeds from Horizons/observations/Gauss/attributable, and writes `posterior.{npz,json}` plus residuals so replicas can be sampled reproducibly.
+- **Replica/tube workflow**: `neotube-replicas`, `neotube-propcloud`, and `neotube-tube` turn the posterior into spatial tubes (per-exposure center + radius quantiles) that safely describe where your object could be.
+- **Archive planning**: `neotube-plan` and `neotube-ztf` (with ZOGY subtraction support) query ZTF/IRSA, download cutouts, and cache metadata for later inference.
+- **Inference & diagnostics**: `neotube-infer` reweights replicas per exposure using matched-filter SNR statistics, and `neotube-diag`/`neotube-diag-overlay` visualize coverage and the replica-to-image alignment.
 
 ## Getting started
 
-1. Create an environment and install dependencies.
+1. Create a venv and install dependencies:
 
    ```bash
    python -m venv .venv
@@ -12,41 +20,38 @@ NEOTube is the NEA-focused precovery toolchain sitting on top of IRSA ZTF and th
    pip install -e .
    ```
 
-2. Prep your observations (CSV with `t_utc, ra_deg, dec_deg, sigma_arcsec, site`), or use the provided `runs/ceres/obs.csv`.
-3. Run the CLI suite (fit → replicas → propagation → tube → plan → ztf → infer) in order; each stage writes JSON/CSV artifacts describing its inputs/outputs.
+2. Prepare your observation CSV (a sample is `runs/ceres/obs.csv`). `sigma_arcsec` defaults to 0.5″ if absent, but the fitter logs problems when all measurements share the same error.
+3. Run the CLI stack. The README below documents the full command chain, but the most critical commands are `neotube-fit`, `neotube-plan`, `neotube-ztf`, and `neotube-infer`.
 
-## CLI summary
+## CLI workflow
 
-| Command | Purpose |
-| --- | --- |
-| `neotube-fit` | Walks MPC-style astrometry to an orbit posterior, optionally seeding from Horizons, observations, Gauss, or the new attributable grid. |
-| `neotube-replicas` | Samples replicas from the posterior and optionally annotates them with RA/Dec. |
-| `neotube-propcloud` | Propagates replicas through requested times (few exposures) with multiprocessing. |
-| `neotube-tube` | Compresses clouds into 2D “tube” nodes (center + radius) that drive metadata queries. |
-| `neotube-plan` | Queries the archive (ZTF IRSA) for exposures whose foot-prints intersect the tube nodes. |
-| `neotube-ztf` | Downloads the science, reference, and ZOGY difference cutouts for the planned rows. |
-| `neotube-infer` | Updates replica weights exposure-by-exposure via matched-filter SNR statistics, optionally running ZOGY when reference cutouts exist. |
-| `neotube-diag` | Produces diagnostics for coverage, plus overlays and metadata reports. |
+Each command writes artifacts that feed the next stage. A high-level run looks like:
 
-## Example workflow
-
-```
+```bash
 neotube-fit --obs runs/ceres/obs.csv --target 00001 --seed-method attributable --out-dir runs/ceres/fit_seed_attributable
 neotube-replicas --posterior runs/ceres/fit_seed_attributable/posterior.npz --n 2000 --output runs/ceres/replicas_attributable.csv
 neotube-propcloud --replicas runs/ceres/replicas_attributable.csv --meta runs/ceres/replicas_attributable_meta.json --times runs/ceres/times_first_cutout.csv --output runs/ceres/cloud_attributable.csv
 neotube-tube --cloud runs/ceres/cloud_attributable.csv --cred 0.99 --margin-arcsec 20 --output runs/ceres/tube_attributable.csv
 neotube-plan --tube runs/ceres/tube_attributable.csv --out runs/ceres/plan_attributable.csv --filter zr --slot-s 1800
-neotube-ztf --plan runs/ceres/plan_attributable.csv --out runs/ceres/cutouts --size-arcsec 120 --user-agent "neotube/0.1 (contact: chixson@fourshadows.org)"
+neotube-ztf --plan runs/ceres/plan_attributable.csv --out runs/ceres/cutouts --size-arcsec 120 --user-agent 'neotube/0.1 (contact: chixson@fourshadows.org)'
 neotube-infer --posterior-json runs/ceres/fit_seed_attributable/posterior.json --replicas runs/ceres/replicas_attributable.csv --cutouts-index runs/ceres/cutouts/cutouts_index.csv --out-dir runs/ceres/infer_attributable
 ```
 
-## Philosophy
+## Tip highlights
 
-- **Data-first seeds:** `neotube-fit` now defaults to the attributable initializer, scans a small range + range-rate grid, and falls back to observation heuristics or Horizons only when requested.
-- **Replica propagation:** `neotube-propcloud` + `propagate_replicas` batch the expensive propagation once per replica, then `neotube-tube` summarizes the clouds as centers + radii.
-- **Polite IRSA usage:** `neotube-plan` and `neotube-ztf` add rate limiting, caching, and logging of server timing/IDs to avoid bot detection.
-- **Inference readiness:** `neotube-infer` works with matched-filter SNR maps (ZOGY when available) and enforces a miss model so it can reject exposures that lacked data.
+- **Seed strategy**: `neotube-fit` now defaults to the attributable grid initializer; `--seed-method` lets you switch between Horizons/observation-based/Gauss seeds when appropriate.
+- **Polite archive usage**: `neotube-plan` caches metadata, respects rate limits/Retry-After, and logs `Server-Timing` when available. `neotube-ztf` downloads science/reference/ZOGY outputs and records request IDs for observability.
+- **ZOGY awareness**: When ZOGY difference cutouts exist, inference uses the matched-filter SNR maps to evaluate each replica’s predicted position.
+- **Diagnostics**: `neotube-diag` compares planned centers vs. metadata, `neotube-diag-overlay` paints replica clouds on cutouts, and `runs/ceres/replica_spread_vs_jpl.png` and `attributable_spread_first_image.png` are concrete outputs you can inspect.
 
-## Contributions
+## Repo organization
 
-Contributions are welcome. Please file issues for new archives, improved inference, or CLI refinements. The pipeline assumes ZTF/IRSA for now but the architecture can host additional sources (SSOIS, NOIRLab) via the `neotube.plan` + `neotube-ztf` adapters.
+- `neotube/`: Python package implementing clients, fit/infer logic, propagation, tube planning, and CLI anchors.
+- `runs/`: example pipelines (Ceres, fit artifacts, cached cutouts, diagnostic plots, etc.). Big cutout directories are ignored via `.gitignore`.
+- `docs/`: architectural notes plus CLI reference documentation for NEOTube steps.
+- `deprecated/`: legacy SSOIS/Scout prototypes for historical reference.
+
+## See also
+
+- `docs/ARCHITECTURE.md` for a deep dive into the NEOTube pipeline shape.
+- `runs/ceres/` for concrete experiments (fit outputs, propagation logs, cutouts, inference traces).
