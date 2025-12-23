@@ -104,6 +104,7 @@ def _predict_batch(
     use_kepler: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
     times = [ob.time for ob in obs]
+    site_codes = [ob.site for ob in obs]
     if use_kepler:
         try:
             propagated = propagate_state_kepler(state, epoch, times)
@@ -117,7 +118,7 @@ def _predict_batch(
             )
     else:
         propagated = propagate_state(state, epoch, times, perturbers=perturbers, max_step=max_step)
-    ra, dec = predict_radec_batch(propagated, times)
+    ra, dec = predict_radec_batch(propagated, times, site_codes=site_codes)
     return ra, dec
 
 

@@ -4,6 +4,7 @@ import argparse
 import csv
 from pathlib import Path
 
+from astropy import units as u
 from astropy.time import Time
 from astroquery.mpc import MPC
 
@@ -71,8 +72,8 @@ def main() -> int:
         rows.append(
             {
                 "t_utc": t.isot,
-                "ra_deg": float(row["RA"]),
-                "dec_deg": float(row["DEC"]),
+                "ra_deg": float(row["RA"].to_value(u.deg)),
+                "dec_deg": float(row["DEC"].to_value(u.deg)),
                 "sigma_arcsec": float(args.sigma_arcsec),
                 "site": str(row["observatory"]),
             }

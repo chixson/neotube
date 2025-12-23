@@ -7,6 +7,8 @@ from typing import Iterable, Sequence, Optional
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import (
+    EarthLocation,
+    GCRS,
     SkyCoord,
     SphericalRepresentation,
     get_body_barycentric_posvel,
@@ -15,6 +17,8 @@ from astropy.time import Time, TimeDelta
 from concurrent.futures import ProcessPoolExecutor
 from scipy.integrate import solve_ivp
 import os
+
+from .sites import get_site_location
 
 __all__ = [
     "propagate_state",
@@ -416,14 +420,43 @@ def propagate_state(
     return results
 
 
-def predict_radec(state: np.ndarray, epoch: Time) -> tuple[float, float]:
+def predict_radec(
+    state: np.ndarray,
+    epoch: Time,
+    site_code: str | None = None,
+) -> tuple[float, float]:
     """Compute topocentric RA/Dec (degrees) from a heliocentric state."""
-    ra, dec = predict_radec_batch(state[np.newaxis, :], (epoch,))
+    ra, dec = predict_radec_batch(
+        state[np.newaxis, :],
+        (epoch,),
+        site_codes=(None if site_code is None else (site_code,)),
+    )
     return float(ra[0]), float(dec[0])
 
 
+def _site_offsets(
+    epochs: Sequence[Time], site_codes: Sequence[str | None] | None
+) -> np.ndarray:
+    if site_codes is None:
+        return np.zeros((len(epochs), 3), dtype=float)
+    if len(site_codes) != len(epochs):
+        raise ValueError("site_codes must match epochs length")
+    offsets = np.zeros((len(epochs), 3), dtype=float)
+    for idx, (code, time) in enumerate(zip(site_codes, epochs)):
+        if code is None:
+            continue
+        loc = get_site_location(code)
+        if loc is None:
+            continue
+        gcrs = loc.get_gcrs(obstime=time)
+        offsets[idx] = gcrs.cartesian.xyz.to(u.km).value
+    return offsets
+
+
 def predict_radec_batch(
-    states: np.ndarray | Sequence[np.ndarray], epochs: Sequence[Time]
+    states: np.ndarray | Sequence[np.ndarray],
+    epochs: Sequence[Time],
+    site_codes: Sequence[str | None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Vectorized RA/Dec computation for many heliocentric states/times."""
     if len(epochs) == 0:
@@ -445,7 +478,8 @@ def predict_radec_batch(
     obj_pos = states_arr[:, :3]
     if len(epochs) != obj_pos.shape[0]:
         raise ValueError("Number of states and epochs must match.")
-    vectors = obj_pos - earth_helio.T
+    site_offsets = _site_offsets(epochs, site_codes)
+    vectors = obj_pos - earth_helio.T - site_offsets
 
     coord = SkyCoord(
         x=vectors[:, 0] * u.km,
