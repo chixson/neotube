@@ -22,3 +22,4 @@ class OrbitPosterior:
     cov: np.ndarray  # shape (6,6)
     residuals: np.ndarray  # length 2n (arcsec)
     rms_arcsec: float
+    converged: bool

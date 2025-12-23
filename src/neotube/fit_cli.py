@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -62,13 +63,37 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     observations = load_observations(args.obs, args.sigma_arcsec)
-    posterior = fit_orbit(
-        args.target,
-        observations,
-        perturbers=tuple(args.perturbers),
-        max_step=args.max_step,
-        max_iter=args.max_iter,
-    )
+    params = {
+        "target": args.target,
+        "perturbers": args.perturbers,
+        "sigma_arcsec": args.sigma_arcsec,
+        "obs_file": str(args.obs),
+    }
+    with open(args.out_dir / "fit_params.json", "w") as fh:
+        json.dump(params, fh, indent=2)
+
+    try:
+        posterior = fit_orbit(
+            args.target,
+            observations,
+            perturbers=tuple(args.perturbers),
+            max_step=args.max_step,
+            max_iter=args.max_iter,
+        )
+    except RuntimeError as exc:
+        summary = {
+            "n_obs": len(observations),
+            "rms_arcsec": None,
+            "chi2": None,
+            "converged": False,
+            "perturbers": args.perturbers,
+            "error": str(exc),
+        }
+        with open(args.out_dir / "fit_summary.json", "w") as fh:
+            json.dump(summary, fh, indent=2)
+        print(f"Fit failed: {exc}", file=sys.stderr)
+        return 1
+
     pred_ra, pred_dec = predict_orbit(
         posterior.state,
         posterior.epoch,
@@ -99,8 +124,9 @@ def main() -> int:
         "n_obs": len(observations),
         "rms_arcsec": posterior.rms_arcsec,
         "chi2": chi2,
-        "converged": True,
+        "converged": posterior.converged,
         "perturbers": args.perturbers,
+        "error": None,
     }
 
     posterior_json = {
@@ -118,6 +144,7 @@ def main() -> int:
         residuals=posterior.residuals,
         epoch=posterior.epoch.isot,
         rms=posterior.rms_arcsec,
+        converged=posterior.converged,
     )
 
     with open(args.out_dir / "posterior.json", "w") as fh:
@@ -125,18 +152,6 @@ def main() -> int:
 
     with open(args.out_dir / "fit_summary.json", "w") as fh:
         json.dump(summary, fh, indent=2)
-
-    with open(args.out_dir / "fit_params.json", "w") as fh:
-        json.dump(
-            {
-                "target": args.target,
-                "perturbers": args.perturbers,
-                "sigma_arcsec": args.sigma_arcsec,
-                "obs_file": str(args.obs),
-            },
-            fh,
-            indent=2,
-        )
 
     with open(args.out_dir / "residuals.csv", "w", newline="") as fh:
         writer = csv.DictWriter(

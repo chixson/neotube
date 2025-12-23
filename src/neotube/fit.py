@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 from astropy import units as u
+from astropy.coordinates import (
+    CartesianDifferential,
+    CartesianRepresentation,
+    HeliocentricTrueEcliptic,
+    SkyCoord,
+)
 from astropy.time import Time
 from astroquery.jplhorizons import Horizons
 
@@ -23,15 +30,31 @@ def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
     obj = Horizons(id=target, location="@sun", epochs=epoch.jd)
     vec = obj.vectors(refplane="ecliptic")
     row = vec[0]
-    km_per_au = u.au.to(u.km)
+
+    pos = CartesianRepresentation(
+        row["x"] * u.au,
+        row["y"] * u.au,
+        row["z"] * u.au,
+    )
+    vel = CartesianDifferential(
+        row["vx"] * u.au / u.day,
+        row["vy"] * u.au / u.day,
+        row["vz"] * u.au / u.day,
+    )
+    coord = SkyCoord(
+        pos.with_differentials(vel),
+        frame=HeliocentricTrueEcliptic(),
+    ).icrs
+
+    cart = coord.cartesian
     return np.array(
         [
-            row["x"] * km_per_au,
-            row["y"] * km_per_au,
-            row["z"] * km_per_au,
-            row["vx"] * km_per_au / 86400.0,
-            row["vy"] * km_per_au / 86400.0,
-            row["vz"] * km_per_au / 86400.0,
+            cart.x.to(u.km).value,
+            cart.y.to(u.km).value,
+            cart.z.to(u.km).value,
+            cart.differentials["s"].d_x.to(u.km / u.s).value,
+            cart.differentials["s"].d_y.to(u.km / u.s).value,
+            cart.differentials["s"].d_z.to(u.km / u.s).value,
         ],
         dtype=float,
     )
@@ -49,6 +72,12 @@ def _tangent_residuals(
     return np.array(res)
 
 
+def _ensure_finite(name: str, *arrays: np.ndarray) -> None:
+    for arr in arrays:
+        if not np.all(np.isfinite(arr)):
+            raise RuntimeError(f"{name} contains non-finite values.")
+
+
 def _predict_batch(
     state: np.ndarray,
     epoch: Time,
@@ -59,7 +88,16 @@ def _predict_batch(
 ) -> tuple[np.ndarray, np.ndarray]:
     times = [ob.time for ob in obs]
     if use_kepler:
-        propagated = propagate_state_kepler(state, epoch, times)
+        try:
+            propagated = propagate_state_kepler(state, epoch, times)
+        except ValueError as exc:
+            warnings.warn(
+                f"Kepler propagation failed; falling back to full propagation ({exc})",
+                RuntimeWarning,
+            )
+            propagated = propagate_state(
+                state, epoch, times, perturbers=perturbers, max_step=max_step
+            )
     else:
         propagated = propagate_state(state, epoch, times, perturbers=perturbers, max_step=max_step)
     ra, dec = predict_radec_batch(propagated, times)
@@ -90,6 +128,7 @@ def _jacobian_fd(
         base_state, epoch, obs, perturbers, max_step, use_kepler=use_kepler
     )
     base_res = _tangent_residuals(base_ra, base_dec, obs)
+    _ensure_finite("residuals", base_res)
     num_obs = len(obs)
     H = np.zeros((2 * num_obs, 6), dtype=float)
     for idx in range(6):
@@ -100,6 +139,7 @@ def _jacobian_fd(
         )
         res = _tangent_residuals(pred_ra, pred_dec, obs)
         H[:, idx] = (res - base_res) / eps[idx]
+    _ensure_finite("jacobian", H)
     return H, base_res
 
 
@@ -114,7 +154,7 @@ def fit_orbit(
     use_kepler: bool = True,
 ) -> OrbitPosterior:
     observations = sorted(observations, key=lambda ob: ob.time)
-    epoch = observations[0].time
+    epoch = observations[len(observations) // 2].time
     state = _initial_state_from_horizons(target, epoch)
     eps = np.array([1e-3, 1e-3, 1e-3, 1e-5, 1e-5, 1e-5])
     prior_variances = np.array(
@@ -129,6 +169,7 @@ def fit_orbit(
         ]
     )
     residuals = np.zeros(2 * len(observations))
+    converged = False
     for _ in range(max_iter):
         H, residuals = _jacobian_fd(
             state, epoch, observations, perturbers, eps, max_step, use_kepler=use_kepler
@@ -136,19 +177,32 @@ def fit_orbit(
         lamb = 1e-3
         A = prior_inv + H.T @ W @ H + np.eye(6) * lamb
         b = H.T @ W @ residuals
+        _ensure_finite("normal system", A, b)
         try:
             delta = np.linalg.solve(A, b)
         except np.linalg.LinAlgError:
             delta = np.linalg.lstsq(A, b, rcond=None)[0]
+        _ensure_finite("delta", delta)
         state += delta
         if np.linalg.norm(delta) < tol:
+            converged = True
             break
     try:
         cov = np.linalg.inv(A)
     except np.linalg.LinAlgError:
         cov = np.linalg.pinv(A)
+    _ensure_finite("residuals", residuals)
     rms = np.sqrt(np.mean(residuals**2))
-    return OrbitPosterior(epoch=epoch, state=state, cov=cov, residuals=residuals, rms_arcsec=rms)
+    if not np.isfinite(rms):
+        raise RuntimeError("Residual RMS is non-finite.")
+    return OrbitPosterior(
+        epoch=epoch,
+        state=state,
+        cov=cov,
+        residuals=residuals,
+        rms_arcsec=rms,
+        converged=converged,
+    )
 
 
 def load_posterior(path: str | Path) -> OrbitPosterior:
@@ -158,7 +212,15 @@ def load_posterior(path: str | Path) -> OrbitPosterior:
     residuals = np.array(data["residuals"])
     epoch = Time(str(data["epoch"]), scale="utc")
     rms = float(data["rms"])
-    return OrbitPosterior(epoch=epoch, state=state, cov=cov, residuals=residuals, rms_arcsec=rms)
+    converged = bool(data["converged"]) if "converged" in data else True
+    return OrbitPosterior(
+        epoch=epoch,
+        state=state,
+        cov=cov,
+        residuals=residuals,
+        rms_arcsec=rms,
+        converged=converged,
+    )
 
 
 def sample_replicas(post: OrbitPosterior, n: int, seed: int | None = None) -> np.ndarray:

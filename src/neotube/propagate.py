@@ -103,8 +103,11 @@ def propagate_state_kepler(
             chi = np.sign(dt) * sqrt_mu * abs(dt) * 1e-3
 
         # Newton solve for universal anomaly chi
+        success = False
         for _ in range(max_iter):
             z = alpha * chi * chi
+            if not np.isfinite(z):
+                raise ValueError(f"Kepler solver produced non-finite z for dt={dt}")
             C2 = _stumpff_C2(z)
             C3 = _stumpff_C3(z)
             F = (
@@ -119,17 +122,27 @@ def propagate_state_kepler(
                 + r0_norm
             )
             step = F / (dF + 1e-30)
+            if not np.isfinite(step):
+                raise ValueError(f"Kepler update became non-finite for dt={dt}")
             chi -= step
             if abs(step) < tol:
+                success = True
                 break
+
+        if not success:
+            raise ValueError(f"Kepler solver did not converge for dt={dt}")
 
         z = alpha * chi * chi
         C2 = _stumpff_C2(z)
         C3 = _stumpff_C3(z)
+        if not np.isfinite(C2) or not np.isfinite(C3):
+            raise ValueError(f"Kepler coefficients became non-finite for dt={dt}")
         f = 1.0 - (chi * chi / (r0_norm + 1e-30)) * C2
         g = dt - (chi**3 / sqrt_mu) * C3
         r = f * r0 + g * v0
         r_norm = float(np.linalg.norm(r))
+        if not np.isfinite(r_norm):
+            raise ValueError(f"Kepler propagation produced non-finite radius for dt={dt}")
         gdot = 1.0 - (chi * chi / (r_norm + 1e-30)) * C2
         fdot = (sqrt_mu / ((r_norm + 1e-30) * (r0_norm + 1e-30))) * chi * (z * C3 - 1.0)
         v = fdot * r0 + gdot * v0

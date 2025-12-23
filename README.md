@@ -60,6 +60,7 @@ neotube-fit \
 ```
 
 Outputs: `posterior.npz`, `posterior.json`, `fit_summary.json`, `residuals.csv`, `fit_params.json`.
+`fit_summary.json` includes `converged` plus an optional `error` message, and `posterior.npz` now records the `converged` flag to keep downstream runs honest.
 
 ### `neotube-replicas`
 
