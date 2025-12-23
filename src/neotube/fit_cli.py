@@ -123,6 +123,7 @@ def main() -> int:
     summary = {
         "n_obs": len(observations),
         "rms_arcsec": posterior.rms_arcsec,
+        "seed_rms_arcsec": posterior.seed_rms_arcsec,
         "chi2": chi2,
         "converged": posterior.converged,
         "perturbers": args.perturbers,
@@ -145,6 +146,7 @@ def main() -> int:
         epoch=posterior.epoch.isot,
         rms=posterior.rms_arcsec,
         converged=posterior.converged,
+        seed_rms=posterior.seed_rms_arcsec if posterior.seed_rms_arcsec is not None else np.nan,
     )
 
     with open(args.out_dir / "posterior.json", "w") as fh:

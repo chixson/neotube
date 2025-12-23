@@ -26,8 +26,25 @@ from .propagate import (
 __all__ = ["fit_orbit", "sample_replicas", "predict_orbit", "load_posterior"]
 
 
+def _normalize_horizons_id(raw: str) -> str:
+    """Normalize common MPC-style identifiers into something Horizons accepts.
+
+    - MPC numbered minor planets: "1" -> "2000001"
+      (Horizons uses the 2,000,000 + number convention for asteroids.)
+    - Otherwise, pass through unchanged (e.g., "Ceres", "2020 AB", "DES=...").
+    """
+    s = raw.strip()
+    if s.isdigit():
+        n = int(s)
+        if 1 <= n < 2000000:
+            return str(2000000 + n)
+    return s
+
+
 def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
-    obj = Horizons(id=target, location="@sun", epochs=epoch.jd)
+    obj = Horizons(id=_normalize_horizons_id(target), location="@sun", epochs=epoch.jd)
+    # Horizons' refplane='ecliptic' vectors are stable, but must be interpreted
+    # in the ecliptic-of-date frame (set obstime) before converting to ICRS.
     vec = obj.vectors(refplane="ecliptic")
     row = vec[0]
 
@@ -43,10 +60,10 @@ def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
     )
     coord = SkyCoord(
         pos.with_differentials(vel),
-        frame=HeliocentricTrueEcliptic(),
+        frame=HeliocentricTrueEcliptic(obstime=epoch),
     ).icrs
-
     cart = coord.cartesian
+
     return np.array(
         [
             cart.x.to(u.km).value,
@@ -149,14 +166,16 @@ def fit_orbit(
     *,
     perturbers: Sequence[str] = ("earth", "mars", "jupiter"),
     max_iter: int = 6,
-    tol: float = 1e-2,
+    tol: float = 1.0,
     max_step: float = 3600.0,
     use_kepler: bool = True,
 ) -> OrbitPosterior:
     observations = sorted(observations, key=lambda ob: ob.time)
     epoch = observations[len(observations) // 2].time
     state = _initial_state_from_horizons(target, epoch)
-    eps = np.array([1e-3, 1e-3, 1e-3, 1e-5, 1e-5, 1e-5])
+    # Finite-difference step sizes must be large enough to dominate numeric noise
+    # from propagation + coordinate transforms.
+    eps = np.array([10.0, 10.0, 10.0, 1e-4, 1e-4, 1e-4], dtype=float)  # km, km/s
     prior_variances = np.array(
         [1e6, 1e6, 1e6, 1e-2, 1e-2, 1e-2], dtype=float
     )  # km^2, (km/s)^2
@@ -169,6 +188,16 @@ def fit_orbit(
         ]
     )
     residuals = np.zeros(2 * len(observations))
+    seed_rms: float | None = None
+    try:
+        seed_ra, seed_dec = _predict_batch(
+            state, epoch, observations, perturbers, max_step, use_kepler=use_kepler
+        )
+        seed_residuals = _tangent_residuals(seed_ra, seed_dec, observations)
+        if np.all(np.isfinite(seed_residuals)):
+            seed_rms = float(np.sqrt(np.mean(seed_residuals**2)))
+    except Exception:
+        seed_rms = None
     converged = False
     for _ in range(max_iter):
         H, residuals = _jacobian_fd(
@@ -176,7 +205,8 @@ def fit_orbit(
         )
         lamb = 1e-3
         A = prior_inv + H.T @ W @ H + np.eye(6) * lamb
-        b = H.T @ W @ residuals
+        # Gauss-Newton / LM step solves: (H^T W H + λI) δ = -H^T W r
+        b = -H.T @ W @ residuals
         _ensure_finite("normal system", A, b)
         try:
             delta = np.linalg.solve(A, b)
@@ -202,6 +232,7 @@ def fit_orbit(
         residuals=residuals,
         rms_arcsec=rms,
         converged=converged,
+        seed_rms_arcsec=seed_rms,
     )
 
 
@@ -213,6 +244,9 @@ def load_posterior(path: str | Path) -> OrbitPosterior:
     epoch = Time(str(data["epoch"]), scale="utc")
     rms = float(data["rms"])
     converged = bool(data["converged"]) if "converged" in data else True
+    seed_rms = float(data["seed_rms"]) if "seed_rms" in data else None
+    if seed_rms is not None and not np.isfinite(seed_rms):
+        seed_rms = None
     return OrbitPosterior(
         epoch=epoch,
         state=state,
@@ -220,6 +254,7 @@ def load_posterior(path: str | Path) -> OrbitPosterior:
         residuals=residuals,
         rms_arcsec=rms,
         converged=converged,
+        seed_rms_arcsec=seed_rms,
     )
 
 

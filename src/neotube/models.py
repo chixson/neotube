@@ -23,3 +23,4 @@ class OrbitPosterior:
     residuals: np.ndarray  # length 2n (arcsec)
     rms_arcsec: float
     converged: bool
+    seed_rms_arcsec: float | None = None
