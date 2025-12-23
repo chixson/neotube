@@ -469,6 +469,9 @@ def fit_orbit(
     nu: float = 4.0,
     estimate_site_scales: bool = False,
     max_kappa: float = 10.0,
+    estimate_site_scales_method: str = "mad",
+    estimate_site_scales_iters: int = 5,
+    sigma_floor: float = 0.0,
     internal_run: bool = False,
 ) -> OrbitPosterior:
     observations = sorted(observations, key=lambda ob: ob.time)
@@ -487,56 +490,115 @@ def fit_orbit(
         raise ValueError(f"Unknown seed_method '{seed_method}'")
 
     if estimate_site_scales and not internal_run:
-        try:
-            prelim = fit_orbit(
-                target,
-                observations,
-                perturbers=perturbers,
-                max_iter=max(3, max_iter // 2),
-                tol=tol,
-                max_step=max_step,
-                use_kepler=use_kepler,
-                seed_method=seed_method,
-                likelihood=likelihood,
-                nu=nu,
-                estimate_site_scales=False,
-                internal_run=True,
-            )
-        except Exception as exc:
-            warnings.warn(
-                f"Preliminary fit for site-scale estimation failed: {exc}",
-                RuntimeWarning,
-            )
-            prelim = None
-
-        site_kappas: dict[str, float] = {}
-        if prelim is not None:
+        def _compute_site_kappas_from_prelim(prelim, method: str) -> dict[str, float]:
             res = prelim.residuals
             site_groups: dict[str, list[float]] = {}
             for i, ob in enumerate(observations):
                 site = ob.site or "UNK"
                 ra_norm = float(res[2 * i] / ob.sigma_arcsec)
                 dec_norm = float(res[2 * i + 1] / ob.sigma_arcsec)
-                site_groups.setdefault(site, []).extend([abs(ra_norm), abs(dec_norm)])
+                site_groups.setdefault(site, []).extend([ra_norm, dec_norm])
+
+            kappas: dict[str, float] = {}
             for site, vals in site_groups.items():
                 arr = np.array(vals, dtype=float)
                 if arr.size == 0:
-                    kappa = 1.0
+                    kappas[site] = 1.0
+                    continue
+                if method == "mad":
+                    mad = float(np.median(np.abs(arr - np.median(arr))))
+                    kappa = max(1.0, mad / 0.6744898)
+                elif method == "chi2":
+                    chi2_site = float(np.sum(arr**2))
+                    dof_site = max(1, arr.size)
+                    kappa = max(1.0, (chi2_site / dof_site) ** 0.5)
                 else:
                     mad = float(np.median(np.abs(arr - np.median(arr))))
                     kappa = max(1.0, mad / 0.6744898)
-                kappa = float(np.clip(kappa, 1.0, max_kappa))
-                site_kappas[site] = kappa
+                kappas[site] = float(np.clip(kappa, 1.0, max_kappa))
+            return kappas
+
+        method = estimate_site_scales_method
+        if method not in ("mad", "chi2", "iterative"):
+            method = "mad"
+
+        site_kappas: dict[str, float] = {(ob.site or "UNK"): 1.0 for ob in observations}
+
+        if method in ("mad", "chi2"):
+            try:
+                prelim = fit_orbit(
+                    target,
+                    observations,
+                    perturbers=perturbers,
+                    max_iter=max(3, max_iter // 2),
+                    tol=tol,
+                    max_step=max_step,
+                    use_kepler=use_kepler,
+                    seed_method=seed_method,
+                    likelihood=likelihood,
+                    nu=nu,
+                    estimate_site_scales=False,
+                    internal_run=True,
+                )
+            except Exception as exc:
+                warnings.warn(
+                    f"Preliminary fit for site-scale estimation failed: {exc}",
+                    RuntimeWarning,
+                )
+                prelim = None
+            if prelim is not None:
+                site_kappas = _compute_site_kappas_from_prelim(prelim, method=method)
+        else:
+            prev_kappas: dict[str, float] | None = None
+            for _ in range(max(1, estimate_site_scales_iters)):
+                try:
+                    prelim = fit_orbit(
+                        target,
+                        observations,
+                        perturbers=perturbers,
+                        max_iter=max(3, max_iter // 2),
+                        tol=tol,
+                        max_step=max_step,
+                        use_kepler=use_kepler,
+                        seed_method=seed_method,
+                        likelihood=likelihood,
+                        nu=nu,
+                        estimate_site_scales=False,
+                        internal_run=True,
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        f"Iterative preliminary fit failed: {exc}",
+                        RuntimeWarning,
+                    )
+                    prelim = None
+                if prelim is None:
+                    break
+                computed = _compute_site_kappas_from_prelim(prelim, method="chi2")
+                for s, k in computed.items():
+                    computed[s] = float(np.clip(max(1.0, k), 1.0, max_kappa))
+                if prev_kappas is not None:
+                    all_sites = set(prev_kappas.keys()) | set(computed.keys())
+                    max_change = max(abs(prev_kappas.get(s, 1.0) - computed.get(s, 1.0)) for s in all_sites)
+                    if max_change < 1e-3:
+                        site_kappas = computed
+                        break
+                prev_kappas = computed
+                for ob in observations:
+                    s = ob.site or "UNK"
+                    kappa = computed.get(s, 1.0)
+                    ob.sigma_arcsec = max(float(sigma_floor), float(ob.sigma_arcsec) * float(kappa))
+            if prev_kappas is not None:
+                site_kappas = prev_kappas
 
         if not site_kappas:
-            for ob in observations:
-                site_kappas[ob.site or "UNK"] = 1.0
+            site_kappas = {(ob.site or "UNK"): 1.0 for ob in observations}
 
         obs_scaled = copy.deepcopy(observations)
         for ob in obs_scaled:
             site = ob.site or "UNK"
             kappa = site_kappas.get(site, 1.0)
-            ob.sigma_arcsec = float(ob.sigma_arcsec) * float(kappa)
+            ob.sigma_arcsec = max(float(sigma_floor), float(ob.sigma_arcsec) * float(kappa))
 
         posterior = fit_orbit(
             target,

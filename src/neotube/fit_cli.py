@@ -90,6 +90,24 @@ def main() -> int:
         default=10.0,
         help="Maximum allowed per-site kappa when estimating site scales.",
     )
+    parser.add_argument(
+        "--estimate-site-scales-method",
+        choices=["mad", "chi2", "iterative"],
+        default="mad",
+        help="Method to estimate per-site scale factors: 'mad' (robust MAD), 'chi2' (single-pass sqrt(chi2/dof)), or 'iterative' (iterative chi2-rescale).",
+    )
+    parser.add_argument(
+        "--estimate-site-scales-iters",
+        type=int,
+        default=5,
+        help="Maximum iterations for the 'iterative' site-scale estimator (default 5).",
+    )
+    parser.add_argument(
+        "--sigma-floor",
+        type=float,
+        default=0.0,
+        help="Minimum allowed per-observation sigma (arcsec) after scaling (default 0.0).",
+    )
     parser.add_argument("--out-dir", type=Path, required=True, help="Directory to write artifacts.")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARN"], default="INFO", help="Logging level.")
     args = parser.parse_args()
@@ -121,6 +139,9 @@ def main() -> int:
             nu=args.nu,
             estimate_site_scales=args.estimate_site_scales,
             max_kappa=args.max_kappa,
+            estimate_site_scales_method=args.estimate_site_scales_method,
+            estimate_site_scales_iters=args.estimate_site_scales_iters,
+            sigma_floor=args.sigma_floor,
             use_kepler=not args.no_kepler,
         )
     except RuntimeError as exc:
