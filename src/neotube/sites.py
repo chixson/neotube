@@ -10,20 +10,46 @@ from typing import Iterable, Mapping
 
 import requests
 from astropy import units as u
+from astropy.constants import R_earth
 from astropy.coordinates import EarthLocation
 
 OBS_CODES_URL = "https://minorplanetcenter.net/iau/lists/ObsCodes.html"
 CACHE_PATH = Path.home() / ".cache" / "neotube" / "observatories.csv"
+EARTH_RADIUS_KM = float(R_earth.to(u.km).value)
 
 
 @dataclass(frozen=True)
 class ObservatoryEntry:
     code: str
     lon_deg: float
-    lat_deg: float
+    rho_cos_phi: float
+    rho_sin_phi: float
+
+    @property
+    def rho(self) -> float:
+        return math.hypot(self.rho_cos_phi, self.rho_sin_phi)
+
+    def to_location(self) -> EarthLocation:
+        # compute geocentric cartesian offset using MPC parallax constants
+        lam = math.radians(self.lon_deg)
+        rho = self.rho
+        if rho == 0.0:
+            # fallback to mean Earth radius at ellipsoid (lat derived from sin)
+            lat = math.degrees(math.atan2(self.rho_sin_phi, max(self.rho_cos_phi, 1e-12)))
+            return EarthLocation.from_geodetic(
+                lon=self.lon_deg * u.deg,
+                lat=lat * u.deg,
+                height=0.0 * u.m,
+            )
+        rho_cos_phi = self.rho_cos_phi
+        rho_sin_phi = self.rho_sin_phi
+        x = rho_cos_phi * math.cos(lam) * EARTH_RADIUS_KM
+        y = rho_cos_phi * math.sin(lam) * EARTH_RADIUS_KM
+        z = rho_sin_phi * EARTH_RADIUS_KM
+        return EarthLocation.from_geocentric(x * u.km, y * u.km, z * u.km)
 
 
-def _parse_line(line: str) -> tuple[str, float, float] | None:
+def _parse_line(line: str) -> tuple[str, float, float, float] | None:
     line = line.strip()
     if not line or line.startswith("</pre>") or line.startswith("<"):
         return None
@@ -36,12 +62,9 @@ def _parse_line(line: str) -> tuple[str, float, float] | None:
     if len(nums) < 3:
         return None
     lon = float(nums[0])
-    sin_lat = float(nums[2])
-    # Ensure sin is within [-1,1]
-    sin_lat = max(-1.0, min(1.0, sin_lat))
-    lat_rad = math.asin(sin_lat)
-    lat = math.degrees(lat_rad)
-    return code, lon, lat
+    rho_cos_phi = float(nums[1])
+    rho_sin_phi = float(nums[2])
+    return code, lon, rho_cos_phi, rho_sin_phi
 
 
 def _fetch_catalog() -> Mapping[str, ObservatoryEntry]:
@@ -58,8 +81,13 @@ def _fetch_catalog() -> Mapping[str, ObservatoryEntry]:
         parsed = _parse_line(line)
         if parsed is None:
             continue
-        code, lon, lat = parsed
-        entries[code] = ObservatoryEntry(code=code, lon_deg=lon, lat_deg=lat)
+        code, lon, rho_cos_phi, rho_sin_phi = parsed
+        entries[code] = ObservatoryEntry(
+            code=code,
+            lon_deg=lon,
+            rho_cos_phi=rho_cos_phi,
+            rho_sin_phi=rho_sin_phi,
+        )
     return entries
 
 
@@ -67,9 +95,9 @@ def _write_cache(entries: Iterable[ObservatoryEntry]) -> None:
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CACHE_PATH.open("w", newline="") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["code", "lon_deg", "lat_deg"])
+        writer.writerow(["code", "lon_deg", "rho_cos_phi", "rho_sin_phi"])
         for entry in entries:
-            writer.writerow([entry.code, entry.lon_deg, entry.lat_deg])
+            writer.writerow([entry.code, entry.lon_deg, entry.rho_cos_phi, entry.rho_sin_phi])
 
 
 def _read_cache() -> Mapping[str, ObservatoryEntry]:
@@ -82,10 +110,16 @@ def _read_cache() -> Mapping[str, ObservatoryEntry]:
             try:
                 code = row["code"].strip().upper()
                 lon = float(row["lon_deg"])
-                lat = float(row["lat_deg"])
+                rho_cos_phi = float(row["rho_cos_phi"])
+                rho_sin_phi = float(row["rho_sin_phi"])
             except (KeyError, ValueError):
                 continue
-            entries[code] = ObservatoryEntry(code=code, lon_deg=lon, lat_deg=lat)
+            entries[code] = ObservatoryEntry(
+                code=code,
+                lon_deg=lon,
+                rho_cos_phi=rho_cos_phi,
+                rho_sin_phi=rho_sin_phi,
+            )
     return entries
 
 
@@ -110,8 +144,4 @@ def get_site_location(code: str | None) -> EarthLocation | None:
     entry = catalog.get(key)
     if entry is None:
         return None
-    return EarthLocation.from_geodetic(
-        lon=entry.lon_deg * u.deg,
-        lat=entry.lat_deg * u.deg,
-        height=0.0 * u.m,
-    )
+    return entry.to_location()
