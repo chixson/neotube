@@ -16,10 +16,18 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--output", type=Path, default=Path("replicas.csv"), help="Output path for replica table.")
     parser.add_argument("--perturbers", nargs="+", default=["earth", "mars", "jupiter"], help="Perturbers for propagation.")
+    parser.add_argument(
+        "--method",
+        choices=["multit", "gaussian"],
+        default="multit",
+        help="Sampling method ('multit'=Student-t, 'gaussian'=Gaussian).",
+    )
+    parser.add_argument("--nu", type=float, default=4.0, help="Degrees of freedom when using Student-t sampling.")
     args = parser.parse_args()
 
     posterior = load_posterior(args.posterior)
-    replicas = sample_replicas(posterior, args.n, seed=args.seed)
+    nu_val = posterior.nu if posterior.nu is not None else args.nu
+    replicas = sample_replicas(posterior, args.n, seed=args.seed, method=args.method, nu=nu_val)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     meta_path = args.output.with_name(args.output.stem + "_meta.json")
@@ -31,6 +39,9 @@ def main() -> int:
                 "seed": args.seed,
                 "posterior": str(args.posterior),
                 "perturbers": args.perturbers,
+                "method": args.method,
+                "nu": nu_val,
+                "fit_scale": float(getattr(posterior, "fit_scale", 1.0)),
             },
             fh,
             indent=2,

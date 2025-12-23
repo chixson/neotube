@@ -62,6 +62,18 @@ def main() -> int:
         default="attributable",
         help="Seed initializer: horizons, observations, gauss, or attributable.",
     )
+    parser.add_argument(
+        "--likelihood",
+        choices=["gaussian", "studentt"],
+        default="gaussian",
+        help="Statistical likelihood for the fit.",
+    )
+    parser.add_argument(
+        "--nu",
+        type=float,
+        default=4.0,
+        help="Degrees of freedom for Student-t likelihood (used when --likelihood studentt).",
+    )
     parser.add_argument("--out-dir", type=Path, required=True, help="Directory to write artifacts.")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARN"], default="INFO", help="Logging level.")
     args = parser.parse_args()
@@ -75,6 +87,8 @@ def main() -> int:
         "sigma_arcsec": args.sigma_arcsec,
         "obs_file": str(args.obs),
         "seed_method": args.seed_method,
+        "likelihood": args.likelihood,
+        "nu": args.nu,
     }
     with open(args.out_dir / "fit_params.json", "w") as fh:
         json.dump(params, fh, indent=2)
@@ -87,6 +101,8 @@ def main() -> int:
             max_step=args.max_step,
             max_iter=args.max_iter,
             seed_method=args.seed_method,
+            likelihood=args.likelihood,
+            nu=args.nu,
         )
     except RuntimeError as exc:
         summary = {
@@ -143,6 +159,8 @@ def main() -> int:
         "state_km": posterior.state.tolist(),
         "cov_km2": posterior.cov.tolist(),
         "fit": summary,
+        "fit_scale": float(getattr(posterior, "fit_scale", 1.0)),
+        "nu": float(getattr(posterior, "nu", 4.0)),
     }
 
     npz_path = args.out_dir / "posterior.npz"
@@ -155,6 +173,8 @@ def main() -> int:
         rms=posterior.rms_arcsec,
         converged=posterior.converged,
         seed_rms=posterior.seed_rms_arcsec if posterior.seed_rms_arcsec is not None else np.nan,
+        fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
+        nu=float(getattr(posterior, "nu", 4.0)),
     )
 
     with open(args.out_dir / "posterior.json", "w") as fh:

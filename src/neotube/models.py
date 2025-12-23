@@ -24,3 +24,5 @@ class OrbitPosterior:
     rms_arcsec: float
     converged: bool
     seed_rms_arcsec: float | None = None
+    fit_scale: float = 1.0
+    nu: float | None = None

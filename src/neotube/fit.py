@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import warnings
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 from astropy import units as u
@@ -291,6 +291,93 @@ def _huber_weights(res: np.ndarray, sigma: np.ndarray, c: float = 1.345) -> np.n
     return w
 
 
+def _mad_scale(residuals: np.ndarray, sigma_vec: np.ndarray) -> float:
+    t = residuals / sigma_vec
+    t = t[np.isfinite(t)]
+    if t.size == 0:
+        return 1.0
+    med = np.median(t)
+    mad = np.median(np.abs(t - med))
+    scale = mad / 0.6744898 if mad > 0 else 0.0
+    return float(max(1.0, scale))
+
+
+def sample_multivariate_t(
+    mean: np.ndarray, cov: np.ndarray, n: int, nu: float = 4.0, seed: Optional[int] = None
+) -> np.ndarray:
+    rng = np.random.default_rng(None if seed is None else int(seed))
+    cov = 0.5 * (cov + cov.T)
+    try:
+        L = np.linalg.cholesky(cov)
+    except np.linalg.LinAlgError:
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        eigvals = np.maximum(eigvals, 1e-12)
+        L = eigvecs @ np.diag(np.sqrt(eigvals))
+    d = mean.size
+    gs = rng.standard_normal(size=(n, d))
+    chis = rng.chisquare(df=max(1.0, nu), size=n) / float(max(1.0, nu))
+    ys = (gs @ L.T) / np.sqrt(chis)[:, None]
+    samples = ys + mean[None, :]
+    return samples.T
+
+
+def sample_replicas(
+    posterior: OrbitPosterior,
+    n: int,
+    seed: Optional[int] = None,
+    method: str = "multit",
+    nu: float = 4.0,
+) -> np.ndarray:
+    mean = np.array(posterior.state, dtype=float).reshape(6)
+    cov = np.array(posterior.cov, dtype=float)
+    fit_scale = float(getattr(posterior, "fit_scale", 1.0))
+    cov_inflated = cov * (fit_scale**2)
+    if method in ("multit", "multivariate-t"):
+        return sample_multivariate_t(mean, cov_inflated, n, nu=nu, seed=seed)
+    if method == "gaussian":
+        rng = np.random.default_rng(None if seed is None else int(seed))
+        try:
+            L = np.linalg.cholesky(cov_inflated)
+        except np.linalg.LinAlgError:
+            eigvals, eigvecs = np.linalg.eigh(cov_inflated)
+            eigvals = np.maximum(eigvals, 1e-12)
+            L = eigvecs @ np.diag(np.sqrt(eigvals))
+        noise = rng.standard_normal((6, n))
+        samples = mean[:, None] + L @ noise
+        return samples
+    raise ValueError(f"Unknown sampling method: {method}")
+
+
+def load_posterior(path: Path | str) -> OrbitPosterior:
+    data = np.load(str(path), allow_pickle=True)
+    state = np.array(data["state"], dtype=float)
+    cov = np.array(data["cov"], dtype=float)
+    residuals = np.array(data["residuals"], dtype=float)
+    epoch_val = data["epoch"]
+    if isinstance(epoch_val, (np.ndarray, list)):
+        epoch_str = str(epoch_val.tolist())
+    else:
+        epoch_str = str(epoch_val)
+    epoch = Time(epoch_str, scale="utc")
+    rms = float(data.get("rms", np.sqrt(np.mean(residuals**2))))
+    converged = bool(data.get("converged", True))
+    seed_rms = data.get("seed_rms", np.nan)
+    seed_rms_val = float(seed_rms) if np.isfinite(seed_rms) else None
+    fit_scale = float(data.get("fit_scale", 1.0))
+    nu = float(data.get("nu", 4.0))
+    return OrbitPosterior(
+        epoch=epoch,
+        state=state,
+        cov=cov,
+        residuals=residuals,
+        rms_arcsec=rms,
+        converged=converged,
+        seed_rms_arcsec=seed_rms_val,
+        fit_scale=fit_scale,
+        nu=nu,
+    )
+
+
 def _predict_batch(
     state: np.ndarray,
     epoch: Time,
@@ -366,10 +453,14 @@ def fit_orbit(
     tol: float = 1.0,
     max_step: float = 3600.0,
     use_kepler: bool = True,
-    seed_method: str = "attributable",
+    seed_method: str | None = None,
+    likelihood: str = "gaussian",
+    nu: float = 4.0,
 ) -> OrbitPosterior:
     observations = sorted(observations, key=lambda ob: ob.time)
     epoch = observations[len(observations) // 2].time
+    if seed_method is None:
+        seed_method = "attributable"
     if seed_method == "horizons":
         state = _initial_state_from_horizons(target, epoch)
     elif seed_method == "observations":
@@ -377,7 +468,7 @@ def fit_orbit(
     elif seed_method == "gauss":
         state = _initial_state_from_gauss(observations)
     elif seed_method == "attributable":
-        state = _initial_state_from_attributable(observations, epoch, perturbers=perturbers, max_step=max_step)
+        state = _initial_state_from_attributable(observations, epoch)
     else:
         raise ValueError(f"Unknown seed_method '{seed_method}'")
 
@@ -404,25 +495,15 @@ def fit_orbit(
     lam = 1e-3
     lam_up = 10.0
     lam_down = 0.1
-    cond_J_warn = 1e12
-    cond_A_warn = 1e15
     converged = False
-    A = np.eye(6, dtype=float)
+    use_studentt = likelihood.lower() == "studentt"
+    nu_val = max(1.0, float(nu))
 
     for it in range(max_iter):
         eps = np.maximum(np.abs(state) * 1e-8, base_eps)
         H, residuals = _jacobian_fd(
             state, epoch, observations, perturbers, eps, max_step, use_kepler=use_kepler
         )
-
-        try:
-            cond_J = np.linalg.cond(H)
-        except Exception:
-            cond_J = float("inf")
-        try:
-            _, s_h, _ = np.linalg.svd(H, full_matrices=False)
-        except Exception:
-            s_h = np.array([])
 
         col_norm = np.linalg.norm(H, axis=0)
         col_norm = np.maximum(col_norm, 1e-12)
@@ -431,39 +512,19 @@ def fit_orbit(
         S = np.diag(scale)
         prior_inv_scaled = S @ prior_inv @ S
 
-        w_robust = _huber_weights(residuals, sigma_vec)
-        W_total_diag = W_base_diag * w_robust
+        W_total_diag = W_base_diag.copy()
+        if use_studentt:
+            t = residuals / sigma_vec
+            W_total_diag *= (nu_val + 1.0) / (nu_val + t**2)
         W_total = np.diag(W_total_diag)
 
         A = prior_inv_scaled + Hs.T @ (W_total @ Hs)
-        try:
-            cond_A = np.linalg.cond(A)
-        except Exception:
-            cond_A = float("inf")
-
-        print(f"[fit_orbit] it={it} cond(J)={cond_J:.3e} cond(A)={cond_A:.3e} lam={lam:.3e}")
-        if s_h.size > 0:
-            print(f"[fit_orbit]  sv(min..): {s_h[-6:].tolist()}")
-        normed = np.abs(residuals / sigma_vec)
-        top_inds = np.argsort(-normed)[:6]
-        print("[fit_orbit]  top residuals (idx, normed, arcsec):")
-        for idx in top_inds:
-            print(
-                f"   {idx:3d}  {normed[idx]:6.2f}  {residuals[idx]:7.2f}\"  "
-                f"(sigma={sigma_vec[idx]:.3f}\")"
-            )
-
-        if cond_J > cond_J_warn or cond_A > cond_A_warn:
-            lam *= 1e3
-            print(f"[fit_orbit]  condition too large, pushing lam -> {lam:.3e}")
-
-        A_lm = A + lam * np.diag(np.diag(A))
         b = -Hs.T @ (W_total @ residuals)
+        A_lm = A + lam * np.diag(np.diag(A))
 
         try:
             delta_prime = np.linalg.solve(A_lm, b)
         except np.linalg.LinAlgError:
-            print("[fit_orbit]  normal matrix singular; switching to lstsq")
             delta_prime = np.linalg.lstsq(A_lm, b, rcond=None)[0]
 
         delta = delta_prime * scale
@@ -477,49 +538,39 @@ def fit_orbit(
             )
             cand_residuals = _tangent_residuals(cand_ra, cand_dec, observations)
             _ensure_finite("candidate residuals", cand_residuals)
-        except Exception as exc:
-            print(f"[fit_orbit]  candidate prediction failed: {exc}")
+        except Exception:
             cand_residuals = residuals.copy() + 1e6
 
         cost = 0.5 * float(residuals.T @ (W_total @ residuals))
         cost_new = 0.5 * float(cand_residuals.T @ (W_total @ cand_residuals))
-
         if cost_new < cost:
             state = candidate_state
             residuals = cand_residuals
             lam = max(lam * lam_down, 1e-16)
-            print(f"[fit_orbit]  step accepted cost {cost:.3e}->{cost_new:.3e}, lam->{lam:.3e}")
         else:
             lam *= lam_up
-            print(f"[fit_orbit]  step rejected cost {cost:.3e}->{cost_new:.3e}, lam->{lam:.3e}")
-            if lam > 1e12:
-                print("[fit_orbit]  lambda huge; using damped pseudo-inverse fallback")
-                try:
-                    U, svals, Vt = np.linalg.svd(A, full_matrices=False)
-                    s_reg = svals / (svals**2 + (lam * 1e-6))
-                    delta_prime = Vt.T @ (s_reg * (U.T @ b))
-                    delta = delta_prime * scale
-                    state = state + delta
-                    ra, dec = _predict_batch(
-                        state, epoch, observations, perturbers, max_step, use_kepler=use_kepler
-                    )
-                    residuals = _tangent_residuals(ra, dec, observations)
-                    lam *= 10.0
-                    print("[fit_orbit]  fallback step taken")
-                except Exception as exc:
-                    print(f"[fit_orbit]  fallback failed: {exc}")
 
         if np.linalg.norm(delta) < tol:
             converged = True
-            print(f"[fit_orbit] convergence reached (delta norm {np.linalg.norm(delta):.3e} < tol)")
             break
 
     try:
-        cov = np.linalg.inv(A)
+        cov_scaled = np.linalg.inv(A)
     except np.linalg.LinAlgError:
-        cov = np.linalg.pinv(A)
+        cov_scaled = np.linalg.pinv(A)
+    cov = S.T @ cov_scaled @ S
 
-    _ensure_finite("residuals", residuals)
+    ndof = max(1, 2 * len(observations) - 6)
+    try:
+        chi2 = float(residuals.T @ (np.diag(W_base_diag) @ residuals))
+        chi2_red = chi2 / ndof
+        scale_chi2 = float(np.sqrt(max(1.0, chi2_red)))
+    except Exception:
+        scale_chi2 = 1.0
+    robust_scale = _mad_scale(residuals, sigma_vec)
+    fit_scale = float(max(scale_chi2, robust_scale, 1.0))
+    cov = cov * (fit_scale**2)
+
     rms = float(np.sqrt(np.mean(residuals**2)))
     if not np.isfinite(rms):
         raise RuntimeError("Residual RMS is non-finite.")
@@ -532,28 +583,8 @@ def fit_orbit(
         rms_arcsec=rms,
         converged=converged,
         seed_rms_arcsec=seed_rms,
-    )
-
-
-def load_posterior(path: str | Path) -> OrbitPosterior:
-    data = np.load(path, allow_pickle=True)
-    state = np.array(data["state"])
-    cov = np.array(data["cov"])
-    residuals = np.array(data["residuals"])
-    epoch = Time(str(data["epoch"]), scale="utc")
-    rms = float(data["rms"])
-    converged = bool(data["converged"]) if "converged" in data else True
-    seed_rms = float(data["seed_rms"]) if "seed_rms" in data else None
-    if seed_rms is not None and not np.isfinite(seed_rms):
-        seed_rms = None
-    return OrbitPosterior(
-        epoch=epoch,
-        state=state,
-        cov=cov,
-        residuals=residuals,
-        rms_arcsec=rms,
-        converged=converged,
-        seed_rms_arcsec=seed_rms,
+        fit_scale=fit_scale,
+        nu=nu_val if use_studentt else nu_val,
     )
 
 
@@ -588,12 +619,3 @@ def load_posterior_json(path: str | Path) -> OrbitPosterior:
         seed_rms_arcsec=seed_rms if (seed_rms is None or np.isfinite(seed_rms)) else None,
     )
 
-
-def sample_replicas(post: OrbitPosterior, n: int, seed: int | None = None) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    try:
-        L = np.linalg.cholesky(post.cov)
-    except np.linalg.LinAlgError:
-        L = np.linalg.cholesky(post.cov + np.eye(6) * 1e-6)
-    noise = rng.standard_normal((6, n))
-    return post.state[:, None] + L @ noise
