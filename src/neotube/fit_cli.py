@@ -36,6 +36,7 @@ def load_observations(path: Path, sigma: float | None) -> list[Observation]:
             )
     if not observations:
         raise ValueError("No valid observations loaded from CSV.")
+    observations.sort(key=lambda ob: ob.time)
     return observations
 
 

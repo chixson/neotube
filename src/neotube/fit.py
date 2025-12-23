@@ -10,7 +10,11 @@ from astropy.time import Time
 from astroquery.jplhorizons import Horizons
 
 from .models import Observation, OrbitPosterior
-from .propagate import predict_radec, propagate_state
+from .propagate import (
+    predict_radec_batch,
+    propagate_state,
+    propagate_state_kepler,
+)
 
 __all__ = ["fit_orbit", "sample_replicas", "predict_orbit", "load_posterior"]
 
@@ -51,16 +55,15 @@ def _predict_batch(
     obs: list[Observation],
     perturbers: Sequence[str],
     max_step: float,
+    use_kepler: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
     times = [ob.time for ob in obs]
-    propagated = propagate_state(state, epoch, times, perturbers=perturbers, max_step=max_step)
-    ra = []
-    dec = []
-    for st, t in zip(propagated, times):
-        r, d = predict_radec(st, t)
-        ra.append(r)
-        dec.append(d)
-    return np.array(ra), np.array(dec)
+    if use_kepler:
+        propagated = propagate_state_kepler(state, epoch, times)
+    else:
+        propagated = propagate_state(state, epoch, times, perturbers=perturbers, max_step=max_step)
+    ra, dec = predict_radec_batch(propagated, times)
+    return ra, dec
 
 
 def predict_orbit(
@@ -69,8 +72,9 @@ def predict_orbit(
     obs: list[Observation],
     perturbers: Sequence[str],
     max_step: float,
+    use_kepler: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    return _predict_batch(state, epoch, obs, perturbers, max_step)
+    return _predict_batch(state, epoch, obs, perturbers, max_step, use_kepler=use_kepler)
 
 
 def _jacobian_fd(
@@ -80,15 +84,20 @@ def _jacobian_fd(
     perturbers: Sequence[str],
     eps: np.ndarray,
     max_step: float,
+    use_kepler: bool,
 ) -> np.ndarray:
-    base_ra, base_dec = _predict_batch(base_state, epoch, obs, perturbers, max_step)
+    base_ra, base_dec = _predict_batch(
+        base_state, epoch, obs, perturbers, max_step, use_kepler=use_kepler
+    )
     base_res = _tangent_residuals(base_ra, base_dec, obs)
     num_obs = len(obs)
     H = np.zeros((2 * num_obs, 6), dtype=float)
     for idx in range(6):
         perturbed = base_state.copy()
         perturbed[idx] += eps[idx]
-        pred_ra, pred_dec = _predict_batch(perturbed, epoch, obs, perturbers, max_step)
+        pred_ra, pred_dec = _predict_batch(
+            perturbed, epoch, obs, perturbers, max_step, use_kepler=use_kepler
+        )
         res = _tangent_residuals(pred_ra, pred_dec, obs)
         H[:, idx] = (res - base_res) / eps[idx]
     return H, base_res
@@ -102,7 +111,9 @@ def fit_orbit(
     max_iter: int = 6,
     tol: float = 1e-2,
     max_step: float = 3600.0,
+    use_kepler: bool = True,
 ) -> OrbitPosterior:
+    observations = sorted(observations, key=lambda ob: ob.time)
     epoch = observations[0].time
     state = _initial_state_from_horizons(target, epoch)
     eps = np.array([1e-3, 1e-3, 1e-3, 1e-5, 1e-5, 1e-5])
@@ -119,8 +130,11 @@ def fit_orbit(
     )
     residuals = np.zeros(2 * len(observations))
     for _ in range(max_iter):
-        H, residuals = _jacobian_fd(state, epoch, observations, perturbers, eps, max_step)
-        A = prior_inv + H.T @ W @ H
+        H, residuals = _jacobian_fd(
+            state, epoch, observations, perturbers, eps, max_step, use_kepler=use_kepler
+        )
+        lamb = 1e-3
+        A = prior_inv + H.T @ W @ H + np.eye(6) * lamb
         b = H.T @ W @ residuals
         try:
             delta = np.linalg.solve(A, b)

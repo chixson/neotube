@@ -21,6 +21,7 @@ __all__ = [
     "propagate_state_kepler",
     "propagate_state_sun",
     "predict_radec",
+    "predict_radec_batch",
     "ReplicaCloud",
     "propagate_replicas",
 ]
@@ -404,18 +405,44 @@ def propagate_state(
 
 def predict_radec(state: np.ndarray, epoch: Time) -> tuple[float, float]:
     """Compute topocentric RA/Dec (degrees) from a heliocentric state."""
-    obj_pos = state[:3]
-    earth_pos = _heliocentric_position("earth", epoch)
-    vector = obj_pos - earth_pos
+    ra, dec = predict_radec_batch(state[np.newaxis, :], (epoch,))
+    return float(ra[0]), float(dec[0])
+
+
+def predict_radec_batch(
+    states: np.ndarray | Sequence[np.ndarray], epochs: Sequence[Time]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized RA/Dec computation for many heliocentric states/times."""
+    if len(epochs) == 0:
+        return np.empty(0, dtype=float), np.empty(0, dtype=float)
+
+    states_arr = np.asarray(states, dtype=float)
+    if states_arr.ndim == 1:
+        states_arr = states_arr[np.newaxis, :]
+    if states_arr.shape[1] != 6:
+        raise ValueError("Expected states with 6 components (r/v).")
+
+    time_array = Time(epochs)
+    earth_pos, _ = get_body_barycentric_posvel("earth", time_array)
+    sun_pos, _ = get_body_barycentric_posvel("sun", time_array)
+    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value
+    if earth_helio.shape[1] != len(epochs):
+        earth_helio = earth_helio[:, : len(epochs)]
+
+    obj_pos = states_arr[:, :3]
+    if len(epochs) != obj_pos.shape[0]:
+        raise ValueError("Number of states and epochs must match.")
+    vectors = obj_pos - earth_helio.T
+
     coord = SkyCoord(
-        x=vector[0] * u.km,
-        y=vector[1] * u.km,
-        z=vector[2] * u.km,
+        x=vectors[:, 0] * u.km,
+        y=vectors[:, 1] * u.km,
+        z=vectors[:, 2] * u.km,
         representation_type="cartesian",
         frame="icrs",
     )
     sph = coord.represent_as(SphericalRepresentation)
-    return float(sph.lon.deg), float(sph.lat.deg)
+    return np.array(sph.lon.deg), np.array(sph.lat.deg)
 
 
 @dataclass
