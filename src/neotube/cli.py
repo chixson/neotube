@@ -12,7 +12,15 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, urlencode
 
+import numpy as np
 import requests
+from astropy import units as u
+from astropy.coordinates import SkyCoord
+from astropy.io import fits
+from astropy.nddata import Cutout2D
+from astropy.nddata.utils import NoOverlapError
+from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
 
 IBE_SCI_BASE = "https://irsa.ipac.caltech.edu/ibe/search/ztf/products/sci"
 IBE_DATA_ROOT = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products/sci"
@@ -306,19 +314,70 @@ def download_cutout(
         logging.debug("Cutout already exists: %s", path)
         return path
 
-    resp = request_with_backoff(
-        session,
-        cutout_url,
-        headers=headers,
-        stream=True,
-        limiter=limiter,
-    )
+    try:
+        resp = request_with_backoff(
+            session,
+            cutout_url,
+            headers=headers,
+            stream=True,
+            max_tries=2,
+            limiter=limiter,
+        )
 
-    with open(path, "wb") as fh:
-        for chunk in resp.iter_content(chunk_size=1024 * 256):
-            if chunk:
-                fh.write(chunk)
-    resp.close()
+        with open(path, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    fh.write(chunk)
+        resp.close()
+        return path
+    except RuntimeError as exc:
+        # IRSA ZTF products sometimes return HTTP 500 for cutout-style requests.
+        # Fall back to downloading the full frame and extracting the cutout locally.
+        msg = str(exc)
+        if "status=500" not in msg and "HTTP 500" not in msg and "last status=500" not in msg:
+            raise
+        logging.warning("Remote cutout failed (HTTP 500); downloading full image and cutting locally.")
+
+    full_dir = os.path.join(out_dir, "_full")
+    os.makedirs(full_dir, exist_ok=True)
+    full_path = os.path.join(full_dir, os.path.basename(base_url))
+    if not (os.path.exists(full_path) and os.path.getsize(full_path) > 0):
+        resp = request_with_backoff(
+            session,
+            base_url,
+            headers=headers,
+            stream=True,
+            max_tries=5,
+            limiter=limiter,
+        )
+        with open(full_path, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    fh.write(chunk)
+        resp.close()
+
+    with fits.open(full_path, memmap=False) as hdul:
+        hdu = hdul[0]
+        wcs = WCS(hdu.header)
+        # Estimate pixel scale (arcsec/pixel) and derive pixel cutout size.
+        scales = proj_plane_pixel_scales(wcs) * u.deg
+        scale_arcsec = float(np.mean(scales.to(u.arcsec)).value)
+        size_pix = max(5, int(np.ceil(size_arcsec / max(scale_arcsec, 1e-6))))
+        position = SkyCoord(center_ra * u.deg, center_dec * u.deg, frame="icrs")
+        try:
+            cutout = Cutout2D(
+                hdu.data,
+                position=position,
+                size=(size_pix, size_pix),
+                wcs=wcs,
+                mode="partial",
+                fill_value=np.nan,
+            )
+        except NoOverlapError as exc:
+            raise RuntimeError("NoOverlap") from exc
+        new_header = hdu.header.copy()
+        new_header.update(cutout.wcs.to_header())
+        fits.PrimaryHDU(data=cutout.data, header=new_header).writeto(path, overwrite=True)
     return path
 
 
@@ -326,10 +385,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Polite metadata + cutout downloader for ZTF science exposures."
     )
-    parser.add_argument("--ra", type=float, required=True, help="ICRS RA in degrees")
-    parser.add_argument("--dec", type=float, required=True, help="ICRS Dec in degrees")
-    parser.add_argument("--jd-start", type=float, required=True, help="JD start (e.g., 2459000.5)")
-    parser.add_argument("--jd-end", type=float, required=True, help="JD end")
+    parser.add_argument("--ra", type=float, default=None, help="ICRS RA in degrees (required unless --plan is used)")
+    parser.add_argument("--dec", type=float, default=None, help="ICRS Dec in degrees (required unless --plan is used)")
+    parser.add_argument("--jd-start", type=float, default=None, help="JD start (required unless --plan is used)")
+    parser.add_argument("--jd-end", type=float, default=None, help="JD end (required unless --plan is used)")
     parser.add_argument("--filter", type=str, default=None, help="Optional filter suffix (zg, zr, zi)")
     parser.add_argument("--size-arcsec", type=float, default=50.0, help="Cutout size (square) in arcseconds")
     parser.add_argument(
@@ -360,6 +419,8 @@ def main() -> int:
             exposures = load_plan_exposures(args.plan)
             logging.info("Loaded %d exposures from plan %s", len(exposures), args.plan)
         else:
+            if args.ra is None or args.dec is None or args.jd_start is None or args.jd_end is None:
+                raise SystemExit("Must provide --ra/--dec/--jd-start/--jd-end unless using --plan.")
             exposures = query_exposures(
                 session,
                 ra=args.ra,
@@ -400,6 +461,8 @@ def main() -> int:
                     "planned_center_ra",
                     "planned_center_dec",
                     "planned_radius_arcsec",
+                    "status",
+                    "error",
                     "cutout_path",
                 ]
             )
@@ -417,17 +480,27 @@ def main() -> int:
                     center_ra = args.ra
                     center_dec = args.dec
                     size_arcsec = args.size_arcsec
-                path = download_cutout(
-                    session,
-                    exposure,
-                    center_ra=center_ra,
-                    center_dec=center_dec,
-                    size_arcsec=size_arcsec,
-                    out_dir=args.out,
-                    suffix=args.suffix,
-                    headers=headers,
-                    limiter=limiter,
-                )
+                status = "ok"
+                err = ""
+                path = ""
+                try:
+                    path = download_cutout(
+                        session,
+                        exposure,
+                        center_ra=center_ra,
+                        center_dec=center_dec,
+                        size_arcsec=size_arcsec,
+                        out_dir=args.out,
+                        suffix=args.suffix,
+                        headers=headers,
+                        limiter=limiter,
+                    )
+                except Exception as exc:
+                    status = "error"
+                    err = str(exc)
+                    logging.warning("Failed exposure %s: %s", exposure_unique_id(exposure), err)
+                    if args.log_level.upper() != "DEBUG":
+                        raise
                 writer.writerow(
                     [
                         exposure.obsjd,
@@ -440,11 +513,14 @@ def main() -> int:
                         exposure.planned_center_ra or "",
                         exposure.planned_center_dec or "",
                         exposure.planned_radius_arcsec or "",
+                        status,
+                        err,
                         path,
                     ]
                 )
-                downloaded += 1
-                logging.info("Downloaded %s", path)
+                if status == "ok":
+                    downloaded += 1
+                    logging.info("Downloaded %s", path)
 
         logging.info("Downloaded %d cutouts into %s", downloaded, args.out)
     return 0
