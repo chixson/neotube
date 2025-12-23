@@ -3,3 +3,9 @@ cutouts/
 *.csv
 *.log
 cache/
+__pycache__/
+logs/
+runs/
+results/
+scripts/*.pyc
+src/neotube.egg-info/
