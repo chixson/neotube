@@ -9,6 +9,7 @@ This package implements the complete NEOTube / SSO precovery pipeline: ingest ob
 - **Replica/tube**: `neotube-replicas`, `neotube-propcloud`, and `neotube-tube` convert the posterior into per-exposure tube nodes that drive planning.
 - **Archive planning**: `neotube-plan` plus `neotube-ztf` fetch metadata + science/reference/ZOGY cutouts while respecting IRSA rate limits and caching.
 - **Inference**: `neotube-infer` reweights replicas using matched-filter SNR maps (ZOGY when available), and the diagnostic CLIs expose coverage plots and overlays.
+- **Fit diagnostics**: `scripts/fit_diagnostics.py` prints RMS/chi2 and per-observation residuals from an observation CSV + posterior.
 
 ## Run example (Ceres)
 
@@ -20,6 +21,14 @@ neotube-tube --cloud runs/ceres/cloud_attributable.csv --cred 0.99 --margin-arcs
 neotube-plan --tube runs/ceres/tube_attributable.csv --out runs/ceres/plan_attributable.csv --filter zr --slot-s 1800
 neotube-ztf --plan runs/ceres/plan_attributable.csv --out runs/ceres/cutouts --size-arcsec 120 --user-agent 'neotube/0.1 (contact: chixson@fourshadows.org)'
 neotube-infer --posterior-json runs/ceres/fit_seed_attributable/posterior.json --replicas runs/ceres/replicas_attributable.csv --cutouts-index runs/ceres/cutouts/cutouts_index.csv --out-dir runs/ceres/infer_attributable
+```
+
+Quick fit check:
+
+```bash
+PYTHONPATH=neotube/src python scripts/fit_diagnostics.py \
+  --obs runs/ceres/obs.csv \
+  --posterior runs/ceres/fit_seed_attributable/posterior.npz
 ```
 
 ## Philosophy
