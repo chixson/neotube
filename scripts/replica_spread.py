@@ -6,10 +6,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import shutil
+import json
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from astropy.coordinates import get_body_barycentric_posvel
+from astropy.time import Time
+import astropy.units as u
 
 
 def load_replicas(path: Path) -> pd.DataFrame:
@@ -78,6 +82,65 @@ def plot_pca(
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
 
+def plot_pca1_r_au(
+    pc1: np.ndarray,
+    r_au: np.ndarray,
+    out_path: Path,
+    jpl_pc1: float | None,
+    jpl_r_au: float | None,
+) -> None:
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(pc1, r_au, s=6, alpha=0.3)
+    if jpl_pc1 is not None and jpl_r_au is not None:
+        ax.plot(jpl_pc1, jpl_r_au, "r+", markersize=12, mew=2, label="JPL")
+        ax.legend()
+    ax.set_xlabel("PC1 (arcsec)")
+    ax.set_ylabel("Heliocentric distance (AU)")
+    ax.set_title("Replica cloud (PC1 vs heliocentric distance)")
+    ax.grid(True, lw=0.5, color="#dddddd")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+
+def plot_pca1_topo_au(
+    pc1: np.ndarray,
+    topo_au: np.ndarray,
+    out_path: Path,
+    jpl_pc1: float | None,
+    jpl_topo_au: float | None,
+) -> None:
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(pc1, topo_au, s=6, alpha=0.3)
+    if jpl_pc1 is not None and jpl_topo_au is not None:
+        ax.plot(jpl_pc1, jpl_topo_au, "r+", markersize=12, mew=2, label="JPL")
+        ax.legend()
+    ax.set_xlabel("PC1 (arcsec)")
+    ax.set_ylabel("Topocentric distance (AU)")
+    ax.set_title("Replica cloud (PC1 vs topocentric distance)")
+    ax.grid(True, lw=0.5, color="#dddddd")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+
+
+def _load_epoch_utc(meta_path: Path) -> str | None:
+    if not meta_path.exists():
+        return None
+    try:
+        with meta_path.open() as fh:
+            meta = json.load(fh)
+    except Exception:
+        return None
+    return meta.get("epoch_utc")
+
+
+def _topocentric_distance_au(pos_km: np.ndarray, epoch_utc: str) -> np.ndarray:
+    time_array = Time([epoch_utc] * len(pos_km), scale="utc")
+    earth_pos, _ = get_body_barycentric_posvel("earth", time_array)
+    sun_pos, _ = get_body_barycentric_posvel("sun", time_array)
+    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.T
+    vectors = pos_km - earth_helio
+    return np.linalg.norm(vectors, axis=1) / 149597870.7
+
+
 def mirror_to_data_dir(*paths: Path) -> None:
     data_dir = Path(__file__).resolve().parents[1] / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -97,10 +160,34 @@ def main() -> int:
     )
     parser.add_argument("--jpl-ra", type=float, default=None, help="Optional JPL RA (deg).")
     parser.add_argument("--jpl-dec", type=float, default=None, help="Optional JPL Dec (deg).")
+    parser.add_argument("--jpl-r-au", type=float, default=None, help="Optional JPL heliocentric distance (AU).")
+    parser.add_argument("--jpl-topo-au", type=float, default=None, help="Optional JPL topocentric distance (AU).")
+    parser.add_argument(
+        "--epoch-utc",
+        type=str,
+        default=None,
+        help="UTC epoch for topocentric distances; falls back to replicas _meta.json if present.",
+    )
     args = parser.parse_args()
 
     df = load_replicas(args.replicas)
     dra, ddec, ra0, dec0 = tangent_offsets(df)
+    r_au = None
+    topo_au = None
+    if {"x_km", "y_km", "z_km"}.issubset(df.columns):
+        pos = df[["x_km", "y_km", "z_km"]].to_numpy(dtype=float)
+        r_au = np.linalg.norm(pos, axis=1) / 149597870.7
+        epoch_utc = args.epoch_utc or _load_epoch_utc(
+            args.replicas.with_name(args.replicas.stem + "_meta.json")
+        )
+        if epoch_utc is not None:
+            try:
+                topo_au = _topocentric_distance_au(pos, epoch_utc)
+            except Exception:
+                topo_au = None
+    else:
+        print("replica CSV missing x_km/y_km/z_km; skipping PC1 vs r(AU) plot")
+
     jpl_offset = None
     if args.jpl_ra is not None and args.jpl_dec is not None:
         cosd = np.cos(np.deg2rad(dec0))
@@ -111,13 +198,25 @@ def main() -> int:
     base = args.output_prefix
     radec_path = base.parent / f"{base.name}_radec.png"
     pca_path = base.parent / f"{base.name}_pca.png"
+    pca1_r_path = base.parent / f"{base.name}_pca1_rAU.png"
+    pca1_topo_path = base.parent / f"{base.name}_pca1_topoAU.png"
     plot_ra_dec(dra, ddec, radec_path, jpl_offset)
     pc1, pc2, eigvecs = pca_components(dra, ddec)
     jpl_pc = None
+    jpl_pc1 = None
     if jpl_offset is not None:
         jpl_pc = tuple((eigvecs.T @ np.array(jpl_offset)).tolist())
+        jpl_pc1 = float(jpl_pc[0])
     plot_pca(pc1, pc2, pca_path, jpl_pc)
-    mirror_to_data_dir(radec_path, pca_path)
+    if r_au is not None:
+        plot_pca1_r_au(pc1, r_au, pca1_r_path, jpl_pc1, args.jpl_r_au)
+        if topo_au is not None:
+            plot_pca1_topo_au(pc1, topo_au, pca1_topo_path, jpl_pc1, args.jpl_topo_au)
+            mirror_to_data_dir(radec_path, pca_path, pca1_r_path, pca1_topo_path)
+        else:
+            mirror_to_data_dir(radec_path, pca_path, pca1_r_path)
+    else:
+        mirror_to_data_dir(radec_path, pca_path)
     return 0
 
 

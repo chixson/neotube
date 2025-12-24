@@ -38,6 +38,18 @@ def main() -> int:
     parser.add_argument("--rho-max-au", type=float, default=5.0, help="Max rho (AU).")
     parser.add_argument("--rhodot-max-kms", type=float, default=50.0, help="Max |rho_dot| (km/s).")
     parser.add_argument(
+        "--rho-prior",
+        choices=["volume", "log", "uniform"],
+        default="log",
+        help="Prior for rho proposals: volume (~rho^2), log (1/rho), or uniform.",
+    )
+    parser.add_argument(
+        "--rho-prior-power",
+        type=float,
+        default=2.0,
+        help="Power for rho prior (log weight term = power * log(rho)).",
+    )
+    parser.add_argument(
         "--scoring-mode",
         choices=["kepler", "nbody"],
         default="kepler",
@@ -56,6 +68,11 @@ def main() -> int:
         help="Top-K proposals to rescore with n-body after Kepler prefilter.",
     )
     parser.add_argument("--n-workers", type=int, default=8, help="Workers for ranged scoring.")
+    parser.add_argument(
+        "--emit-debug",
+        action="store_true",
+        help="If set, write ranging_debug.npz with proposals/weights/top-candidates for post-mortem.",
+    )
     parser.add_argument(
         "--log-every",
         type=int,
@@ -76,6 +93,7 @@ def main() -> int:
         ranged = sample_ranged_replicas(
             observations=observations,
             epoch=posterior.epoch,
+            n_replicas=args.n,
             n_proposals=args.n_proposals,
             rho_min_au=args.rho_min_au,
             rho_max_au=args.rho_max_au,
@@ -90,13 +108,49 @@ def main() -> int:
             n_workers=args.n_workers,
             chunk_size=args.chunk_size,
             top_k_nbody=args.top_k_nbody,
+            rho_prior_power=args.rho_prior_power,
+            rho_prior_mode=args.rho_prior,
         )
         weights = ranged["weights"]
         states = ranged["states"]
-        idx = np.random.default_rng(int(args.seed)).choice(
-            len(states), size=args.n, replace=True, p=weights
-        )
-        replicas = states[idx].T
+        if args.emit_debug:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            diag_path = args.output.parent / "ranging_debug.npz"
+            top_k = min(len(weights), max(1, args.top_k_nbody))
+            top_idx = np.argsort(-weights)[:top_k]
+            try:
+                np.savez(
+                    diag_path,
+                    rhos=ranged.get("rhos"),
+                    rhodots=ranged.get("rhodots"),
+                    weights=weights,
+                    top_idx=top_idx,
+                    top_rhos=ranged.get("rhos")[top_idx],
+                    top_rhodots=ranged.get("rhodots")[top_idx],
+                    top_weights=weights[top_idx],
+                    top_states=states[top_idx],
+                )
+                print("Wrote diagnostics to", diag_path)
+            except Exception as exc:
+                print("Failed to write debug npz:", exc)
+        ess = 1.0 / np.sum(weights**2)
+        if ess < max(50, 0.05 * len(weights)):
+            from .ranging import stratified_resample
+
+            replicas = stratified_resample(
+                states,
+                weights,
+                nrep=args.n,
+                n_clusters=12,
+                jitter_scale=1e-6,
+                nu=nu_val,
+                seed=args.seed,
+            ).T
+        else:
+            idx = np.random.default_rng(int(args.seed)).choice(
+                len(states), size=args.n, replace=True, p=weights
+            )
+            replicas = states[idx].T
     else:
         replicas = sample_replicas(posterior, args.n, seed=args.seed, method=args.method, nu=nu_val)
 
@@ -119,6 +173,8 @@ def main() -> int:
                 "rho_min_au": args.rho_min_au,
                 "rho_max_au": args.rho_max_au,
                 "rhodot_max_kms": args.rhodot_max_kms,
+                "rho_prior": args.rho_prior,
+                "rho_prior_power": args.rho_prior_power,
                 "scoring_mode": "nbody" if args.no_kepler else args.scoring_mode,
                 "chunk_size": args.chunk_size,
                 "top_k_nbody": args.top_k_nbody,
