@@ -178,6 +178,7 @@ def main() -> int:
         observations,
         tuple(args.perturbers),
         args.max_step,
+        use_kepler=not args.no_kepler,
     )
 
     residuals_rows = []

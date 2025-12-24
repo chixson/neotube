@@ -45,6 +45,15 @@ PLANET_GMS = {
     "moon": 4.9048695e3,
 }
 
+# Cache for repeated ephemeris lookups (per process).
+_BULK_EPHEM_CACHE: dict[tuple, np.ndarray] = {}
+
+
+def _times_cache_key(times: Time) -> tuple:
+    jd1 = np.atleast_1d(times.jd1)
+    jd2 = np.atleast_1d(times.jd2)
+    return (times.scale, jd1.tobytes(), jd2.tobytes())
+
 def _stumpff_C2(z: float) -> float:
     try:
         if z > 1e-8:
@@ -256,9 +265,15 @@ class PerturberTable:
 
 def _bulk_heliocentric_positions(body: str, times: Time, sun_coord: SkyCoord) -> np.ndarray:
     """Return heliocentric (km) positions for body over multiple epochs."""
+    key = (body.lower(), _times_cache_key(times))
+    cached = _BULK_EPHEM_CACHE.get(key)
+    if cached is not None:
+        return cached
     body_pos, _ = get_body_barycentric_posvel(body, times)
     vec = body_pos.xyz - sun_coord.xyz
-    return vec.to(u.km).value.T
+    out = vec.to(u.km).value.T
+    _BULK_EPHEM_CACHE[key] = out
+    return out
 
 
 def _heliocentric_position(body: str, epoch: Time) -> np.ndarray:
