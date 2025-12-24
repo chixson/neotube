@@ -13,6 +13,7 @@ from astropy.coordinates import (
     CartesianRepresentation,
     GCRS,
     ICRS,
+    EarthLocation,
     get_body_barycentric_posvel,
     HeliocentricTrueEcliptic,
     SkyCoord,
@@ -26,7 +27,7 @@ from .propagate import (
     propagate_state,
     propagate_state_kepler,
 )
-from .sites import get_site_location
+from .sites import get_site_location, load_observatories
 
 __all__ = ["fit_orbit", "sample_replicas", "predict_orbit", "load_posterior"]
 
@@ -83,11 +84,27 @@ def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
 
 
 def _site_offset(obs: Observation) -> np.ndarray:
+    # Return the geocentric cartesian vector (km) for the observing site at obs.time.
     if not obs.site:
-        return np.zeros(3, dtype=float)
+        loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
+        gcrs = loc.get_gcrs(obstime=obs.time)
+        return gcrs.cartesian.xyz.to(u.km).value
+
     loc = get_site_location(obs.site)
     if loc is None:
-        return np.zeros(3, dtype=float)
+        try:
+            _ = load_observatories()
+        except Exception:
+            pass
+        loc = get_site_location(obs.site)
+    if loc is None:
+        warnings.warn(
+            f"Site code '{obs.site}' not found in observatory catalog; using fallback Earth location."
+        )
+        loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
+        gcrs = loc.get_gcrs(obstime=obs.time)
+        return gcrs.cartesian.xyz.to(u.km).value
+
     gcrs = loc.get_gcrs(obstime=obs.time)
     return gcrs.cartesian.xyz.to(u.km).value
 
