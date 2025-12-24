@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from multiprocessing import Pool
 from typing import Any, Iterable, Sequence
@@ -11,7 +12,7 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord, get_body_barycentric_posvel
 from astropy.time import Time
 
-from .fit import _predict_batch, _site_offset
+from .fit import _predict_batch, _site_offset, _site_offset_cached
 from .models import Observation
 
 AU_KM = 149597870.7
@@ -225,7 +226,7 @@ def add_attributable_jitter(
     sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
     earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
     earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
-    site_offset = _site_offset(obs[0])
+    site_offset = _site_offset_cached(obs[0])
 
     out = []
     for st in states:
@@ -268,6 +269,148 @@ def add_attributable_jitter(
     if len(out) == 0:
         return np.empty((0, 6), dtype=float)
     return np.vstack(out)
+
+
+_SPREAD_WORKER_CTX: dict[str, object] = {}
+
+
+def _init_spread_worker(obs: Sequence[Observation], posterior_small: dict[str, object]) -> None:
+    """Initializer for local-spread workers to avoid repeated pickling."""
+    global _SPREAD_WORKER_CTX
+    _SPREAD_WORKER_CTX["obs"] = obs
+
+    class PosteriorLite:
+        def __init__(self, epoch_jd: float, fit_scale: float, site_kappas: dict[str, float], nu: float | None):
+            self.epoch = Time(epoch_jd, format="jd")
+            self.fit_scale = fit_scale
+            self.site_kappas = site_kappas
+            self.nu = nu
+
+    _SPREAD_WORKER_CTX["posterior"] = PosteriorLite(
+        float(posterior_small.get("epoch_jd", Time.now().jd)),
+        float(posterior_small.get("fit_scale", 1.0)),
+        dict(posterior_small.get("site_kappas", {})),
+        posterior_small.get("nu", None),
+    )
+
+
+def _spread_chunk_worker(job: dict[str, object]) -> np.ndarray:
+    """Worker function for local-spread chunk jobs."""
+    mode = job["mode"]
+    states = job["states"]
+    n_per_state = int(job.get("n_per_state", 10))
+    sigma_arcsec = float(job.get("sigma_arcsec", 0.5))
+    vel_scale_factor = float(job.get("vel_scale_factor", 1.0))
+    df = float(job.get("df", 4.0))
+    posterior = _SPREAD_WORKER_CTX["posterior"]
+    obs = _SPREAD_WORKER_CTX["obs"]
+
+    if mode == "tangent":
+        return add_tangent_jitter(
+            states,
+            obs,
+            posterior,
+            n_per_state=n_per_state,
+            sigma_arcsec=sigma_arcsec,
+            fit_scale=posterior.fit_scale,
+            site_kappas=posterior.site_kappas,
+            vel_timescale_sec=None,
+            vel_scale_factor=vel_scale_factor,
+        )
+    if mode == "multit":
+        return add_local_multit_jitter(
+            states,
+            obs,
+            posterior,
+            n_per_state=n_per_state,
+            sigma_arcsec=sigma_arcsec,
+            fit_scale=posterior.fit_scale,
+            site_kappas=posterior.site_kappas,
+            vel_scale_factor=vel_scale_factor,
+            df=df,
+        )
+    if mode == "attributable":
+        return add_attributable_jitter(
+            states,
+            obs,
+            posterior,
+            n_per_state=n_per_state,
+            sigma_arcsec=sigma_arcsec,
+            fit_scale=posterior.fit_scale,
+            site_kappas=posterior.site_kappas,
+        )
+    raise RuntimeError(f"Unknown local-spread mode: {mode}")
+
+
+def add_local_spread_parallel(
+    states: np.ndarray,
+    obs: Sequence[Observation] | str,
+    posterior: object,
+    mode: str = "tangent",
+    n_per_state: int = 10,
+    sigma_arcsec: float = 0.5,
+    fit_scale: float | None = None,
+    site_kappas: dict[str, float] | None = None,
+    vel_scale_factor: float = 1.0,
+    df: float = 4.0,
+    n_workers: int = 8,
+    chunk_size: int | None = None,
+) -> np.ndarray:
+    """Parallel driver for local-spread jitter using a process pool."""
+    if isinstance(obs, str):
+        from neotube.fit_cli import load_observations
+
+        obs = load_observations(obs, None)
+
+    if site_kappas is None:
+        site_kappas = getattr(posterior, "site_kappas", {}) or {}
+    if fit_scale is None:
+        fit_scale = float(getattr(posterior, "fit_scale", 1.0))
+
+    n_states = len(states)
+    if n_states == 0:
+        return np.empty((0, 6), dtype=float)
+
+    if chunk_size is None:
+        chunk_size = min(max(128, n_states // (max(1, n_workers) * 4 + 1)), 4096)
+
+    posterior_small = {
+        "epoch_jd": float(getattr(posterior, "epoch", Time.now()).jd),
+        "fit_scale": fit_scale,
+        "site_kappas": site_kappas,
+        "nu": getattr(posterior, "nu", None),
+    }
+
+    chunks = []
+    for i in range(0, n_states, chunk_size):
+        chunks.append(states[i : i + chunk_size])
+
+    jobs = []
+    for chunk in chunks:
+        jobs.append(
+            {
+                "mode": mode,
+                "states": chunk,
+                "n_per_state": n_per_state,
+                "sigma_arcsec": sigma_arcsec,
+                "vel_scale_factor": float(vel_scale_factor),
+                "df": float(df),
+            }
+        )
+
+    results = []
+    with ProcessPoolExecutor(
+        max_workers=max(1, int(n_workers)),
+        initializer=_init_spread_worker,
+        initargs=(obs, posterior_small),
+    ) as executor:
+        for res in executor.map(_spread_chunk_worker, jobs):
+            if isinstance(res, np.ndarray) and res.size:
+                results.append(res)
+
+    if not results:
+        return np.empty((0, 6), dtype=float)
+    return np.vstack(results)
 
 
 def _rho_log_prior(

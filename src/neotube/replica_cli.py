@@ -12,7 +12,15 @@ from astropy.time import Time
 from .fit import load_posterior, sample_replicas
 from .propagate import predict_radec_batch
 from .fit_cli import load_observations
-from .ranging import add_attributable_jitter, add_local_multit_jitter, add_tangent_jitter, sample_ranged_replicas
+from .ranging import add_local_spread_parallel, sample_ranged_replicas
+
+
+def _radec_chunk_worker(payload):
+    chunk_states, epoch_str = payload
+    epoch = Time(epoch_str, scale="utc")
+    epochs = [epoch] * chunk_states.shape[0]
+    ra, dec = predict_radec_batch(chunk_states, epochs)
+    return ra, dec
 
 
 def main() -> int:
@@ -255,41 +263,20 @@ def main() -> int:
             obs_for_jitter = args.obs
 
         states = replicas.T.copy()
-        if args.local_spread_mode == "tangent":
-            jittered = add_tangent_jitter(
-                states,
-                obs_for_jitter,
-                posterior,
-                n_per_state=args.local_spread_n,
-                sigma_arcsec=args.local_spread_sigma_arcsec,
-                fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
-                site_kappas=getattr(posterior, "site_kappas", {}),
-                vel_scale_factor=float(args.local_spread_vel_scale),
-            )
-        elif args.local_spread_mode == "multit":
-            jittered = add_local_multit_jitter(
-                states,
-                obs_for_jitter,
-                posterior,
-                n_per_state=args.local_spread_n,
-                sigma_arcsec=args.local_spread_sigma_arcsec,
-                fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
-                site_kappas=getattr(posterior, "site_kappas", {}),
-                vel_scale_factor=float(args.local_spread_vel_scale),
-                df=float(args.local_spread_df),
-            )
-        elif args.local_spread_mode == "attributable":
-            jittered = add_attributable_jitter(
-                states,
-                obs_for_jitter,
-                posterior,
-                n_per_state=args.local_spread_n,
-                sigma_arcsec=args.local_spread_sigma_arcsec,
-                fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
-                site_kappas=getattr(posterior, "site_kappas", {}),
-            )
-        else:
-            raise SystemExit("unsupported local_spread_mode")
+        jittered = add_local_spread_parallel(
+            states,
+            obs_for_jitter,
+            posterior,
+            mode=args.local_spread_mode,
+            n_per_state=int(args.local_spread_n),
+            sigma_arcsec=float(args.local_spread_sigma_arcsec),
+            fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
+            site_kappas=getattr(posterior, "site_kappas", {}),
+            vel_scale_factor=float(args.local_spread_vel_scale),
+            df=float(args.local_spread_df),
+            n_workers=int(args.n_workers),
+            chunk_size=int(args.chunk_size) if args.chunk_size is not None else None,
+        )
         combined = np.vstack([states, jittered])
         rng = np.random.default_rng(int(args.seed))
         if combined.shape[0] >= args.n:
@@ -335,13 +322,6 @@ def main() -> int:
     states = replicas.T.copy()
     total = states.shape[0]
     radec_chunk = max(1, int(args.radec_chunk_size))
-
-    def _radec_chunk_worker(payload):
-        chunk_states, epoch_str = payload
-        epoch = Time(epoch_str, scale="utc")
-        epochs = [epoch] * chunk_states.shape[0]
-        ra, dec = predict_radec_batch(chunk_states, epochs)
-        return ra, dec
 
     schedule = []
     for start in range(0, total, radec_chunk):

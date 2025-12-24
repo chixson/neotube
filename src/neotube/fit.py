@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -112,6 +113,34 @@ def _site_offset(obs: Observation) -> np.ndarray:
 
     gcrs = loc.get_gcrs(obstime=obs.time)
     return gcrs.cartesian.xyz.to(u.km).value
+
+
+@lru_cache(maxsize=1024)
+def _site_offset_cached_for_jd(site_key: str | None, jd_seconds: int) -> tuple[float, float, float]:
+    """Return cached site offset tuple (km) keyed by site + integer seconds."""
+    t = Time(jd_seconds / 86400.0, format="jd")
+    if not site_key:
+        loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
+        gcrs = loc.get_gcrs(obstime=t)
+        return tuple(gcrs.cartesian.xyz.to(u.km).value)
+
+    obslite = type("ObsLite", (), {})()
+    obslite.site = site_key
+    obslite.time = t
+    try:
+        vec = _site_offset(obslite)
+        return tuple(vec)
+    except Exception:
+        loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
+        gcrs = loc.get_gcrs(obstime=t)
+        return tuple(gcrs.cartesian.xyz.to(u.km).value)
+
+
+def _site_offset_cached(obs: Observation) -> np.ndarray:
+    """Cached wrapper for site offsets keyed on integer-second JD."""
+    site_key = obs.site.strip().upper() if getattr(obs, "site", None) else None
+    jd_seconds = int(round(obs.time.jd * 86400.0))
+    return np.array(_site_offset_cached_for_jd(site_key, jd_seconds), dtype=float)
 
 
 def _observation_line_of_sight(obs: Observation) -> tuple[np.ndarray, np.ndarray]:
