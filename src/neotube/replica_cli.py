@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
+from astropy.time import Time
 
 from .fit import load_posterior, sample_replicas
-from .propagate import predict_radec
+from .propagate import predict_radec_batch
 from .fit_cli import load_observations
 from .ranging import add_attributable_jitter, add_local_multit_jitter, add_tangent_jitter, sample_ranged_replicas
 
@@ -76,6 +78,12 @@ def main() -> int:
         type=int,
         default=None,
         help="Chunk size for ranged proposal scoring (defaults to proposals//workers or 128).",
+    )
+    parser.add_argument(
+        "--radec-chunk-size",
+        type=int,
+        default=2048,
+        help="Chunk size for RA/Dec computation.",
     )
     parser.add_argument(
         "--top-k-nbody",
@@ -322,6 +330,26 @@ def main() -> int:
             indent=2,
         )
 
+    # Compute RA/Dec in parallel batches to avoid a slow serial loop.
+    epoch_isot = posterior.epoch.isot
+    states = replicas.T.copy()
+    total = states.shape[0]
+    radec_chunk = max(1, int(args.radec_chunk_size))
+
+    def _radec_chunk_worker(payload):
+        chunk_states, epoch_str = payload
+        epoch = Time(epoch_str, scale="utc")
+        epochs = [epoch] * chunk_states.shape[0]
+        ra, dec = predict_radec_batch(chunk_states, epochs)
+        return ra, dec
+
+    schedule = []
+    for start in range(0, total, radec_chunk):
+        schedule.append((states[start : start + radec_chunk], epoch_isot))
+
+    max_workers = max(1, int(args.n_workers or 1))
+    actual_workers = min(max_workers, len(schedule))
+
     with args.output.open("w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(
@@ -337,12 +365,37 @@ def main() -> int:
                 "dec_deg",
             ]
         )
-        for idx in range(replicas.shape[1]):
-            state = replicas[:, idx]
-            ra, dec = predict_radec(state, posterior.epoch)
-            writer.writerow(
-                [idx, *(f"{val:.6f}" for val in state), f"{ra:.6f}", f"{dec:.6f}"]
-            )
+        idx_offset = 0
+        if actual_workers <= 1 or len(schedule) == 1:
+            for chunk_states, epoch_str in schedule:
+                ra, dec = _radec_chunk_worker((chunk_states, epoch_str))
+                for i in range(chunk_states.shape[0]):
+                    state = chunk_states[i]
+                    writer.writerow(
+                        [
+                            idx_offset + i,
+                            *(f"{val:.6f}" for val in state),
+                            f"{ra[i]:.6f}",
+                            f"{dec[i]:.6f}",
+                        ]
+                    )
+                idx_offset += chunk_states.shape[0]
+        else:
+            with ProcessPoolExecutor(max_workers=actual_workers) as executor:
+                for (chunk_states, _), (ra, dec) in zip(
+                    schedule, executor.map(_radec_chunk_worker, schedule)
+                ):
+                    for i in range(chunk_states.shape[0]):
+                        state = chunk_states[i]
+                        writer.writerow(
+                            [
+                                idx_offset + i,
+                                *(f"{val:.6f}" for val in state),
+                                f"{ra[i]:.6f}",
+                                f"{dec[i]:.6f}",
+                            ]
+                        )
+                    idx_offset += chunk_states.shape[0]
 
     print(f"Wrote {args.n} replicas to {args.output}")
     return 0
