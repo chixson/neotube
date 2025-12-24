@@ -10,7 +10,7 @@ import numpy as np
 from .fit import load_posterior, sample_replicas
 from .propagate import predict_radec
 from .fit_cli import load_observations
-from .ranging import sample_ranged_replicas
+from .ranging import sample_ranged_replicas, add_tangent_jitter
 
 
 def main() -> int:
@@ -37,6 +37,22 @@ def main() -> int:
     parser.add_argument("--rho-min-au", type=float, default=1e-4, help="Min rho (AU).")
     parser.add_argument("--rho-max-au", type=float, default=5.0, help="Max rho (AU).")
     parser.add_argument("--rhodot-max-kms", type=float, default=50.0, help="Max |rho_dot| (km/s).")
+    parser.add_argument(
+        "--range-profile",
+        choices=["neo", "main-belt", "jupiter-trojan", "tno", "comet", "wide", "main", "mba"],
+        default=None,
+        help=(
+            "Preset rho/rhodot ranges for common object classes. "
+            "Choices:\n"
+            "  neo             (near-earth objects)      : rho=[1e-4,2.0] AU, rhodot<=100 km/s\n"
+            "  main-belt (mba) (main-belt asteroids)    : rho=[1.8,4.5] AU, rhodot<=20 km/s\n"
+            "  jupiter-trojan  (Trojan asteroids)       : rho=[4.5,5.7] AU, rhodot<=10 km/s\n"
+            "  tno              (trans-Neptunian objects): rho=[20,100] AU, rhodot<=5 km/s\n"
+            "  comet            (comets, wide eccentric) : rho=[0.01,50] AU, rhodot<=200 km/s\n"
+            "  wide             (very wide exploratory)  : rho=[1e-4,100] AU, rhodot<=100 km/s\n"
+            "Aliases: 'main' or 'mba' -> 'main-belt'."
+        ),
+    )
     parser.add_argument(
         "--rho-prior",
         choices=["volume", "log", "uniform"],
@@ -81,7 +97,52 @@ def main() -> int:
     )
     parser.add_argument("--max-step", type=float, default=3600.0, help="Max step (seconds) for propagation.")
     parser.add_argument("--no-kepler", action="store_true", help="Disable Kepler propagation for ranged scoring.")
+    parser.add_argument(
+        "--local-spread-n",
+        type=int,
+        default=0,
+        help="Per-state tangent jitter count (0 disables).",
+    )
+    parser.add_argument(
+        "--local-spread-sigma-arcsec",
+        type=float,
+        default=0.5,
+        help="Per-state tangent jitter sigma (arcsec).",
+    )
     args = parser.parse_args()
+    # Apply range-profile overrides (explicit profile wins)
+    if args.range_profile is not None:
+        prof = args.range_profile
+        if prof in ("main", "mba"):
+            prof = "main-belt"
+        if prof == "neo":
+            args.rho_min_au = 1e-4
+            args.rho_max_au = 2.0
+            args.rhodot_max_kms = 100.0
+        elif prof == "main-belt":
+            args.rho_min_au = 1.8
+            args.rho_max_au = 4.5
+            args.rhodot_max_kms = 20.0
+        elif prof == "jupiter-trojan":
+            args.rho_min_au = 4.5
+            args.rho_max_au = 5.7
+            args.rhodot_max_kms = 10.0
+        elif prof == "tno":
+            args.rho_min_au = 20.0
+            args.rho_max_au = 100.0
+            args.rhodot_max_kms = 5.0
+        elif prof == "comet":
+            args.rho_min_au = 0.01
+            args.rho_max_au = 50.0
+            args.rhodot_max_kms = 200.0
+        elif prof == "wide":
+            args.rho_min_au = 1e-4
+            args.rho_max_au = 100.0
+            args.rhodot_max_kms = 100.0
+        print(
+            f"[replica_cli] range_profile={args.range_profile} -> "
+            f"rho=[{args.rho_min_au},{args.rho_max_au}] AU, rhodot_max={args.rhodot_max_kms} km/s"
+        )
 
     posterior = load_posterior(args.posterior)
     nu_val = posterior.nu if posterior.nu is not None else args.nu
@@ -153,6 +214,35 @@ def main() -> int:
             replicas = states[idx].T
     else:
         replicas = sample_replicas(posterior, args.n, seed=args.seed, method=args.method, nu=nu_val)
+
+    # replicas currently shaped (6, N)
+    # Optionally expand each sampled state with local tangent-plane jitter to create thickness
+    if args.local_spread_n and args.local_spread_n > 0:
+        if args.ranged:
+            obs_for_jitter = observations
+        else:
+            if args.obs is None:
+                raise SystemExit("--local-spread requires --obs when not using --ranged")
+            obs_for_jitter = args.obs
+
+        states = replicas.T.copy()
+        jittered = add_tangent_jitter(
+            states,
+            obs_for_jitter,
+            posterior,
+            n_per_state=args.local_spread_n,
+            sigma_arcsec=args.local_spread_sigma_arcsec,
+            fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
+            site_kappas=getattr(posterior, "site_kappas", {}),
+        )
+        combined = np.vstack([states, jittered])
+        rng = np.random.default_rng(int(args.seed))
+        if combined.shape[0] >= args.n:
+            idxs = rng.choice(combined.shape[0], size=args.n, replace=False)
+        else:
+            idxs = rng.choice(combined.shape[0], size=args.n, replace=True)
+        chosen = combined[idxs]
+        replicas = chosen.T
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     meta_path = args.output.with_name(args.output.stem + "_meta.json")

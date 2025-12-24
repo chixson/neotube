@@ -102,17 +102,17 @@ def pca_components(dra: np.ndarray, ddec: np.ndarray) -> tuple[np.ndarray, np.nd
     return projected[0], projected[1], eigvecs
 
 
-def pca_pc1_6d(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def pca_6d(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if _HAS_SKLEARN:
         pca = SKPCA(n_components=3)
         Z = pca.fit_transform(X)
-        return Z[:, 0], pca.mean_, pca.components_
+        return Z, pca.mean_, pca.components_
     mean = X.mean(axis=0)
     C = X - mean
     _, _, Vt = np.linalg.svd(C, full_matrices=False)
     components = Vt[:3]
     Z = C @ components.T
-    return Z[:, 0], mean, components
+    return Z, mean, components
 
 
 def radec_from_vectors(vecs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -199,10 +199,18 @@ def main() -> int:
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.replicas).resolve().parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    pc1_6d, mean_6d, comps_6d = pca_pc1_6d(X)
+    Z6, mean_6d, comps_6d = pca_6d(X)
+    pc1_6d = Z6[:, 0]
+    pc2_6d = Z6[:, 1]
+    pc3_6d = Z6[:, 2]
     target_pc1 = None
+    target_pc2 = None
+    target_pc3 = None
     if target is not None:
-        target_pc1 = float((target - mean_6d).dot(comps_6d[0]))
+        target_proj = (target - mean_6d).dot(comps_6d.T)
+        target_pc1 = float(target_proj[0])
+        target_pc2 = float(target_proj[1])
+        target_pc3 = float(target_proj[2])
 
     if target is not None:
         dpos = np.linalg.norm(X[:, :3] - target[:3], axis=1)
@@ -298,9 +306,22 @@ def main() -> int:
     fig.tight_layout()
     fig.savefig(pca_path, dpi=150)
 
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.scatter(pc2_6d, pc3_6d, s=20, alpha=0.6, label="replicas")
+    if target_pc2 is not None and target_pc3 is not None:
+        ax.scatter([target_pc2], [target_pc3], color="red", s=120, label="JPL")
+    ax.set_xlabel("PC2")
+    ax.set_ylabel("PC3")
+    ax.grid(True)
+    ax.legend()
+    pca23_path = out_dir / "topo_pca23.png"
+    fig.tight_layout()
+    fig.savefig(pca23_path, dpi=150)
+
     print("Wrote", diag_path)
     print("Wrote", radec_path)
     print("Wrote", pca_path)
+    print("Wrote", pca23_path)
     return 0
 
 
