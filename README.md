@@ -10,6 +10,7 @@ This package implements the complete NEOTube / SSO precovery pipeline: ingest ob
 - **Archive planning**: `neotube-plan` plus `neotube-ztf` fetch metadata + science/reference/ZOGY cutouts while respecting IRSA rate limits and caching.
 - **Inference**: `neotube-infer` reweights replicas using matched-filter SNR maps (ZOGY when available), and the diagnostic CLIs expose coverage plots and overlays.
 - **Fit diagnostics**: `scripts/fit_diagnostics.py` prints RMS/chi2 and per-observation residuals from an observation CSV + posterior.
+- **Replica diagnostics**: `scripts/replica_spread.py` now emits three plots by default: RA/Dec, PCA1 vs PCA2, and PCA1 vs heliocentric distance (AU). Use `--jpl-ra/--jpl-dec/--jpl-r-au` to crosshair JPL.
 
 ## Run example (Ceres)
 
