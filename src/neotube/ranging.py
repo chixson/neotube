@@ -38,48 +38,236 @@ def add_tangent_jitter(
     sigma_arcsec: float = 0.5,
     fit_scale: float | None = None,
     site_kappas: dict[str, float] | None = None,
+    vel_timescale_sec: float | None = None,
+    vel_scale_factor: float = 1.0,
 ) -> np.ndarray:
     """
-    For each 6D state, produce n_per_state jittered replicas by adding tangential offsets.
-    states: (N,6) array in km, km/s
-    obs: observations list (or path to obs CSV)
-    posterior: used to get epoch or fit_scale if needed
-    site_kappas: dict of site scaling
-    Returns: (N*n_per_state,6) array
+    Improved tangent-plane jitter: produces local clouds around each state with
+    consistent position and velocity perturbations.
+
+    Parameters
+    ----------
+    states : (N,6) array
+      Input candidate states (x,y,z,vx,vy,vz) in km and km/s.
+    obs : observation list or obs CSV path
+      Used to compute site offsets and a representative time baseline.
+    posterior : posterior object (used for fit_scale, site_kappas lookup)
+    n_per_state : int
+      Number of jittered samples to generate per input state.
+    sigma_arcsec : float
+      Angular sigma for tangent jitter (arcsec); multiplied by fit_scale and site kappa.
+    fit_scale : float or None
+      Use posterior.fit_scale if None.
+    site_kappas : dict or None
+      Per-site kappa multipliers; if None read from posterior.
+    vel_timescale_sec : float or None
+      Timescale to map spatial jitter to velocity jitter: v_noise ~ dr / vel_timescale_sec.
+      If None, use median(obs span) or 86400s default.
+    vel_scale_factor : float
+      Additional multiplier applied to computed velocity jitter (>=1.0 increases spread).
+
+    Returns
+    -------
+    (N*n_per_state,6) np.ndarray of jittered states.
     """
     if site_kappas is None:
-        site_kappas = getattr(posterior, "site_kappas", {})
+        site_kappas = getattr(posterior, "site_kappas", {}) or {}
     if fit_scale is None:
-        fit_scale = getattr(posterior, "fit_scale", 1.0)
+        fit_scale = float(getattr(posterior, "fit_scale", 1.0))
 
     if isinstance(obs, str):
         from neotube.fit_cli import load_observations
 
         obs = load_observations(obs, None)
 
+    dt_seconds = 86400.0
+    try:
+        times = np.array([o.time.jd for o in obs])
+        if len(times) >= 2:
+            span_days = np.max(times) - np.min(times)
+            dt_seconds = max(1.0, span_days * 86400.0)
+    except Exception:
+        dt_seconds = 86400.0
+    if vel_timescale_sec is None:
+        vel_timescale_sec = dt_seconds
+
     site = obs[0].site if len(obs) > 0 else None
     kappa = site_kappas.get(site, 1.0)
-
     sigma_eff_arcsec = sigma_arcsec * fit_scale * kappa
     sigma_rad = np.deg2rad(sigma_eff_arcsec / 3600.0)
 
     out = []
     for st in states:
-        r = st[:3]
-        v = st[3:]
+        r = st[:3].astype(float)
+        v = st[3:].astype(float)
         rho = np.linalg.norm(r)
+        if rho <= 0:
+            continue
         s = r / rho
         e_a, e_d = tangent_basis_from_unit(s)
         for _ in range(n_per_state):
             d_alpha = np.random.normal(scale=sigma_rad)
             d_delta = np.random.normal(scale=sigma_rad)
-            dra_km = rho * np.cos(np.arcsin(s[2])) * d_alpha
+            cosdec = np.sqrt(max(0.0, 1.0 - s[2] ** 2))
+            dra_km = rho * cosdec * d_alpha
             ddec_km = rho * d_delta
             dr = e_a * dra_km + e_d * ddec_km
             new_r = r + dr
-            new_v = v + (dr / 86400.0)
+            v_noise = (dr / max(1.0, vel_timescale_sec)) * vel_scale_factor
+            v_noise += np.random.normal(scale=0.1, size=3) * np.linalg.norm(v_noise + 1e-12)
+            new_v = v + v_noise
             out.append(np.hstack([new_r, new_v]))
-    return np.array(out)
+    if len(out) == 0:
+        return np.empty((0, 6), dtype=float)
+    return np.array(out, dtype=float)
+
+
+def add_local_multit_jitter(
+    states: np.ndarray,
+    obs: Sequence[Observation] | str,
+    posterior: object,
+    n_per_state: int = 10,
+    sigma_arcsec: float = 0.5,
+    fit_scale: float | None = None,
+    site_kappas: dict | None = None,
+    vel_scale_factor: float = 1.0,
+    df: float = 4.0,
+) -> np.ndarray:
+    """For each 6D state, sample n_per_state correlated multivariate-t draws.
+
+    - Position std (km) = rho * sigma_rad
+    - Velocity std (km/s) = position_std / dt_seconds * vel_scale_factor
+    - Covariance is diagonal ([pos_std^2]*3 + [vel_std^2]*3)
+    Returns array (N*n_per_state,6).
+    """
+    from .fit_cli import load_observations
+
+    if site_kappas is None:
+        site_kappas = getattr(posterior, "site_kappas", {}) or {}
+    if fit_scale is None:
+        fit_scale = float(getattr(posterior, "fit_scale", 1.0))
+
+    if isinstance(obs, str):
+        obs = load_observations(obs, None)
+
+    if len(obs) >= 2:
+        times = np.array([o.time.jd for o in obs])
+        dt_days = float(np.max(times) - np.min(times))
+        dt_seconds = max(1.0, dt_days * 86400.0)
+    else:
+        dt_seconds = 86400.0
+
+    site = obs[0].site if len(obs) > 0 else None
+    kappa = site_kappas.get(site, 1.0)
+    sigma_eff_arcsec = sigma_arcsec * fit_scale * kappa
+    sigma_rad = np.deg2rad(sigma_eff_arcsec / 3600.0)
+
+    out = []
+    for st in states:
+        r = st[:3].astype(float)
+        v = st[3:].astype(float)
+        rho = np.linalg.norm(r)
+        if rho <= 0:
+            continue
+        pos_std_km = float(rho * sigma_rad)
+        vel_std_km_s = float((pos_std_km / max(1.0, dt_seconds)) * vel_scale_factor)
+
+        mean = np.hstack([r, v])
+        cov = np.diag([pos_std_km**2] * 3 + [vel_std_km_s**2] * 3)
+        d = 6
+        for _ in range(n_per_state):
+            g = np.random.gamma(df / 2.0, 2.0 / df)
+            z = np.random.multivariate_normal(np.zeros(d), cov)
+            sample = mean + z / np.sqrt(g)
+            out.append(sample)
+    if len(out) == 0:
+        return np.empty((0, 6), dtype=float)
+    return np.vstack(out)
+
+
+def add_attributable_jitter(
+    states: np.ndarray,
+    obs: Sequence[Observation] | str,
+    posterior: object,
+    n_per_state: int = 10,
+    sigma_arcsec: float = 0.5,
+    fit_scale: float | None = None,
+    site_kappas: dict | None = None,
+) -> np.ndarray:
+    """Jitter states in attributable space (ra, dec, ra_dot, dec_dot)."""
+    from .fit_cli import load_observations
+
+    if site_kappas is None:
+        site_kappas = getattr(posterior, "site_kappas", {}) or {}
+    if fit_scale is None:
+        fit_scale = float(getattr(posterior, "fit_scale", 1.0))
+
+    if isinstance(obs, str):
+        obs = load_observations(obs, None)
+
+    if len(obs) >= 2:
+        times = np.array([o.time.jd for o in obs])
+        dt_days = float(np.max(times) - np.min(times))
+        dt_seconds = max(1.0, dt_days * DAY_S)
+    else:
+        dt_seconds = DAY_S
+
+    site = obs[0].site if len(obs) > 0 else None
+    kappa = site_kappas.get(site, 1.0)
+    sigma_eff_arcsec = sigma_arcsec * fit_scale * kappa
+    sigma_rad = np.deg2rad(sigma_eff_arcsec / 3600.0)
+
+    epoch = getattr(posterior, "epoch", None)
+    if epoch is None:
+        raise RuntimeError("posterior.epoch is required for attributable jitter")
+
+    earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
+    sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
+    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
+    earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+    site_offset = _site_offset(obs[0])
+
+    out = []
+    for st in states:
+        r_helio = st[:3].astype(float)
+        v_helio = st[3:].astype(float)
+        r_geo = r_helio - earth_helio
+        v_geo = v_helio - earth_vel_helio
+        r_topo = r_geo - site_offset
+        rho = np.linalg.norm(r_topo)
+        if rho <= 0:
+            continue
+        s = r_topo / rho
+        rhodot = float(np.dot(v_geo, s))
+        sdot = (v_geo - rhodot * s) / max(rho, 1e-12)
+
+        x, y, z = s
+        xd, yd, zd = sdot
+        rxy2 = max(x * x + y * y, 1e-12)
+        ra = math.atan2(y, x)
+        dec = math.asin(np.clip(z, -1.0, 1.0))
+        ra_dot = (x * yd - y * xd) / rxy2
+        cosdec = max(math.sqrt(rxy2), 1e-12)
+        dec_dot = (zd - z * (x * xd + y * yd) / rxy2) / cosdec
+
+        for _ in range(n_per_state):
+            ra_j = ra + np.random.normal(scale=sigma_rad)
+            dec_j = dec + np.random.normal(scale=sigma_rad)
+            dec_j = np.clip(dec_j, -0.5 * math.pi, 0.5 * math.pi)
+            ra_dot_j = ra_dot + np.random.normal(scale=sigma_rad / dt_seconds)
+            dec_dot_j = dec_dot + np.random.normal(scale=sigma_rad / dt_seconds)
+
+            attrib = Attributable(
+                ra_deg=float(np.degrees(ra_j) % 360.0),
+                dec_deg=float(np.degrees(dec_j)),
+                ra_dot_deg_per_day=float(np.degrees(ra_dot_j) * DAY_S),
+                dec_dot_deg_per_day=float(np.degrees(dec_dot_j) * DAY_S),
+            )
+            new_state = build_state_from_ranging(obs[0], epoch, attrib, rho, rhodot)
+            out.append(new_state)
+    if len(out) == 0:
+        return np.empty((0, 6), dtype=float)
+    return np.vstack(out)
 
 
 def _rho_log_prior(

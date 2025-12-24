@@ -10,7 +10,7 @@ import numpy as np
 from .fit import load_posterior, sample_replicas
 from .propagate import predict_radec
 from .fit_cli import load_observations
-from .ranging import sample_ranged_replicas, add_tangent_jitter
+from .ranging import add_attributable_jitter, add_local_multit_jitter, add_tangent_jitter, sample_ranged_replicas
 
 
 def main() -> int:
@@ -108,6 +108,27 @@ def main() -> int:
         type=float,
         default=0.5,
         help="Per-state tangent jitter sigma (arcsec).",
+    )
+    parser.add_argument(
+        "--local-spread-mode",
+        choices=("tangent", "multit", "attributable"),
+        default="tangent",
+        help=(
+            "Which local-spread generator to use (tangent=existing, multit=multivariate-t, "
+            "attributable=attributable-space)."
+        ),
+    )
+    parser.add_argument(
+        "--local-spread-vel-scale",
+        type=float,
+        default=1.0,
+        help="velocity scale for local spread (multit/tangent modes).",
+    )
+    parser.add_argument(
+        "--local-spread-df",
+        type=float,
+        default=4.0,
+        help="degrees-of-freedom for multivariate-t.",
     )
     args = parser.parse_args()
     # Apply range-profile overrides (explicit profile wins)
@@ -226,15 +247,41 @@ def main() -> int:
             obs_for_jitter = args.obs
 
         states = replicas.T.copy()
-        jittered = add_tangent_jitter(
-            states,
-            obs_for_jitter,
-            posterior,
-            n_per_state=args.local_spread_n,
-            sigma_arcsec=args.local_spread_sigma_arcsec,
-            fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
-            site_kappas=getattr(posterior, "site_kappas", {}),
-        )
+        if args.local_spread_mode == "tangent":
+            jittered = add_tangent_jitter(
+                states,
+                obs_for_jitter,
+                posterior,
+                n_per_state=args.local_spread_n,
+                sigma_arcsec=args.local_spread_sigma_arcsec,
+                fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
+                site_kappas=getattr(posterior, "site_kappas", {}),
+                vel_scale_factor=float(args.local_spread_vel_scale),
+            )
+        elif args.local_spread_mode == "multit":
+            jittered = add_local_multit_jitter(
+                states,
+                obs_for_jitter,
+                posterior,
+                n_per_state=args.local_spread_n,
+                sigma_arcsec=args.local_spread_sigma_arcsec,
+                fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
+                site_kappas=getattr(posterior, "site_kappas", {}),
+                vel_scale_factor=float(args.local_spread_vel_scale),
+                df=float(args.local_spread_df),
+            )
+        elif args.local_spread_mode == "attributable":
+            jittered = add_attributable_jitter(
+                states,
+                obs_for_jitter,
+                posterior,
+                n_per_state=args.local_spread_n,
+                sigma_arcsec=args.local_spread_sigma_arcsec,
+                fit_scale=float(getattr(posterior, "fit_scale", 1.0)),
+                site_kappas=getattr(posterior, "site_kappas", {}),
+            )
+        else:
+            raise SystemExit("unsupported local_spread_mode")
         combined = np.vstack([states, jittered])
         rng = np.random.default_rng(int(args.seed))
         if combined.shape[0] >= args.n:
