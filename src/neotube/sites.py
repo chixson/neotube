@@ -15,6 +15,7 @@ from astropy.coordinates import EarthLocation
 
 OBS_CODES_URL = "https://minorplanetcenter.net/iau/lists/ObsCodes.html"
 CACHE_PATH = Path.home() / ".cache" / "neotube" / "observatories.csv"
+_OBS_CACHE: Mapping[str, "ObservatoryEntry"] | None = None
 EARTH_RADIUS_KM = float(R_earth.to(u.km).value)
 
 
@@ -123,14 +124,25 @@ def _read_cache() -> Mapping[str, ObservatoryEntry]:
     return entries
 
 
-def load_observatories() -> Mapping[str, ObservatoryEntry]:
-    cached = _read_cache()
-    if cached:
-        return cached
+def load_observatories(refresh: bool = False) -> Mapping[str, ObservatoryEntry]:
+    global _OBS_CACHE
+    if _OBS_CACHE is not None and not refresh:
+        return _OBS_CACHE
+    if not refresh:
+        cached = _read_cache()
+        if cached:
+            _OBS_CACHE = cached
+            return cached
     fetched = _fetch_catalog()
     if fetched:
         _write_cache(fetched.values())
-    return fetched
+        _OBS_CACHE = fetched
+        return fetched
+    if _OBS_CACHE is not None:
+        return _OBS_CACHE
+    cached = _read_cache()
+    _OBS_CACHE = cached
+    return cached
 
 
 @lru_cache(maxsize=1024)

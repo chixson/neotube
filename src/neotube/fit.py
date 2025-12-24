@@ -29,6 +29,8 @@ from .propagate import (
 )
 from .sites import get_site_location, load_observatories
 
+_MISSING_SITE_REFRESHED: set[str] = set()
+
 __all__ = ["fit_orbit", "sample_replicas", "predict_orbit", "load_posterior"]
 
 
@@ -92,10 +94,13 @@ def _site_offset(obs: Observation) -> np.ndarray:
 
     loc = get_site_location(obs.site)
     if loc is None:
-        try:
-            _ = load_observatories()
-        except Exception:
-            pass
+        site_key = obs.site.strip().upper()
+        if site_key and site_key not in _MISSING_SITE_REFRESHED:
+            try:
+                _ = load_observatories(refresh=True)
+            except Exception:
+                pass
+            _MISSING_SITE_REFRESHED.add(site_key)
         loc = get_site_location(obs.site)
     if loc is None:
         warnings.warn(
