@@ -4,7 +4,7 @@ import math
 import time
 from dataclasses import dataclass
 from multiprocessing import Pool
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 from astropy import units as u
@@ -480,12 +480,22 @@ def sample_ranged_replicas(
     weights = np.exp(log_w - max_lw)
     weights /= np.sum(weights)
 
+    prefilter_debug: dict[str, Any] | None = None
     if scoring_mode == "kepler" and top_k_nbody > 0:
         top_k = min(top_k_nbody, len(states))
-        order = np.argsort(-weights)[:top_k]
-        top_states = states[order]
-        top_rhos = rhos_out[order]
-        top_rhodots = rhodots_out[order]
+        selected_idx, prefilter_debug = kepler_prefilter_and_select(
+            raw_rhos_km=rhos_out,
+            kepler_ll=loglikes,
+            states=states,
+            top_k=top_k,
+            n_bins=None,
+            au_km=AU_KM,
+            emit_debug=False,
+            path_to_debug_npz=None,
+        )
+        top_states = states[selected_idx]
+        top_rhos = rhos_out[selected_idx]
+        top_rhodots = rhodots_out[selected_idx]
         if n_workers > 1:
             state_chunks = [
                 top_states[i : i + chunk_size] for i in range(0, len(top_states), chunk_size)
@@ -535,4 +545,82 @@ def sample_ranged_replicas(
         "rhos": rhos_out,
         "rhodots": rhodots_out,
         "attrib": attrib,
+        "diagnostics": prefilter_debug or {},
     }
+
+
+def kepler_prefilter_and_select(
+    raw_rhos_km: np.ndarray,
+    kepler_ll: np.ndarray,
+    states: np.ndarray,
+    top_k: int,
+    n_bins: int | None = None,
+    au_km: float = AU_KM,
+    emit_debug: bool = False,
+    path_to_debug_npz: str | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Robust Kepler prefilter and stratified selection."""
+    M = len(raw_rhos_km)
+    if M == 0:
+        return np.empty(0, dtype=int), {}
+
+    kepler_ll_sane = np.asarray(kepler_ll, dtype=float).copy()
+    is_bad = ~np.isfinite(kepler_ll_sane)
+    kepler_invalid_count = int(np.sum(is_bad))
+    if kepler_invalid_count > 0:
+        finite_mask = np.isfinite(kepler_ll_sane)
+        if np.any(finite_mask):
+            finite_min = float(np.nanmin(kepler_ll_sane[finite_mask]))
+            kepler_ll_sane[is_bad] = finite_min - 1e3
+        else:
+            kepler_ll_sane[:] = -1e300
+
+    if n_bins is None:
+        n_bins = min(20, max(4, int(M // 50)))
+    n_bins = max(2, int(n_bins))
+
+    rho_au = (raw_rhos_km / au_km).astype(float)
+    bins = np.linspace(float(rho_au.min()), float(rho_au.max()), n_bins + 1)
+    bin_idx = np.digitize(rho_au, bins) - 1
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+
+    top_k = min(int(top_k), M)
+    k_per_bin = max(1, top_k // n_bins)
+
+    selected_indices: list[int] = []
+    for b in range(n_bins):
+        idxs = np.where(bin_idx == b)[0]
+        if idxs.size == 0:
+            continue
+        ordering = np.argsort(-kepler_ll_sane[idxs])
+        pick = idxs[ordering[:k_per_bin]]
+        selected_indices.extend(pick.tolist())
+
+    selected_indices = list(dict.fromkeys(selected_indices))
+    if len(selected_indices) < top_k:
+        needed = top_k - len(selected_indices)
+        remaining = np.setdiff1d(np.arange(M), np.array(selected_indices), assume_unique=True)
+        global_order = np.argsort(-kepler_ll_sane[remaining])
+        extra = remaining[global_order[:needed]]
+        selected_indices.extend(extra.tolist())
+
+    selected_indices = np.unique(np.array(selected_indices, dtype=int))[:top_k]
+
+    debug = {
+        "raw_rhos": raw_rhos_km,
+        "kepler_ll_raw": kepler_ll_sane,
+        "prefilter_indices": selected_indices,
+        "prefilter_rhos": raw_rhos_km[selected_indices],
+        "prefilter_kepler_ll": kepler_ll_sane[selected_indices],
+        "n_bins": n_bins,
+        "k_per_bin": k_per_bin,
+        "kepler_invalid_count": kepler_invalid_count,
+    }
+
+    if emit_debug and path_to_debug_npz:
+        try:
+            np.savez(path_to_debug_npz, **debug, allow_pickle=True)
+        except Exception:
+            pass
+
+    return np.array(selected_indices, dtype=int), debug
