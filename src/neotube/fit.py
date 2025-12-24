@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import warnings
+from concurrent.futures import ProcessPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Sequence
@@ -115,6 +116,19 @@ def _site_offset(obs: Observation) -> np.ndarray:
     return gcrs.cartesian.xyz.to(u.km).value
 
 
+@lru_cache(maxsize=256)
+def _body_bary_posvel_cached(body: str, jd_seconds: int):
+    """Cache body barycentric posvel keyed by integer-second JD."""
+    t = Time(jd_seconds / 86400.0, format="jd")
+    return get_body_barycentric_posvel(body, t)
+
+
+def _body_bary_posvel_for_time(body: str, obstime: Time):
+    """Cached get_body_barycentric_posvel wrapper for a Time."""
+    jd_seconds = int(round(float(obstime.jd) * 86400.0))
+    return _body_bary_posvel_cached(body, jd_seconds)
+
+
 @lru_cache(maxsize=1024)
 def _site_offset_cached_for_jd(site_key: str | None, jd_seconds: int) -> tuple[float, float, float]:
     """Return cached site offset tuple (km) keyed by site + integer seconds."""
@@ -153,9 +167,10 @@ def _observation_line_of_sight(obs: Observation) -> tuple[np.ndarray, np.ndarray
     )
     direction = coord.cartesian.xyz.to(u.km).value
     direction = direction / np.linalg.norm(direction)
-    earth_pos, _ = get_body_barycentric_posvel("earth", obs.time)
+    earth_pos, _ = _body_bary_posvel_for_time("earth", obs.time)
     earth_km = earth_pos.xyz.to(u.km).value
-    offset = _site_offset(obs)
+    # Use cached site-offset to avoid repeated EarthLocation/GCRS conversions.
+    offset = _site_offset_cached(obs)
     return earth_km + offset, direction
 
 
@@ -182,7 +197,7 @@ def _initial_state_from_observations(observations: list[Observation]) -> np.ndar
             obstime=obs.time,
         )
         direction = coord.cartesian.xyz.to(u.km).value
-        earth_pos, _ = get_body_barycentric_posvel("earth", obs.time)
+        earth_pos, _ = _body_bary_posvel_for_time("earth", obs.time)
         earth_km = earth_pos.xyz.to(u.km).value
         return earth_km + direction
 
@@ -278,8 +293,8 @@ def _initial_state_from_attributable(
     ra0, dec0, ra_dot, dec_dot = _compute_attributable(observations, epoch)
     s, s_dot = _s_and_sdot_from_ra_dec(ra0, dec0, ra_dot, dec_dot)
 
-    earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
-    sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
+    earth_pos, earth_vel = _body_bary_posvel_for_time("earth", epoch)
+    sun_pos, sun_vel = _body_bary_posvel_for_time("sun", epoch)
     earth_pos_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
     earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
 
@@ -321,13 +336,20 @@ def _initial_state_from_attributable(
 def _tangent_residuals(
     pred_ra: np.ndarray, pred_dec: np.ndarray, obs: list[Observation]
 ) -> np.ndarray:
-    res = []
-    for ra, dec, ob in zip(pred_ra, pred_dec, obs):
-        d_ra = ((ob.ra_deg - ra + 180.0) % 360.0) - 180.0
-        ra_arcsec = d_ra * np.cos(np.deg2rad(dec)) * 3600.0
-        dec_arcsec = (ob.dec_deg - dec) * 3600.0
-        res.extend([ra_arcsec, dec_arcsec])
-    return np.array(res)
+    """Vectorized tangent-plane residuals."""
+    obs_ra = np.array([o.ra_deg for o in obs], dtype=float)
+    obs_dec = np.array([o.dec_deg for o in obs], dtype=float)
+    pred_ra = np.asarray(pred_ra, dtype=float)
+    pred_dec = np.asarray(pred_dec, dtype=float)
+
+    d_ra = ((obs_ra - pred_ra + 180.0) % 360.0) - 180.0
+    ra_arcsec = d_ra * np.cos(np.deg2rad(pred_dec)) * 3600.0
+    dec_arcsec = (obs_dec - pred_dec) * 3600.0
+
+    res = np.empty((obs_ra.size * 2,), dtype=float)
+    res[0::2] = ra_arcsec
+    res[1::2] = dec_arcsec
+    return res
 
 
 def _ensure_finite(name: str, *arrays: np.ndarray) -> None:
@@ -504,6 +526,102 @@ def _jacobian_fd(
         H[:, idx] = (res - base_res) / eps[idx]
     _ensure_finite("jacobian", H)
     return H, base_res
+
+
+def residuals_for_state(
+    state: np.ndarray,
+    epoch: Time,
+    observations: list[Observation],
+    perturbers: Sequence[str],
+    max_step: float,
+    use_kepler: bool = False,
+) -> np.ndarray:
+    """Compute tangent residuals for a single state."""
+    pred_ra, pred_dec = _predict_batch(
+        state, epoch, observations, perturbers, max_step, use_kepler
+    )
+    return _tangent_residuals(pred_ra, pred_dec, observations)
+
+
+def residuals_batch(
+    states: np.ndarray,
+    epoch: Time,
+    observations: list[Observation],
+    perturbers: Sequence[str],
+    max_step: float,
+    use_kepler: bool = False,
+) -> np.ndarray:
+    """Compute residual vectors for a batch of states (K,6)."""
+    states = np.asarray(states, dtype=float)
+    if states.ndim != 2 or states.shape[1] != 6:
+        raise ValueError("states must have shape (K,6)")
+    out = []
+    for st in states:
+        out.append(
+            residuals_for_state(st, epoch, observations, perturbers, max_step, use_kepler=use_kepler)
+        )
+    return np.vstack(out) if out else np.empty((0, len(observations) * 2), dtype=float)
+
+
+_RESID_CTX: dict[str, object] = {}
+
+
+def _init_resid_worker(
+    epoch: Time,
+    observations: list[Observation],
+    perturbers: Sequence[str],
+    max_step: float,
+    use_kepler: bool,
+) -> None:
+    global _RESID_CTX
+    _RESID_CTX = {
+        "epoch": epoch,
+        "observations": observations,
+        "perturbers": tuple(perturbers),
+        "max_step": float(max_step),
+        "use_kepler": bool(use_kepler),
+    }
+
+
+def _resid_chunk_worker(states: np.ndarray) -> np.ndarray:
+    ctx = _RESID_CTX
+    return residuals_batch(
+        states,
+        ctx["epoch"],
+        ctx["observations"],
+        ctx["perturbers"],
+        ctx["max_step"],
+        use_kepler=ctx["use_kepler"],
+    )
+
+
+def residuals_parallel(
+    states: np.ndarray,
+    epoch: Time,
+    observations: list[Observation],
+    perturbers: Sequence[str],
+    max_step: float,
+    n_workers: int = 4,
+    chunk_size: int | None = None,
+    use_kepler: bool = False,
+) -> np.ndarray:
+    """Parallel residuals for many candidate states."""
+    states = np.asarray(states, dtype=float)
+    if states.ndim != 2 or states.shape[1] != 6:
+        raise ValueError("states must have shape (K,6)")
+    if chunk_size is None:
+        chunk_size = max(64, min(4096, max(1, states.shape[0] // (n_workers * 4))))
+
+    chunks = [states[i : i + chunk_size] for i in range(0, states.shape[0], chunk_size)]
+    results = []
+    with ProcessPoolExecutor(
+        max_workers=max(1, int(n_workers)),
+        initializer=_init_resid_worker,
+        initargs=(epoch, observations, tuple(perturbers), max_step, use_kepler),
+    ) as executor:
+        for res in executor.map(_resid_chunk_worker, chunks):
+            results.append(res)
+    return np.vstack(results) if results else np.empty((0, len(observations) * 2), dtype=float)
 
 
 def fit_orbit(

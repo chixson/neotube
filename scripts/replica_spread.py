@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy.coordinates import get_body_barycentric_posvel
+from astropy.coordinates import SkyCoord
 from astropy.time import Time
 import astropy.units as u
 
@@ -40,6 +41,15 @@ def pca_components(dra: np.ndarray, ddec: np.ndarray) -> tuple[np.ndarray, np.nd
     eigvecs = eigvecs[:, order]
     projected = eigvecs.T @ X
     return projected[0], projected[1], eigvecs
+
+
+def pca_components_3d(vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mean = vectors.mean(axis=0)
+    centered = vectors - mean
+    _, _, v_t = np.linalg.svd(centered, full_matrices=False)
+    comps = v_t[:3]
+    projected = centered @ comps.T
+    return projected, comps, mean
 
 
 def plot_ra_dec(
@@ -79,6 +89,28 @@ def plot_pca(
     ax.axvline(0, lw=1, color="#bbbbbb")
     if jpl_pc is not None:
         ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+
+
+def plot_pca23(
+    pc2: np.ndarray,
+    pc3: np.ndarray,
+    out_path: Path,
+    jpl_pc: tuple[float, float] | None,
+    title: str,
+) -> None:
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(pc2, pc3, s=6, alpha=0.3)
+    if jpl_pc is not None:
+        ax.plot(jpl_pc[0], jpl_pc[1], "r+", markersize=12, mew=2, label="JPL")
+        ax.legend()
+    ax.set_xlabel("PC2")
+    ax.set_ylabel("PC3")
+    ax.set_title(title)
+    ax.grid(True, lw=0.5, color="#dddddd")
+    ax.axhline(0, lw=1, color="#bbbbbb")
+    ax.axvline(0, lw=1, color="#bbbbbb")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
 
@@ -141,6 +173,34 @@ def _topocentric_distance_au(pos_km: np.ndarray, epoch_utc: str) -> np.ndarray:
     return np.linalg.norm(vectors, axis=1) / 149597870.7
 
 
+def _topocentric_vectors(pos_km: np.ndarray, epoch_utc: str, site_code: str | None) -> np.ndarray:
+    time_val = Time(epoch_utc, scale="utc")
+    earth_pos, _ = get_body_barycentric_posvel("earth", time_val)
+    sun_pos, _ = get_body_barycentric_posvel("sun", time_val)
+    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value
+    site_offset = np.zeros(3, dtype=float)
+    if site_code:
+        from neotube.sites import get_site_location
+
+        loc = get_site_location(site_code)
+        if loc is not None:
+            gcrs = loc.get_gcrs(obstime=time_val)
+            site_offset = gcrs.cartesian.xyz.to(u.km).value
+    return pos_km - earth_helio - site_offset
+
+
+def _radec_from_vectors(vectors_km: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    coord = SkyCoord(
+        x=vectors_km[:, 0] * u.km,
+        y=vectors_km[:, 1] * u.km,
+        z=vectors_km[:, 2] * u.km,
+        representation_type="cartesian",
+        frame="icrs",
+    )
+    sph = coord.represent_as("spherical")
+    return np.array(sph.lon.deg), np.array(sph.lat.deg)
+
+
 def mirror_to_data_dir(*paths: Path) -> None:
     data_dir = Path(__file__).resolve().parents[1] / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -163,10 +223,23 @@ def main() -> int:
     parser.add_argument("--jpl-r-au", type=float, default=None, help="Optional JPL heliocentric distance (AU).")
     parser.add_argument("--jpl-topo-au", type=float, default=None, help="Optional JPL topocentric distance (AU).")
     parser.add_argument(
+        "--jpl-helio-pos-km",
+        type=float,
+        nargs=3,
+        default=None,
+        help="Optional JPL heliocentric position (x y z km) for topo PCA crosshair.",
+    )
+    parser.add_argument(
         "--epoch-utc",
         type=str,
         default=None,
         help="UTC epoch for topocentric distances; falls back to replicas _meta.json if present.",
+    )
+    parser.add_argument(
+        "--obs",
+        type=Path,
+        default=None,
+        help="Observations CSV for topocentric plots (site code). Falls back to replicas _meta.json if present.",
     )
     args = parser.parse_args()
 
@@ -200,6 +273,9 @@ def main() -> int:
     pca_path = base.parent / f"{base.name}_pca.png"
     pca1_r_path = base.parent / f"{base.name}_pca1_rAU.png"
     pca1_topo_path = base.parent / f"{base.name}_pca1_topoAU.png"
+    topo_radec_path = base.parent / f"{base.name}_topo_radec.png"
+    topo_pca_path = base.parent / f"{base.name}_topo_pca.png"
+    topo_pca23_path = base.parent / f"{base.name}_topo_pca23.png"
     plot_ra_dec(dra, ddec, radec_path, jpl_offset)
     pc1, pc2, eigvecs = pca_components(dra, ddec)
     jpl_pc = None
@@ -217,6 +293,57 @@ def main() -> int:
             mirror_to_data_dir(radec_path, pca_path, pca1_r_path)
     else:
         mirror_to_data_dir(radec_path, pca_path)
+
+    # Optional topocentric plots (require obs + epoch + positions).
+    epoch_utc = args.epoch_utc or _load_epoch_utc(
+        args.replicas.with_name(args.replicas.stem + "_meta.json")
+    )
+    obs_path = args.obs
+    if obs_path is None:
+        meta_path = args.replicas.with_name(args.replicas.stem + "_meta.json")
+        if meta_path.exists():
+            try:
+                with meta_path.open() as fh:
+                    meta = json.load(fh)
+                if meta.get("obs"):
+                    obs_path = Path(meta["obs"])
+            except Exception:
+                obs_path = None
+    if epoch_utc is not None and obs_path is not None and {"x_km", "y_km", "z_km"}.issubset(df.columns):
+        from neotube.fit_cli import load_observations
+
+        obs_list = load_observations(obs_path, None)
+        site_code = obs_list[0].site if obs_list else None
+        topo_vec = _topocentric_vectors(pos, epoch_utc, site_code)
+        topo_ra, topo_dec = _radec_from_vectors(topo_vec)
+        topo_df = df.copy()
+        topo_df["ra_deg"] = topo_ra
+        topo_df["dec_deg"] = topo_dec
+        topo_dra, topo_ddec, topo_ra0, topo_dec0 = tangent_offsets(topo_df)
+
+        jpl_topo_offset = None
+        if args.jpl_ra is not None and args.jpl_dec is not None:
+            cosd = np.cos(np.deg2rad(topo_dec0))
+            dra_j = (args.jpl_ra - topo_ra0) * cosd * 3600.0
+            ddec_j = (args.jpl_dec - topo_dec0) * 3600.0
+            jpl_topo_offset = (dra_j, ddec_j)
+
+        plot_ra_dec(topo_dra, topo_ddec, topo_radec_path, jpl_topo_offset)
+
+        proj, comps, mean = pca_components_3d(topo_vec)
+        jpl_pc_topo = None
+        if args.jpl_helio_pos_km is not None:
+            jpl_helio = np.array(args.jpl_helio_pos_km, dtype=float)
+            jpl_topo = _topocentric_vectors(jpl_helio[None, :], epoch_utc, site_code)[0]
+            jpl_proj = (jpl_topo - mean) @ comps.T
+            jpl_pc_topo = (float(jpl_proj[0]), float(jpl_proj[1]))
+            jpl_pc23 = (float(jpl_proj[1]), float(jpl_proj[2]))
+        else:
+            jpl_pc23 = None
+
+        plot_pca(proj[:, 0], proj[:, 1], topo_pca_path, jpl_pc_topo)
+        plot_pca23(proj[:, 1], proj[:, 2], topo_pca23_path, jpl_pc23, "Replica cloud (topocentric PC2 vs PC3)")
+        mirror_to_data_dir(topo_radec_path, topo_pca_path, topo_pca23_path)
     return 0
 
 

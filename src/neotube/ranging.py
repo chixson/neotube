@@ -41,6 +41,7 @@ def add_tangent_jitter(
     site_kappas: dict[str, float] | None = None,
     vel_timescale_sec: float | None = None,
     vel_scale_factor: float = 1.0,
+    seed: int | None = None,
 ) -> np.ndarray:
     """
     Improved tangent-plane jitter: produces local clouds around each state with
@@ -97,6 +98,7 @@ def add_tangent_jitter(
     sigma_eff_arcsec = sigma_arcsec * fit_scale * kappa
     sigma_rad = np.deg2rad(sigma_eff_arcsec / 3600.0)
 
+    rng = np.random.default_rng(seed)
     out = []
     for st in states:
         r = st[:3].astype(float)
@@ -106,16 +108,16 @@ def add_tangent_jitter(
             continue
         s = r / rho
         e_a, e_d = tangent_basis_from_unit(s)
-        for _ in range(n_per_state):
-            d_alpha = np.random.normal(scale=sigma_rad)
-            d_delta = np.random.normal(scale=sigma_rad)
+        d_alpha = rng.normal(scale=sigma_rad, size=n_per_state)
+        d_delta = rng.normal(scale=sigma_rad, size=n_per_state)
+        for d_a, d_d in zip(d_alpha, d_delta):
             cosdec = np.sqrt(max(0.0, 1.0 - s[2] ** 2))
-            dra_km = rho * cosdec * d_alpha
-            ddec_km = rho * d_delta
+            dra_km = rho * cosdec * d_a
+            ddec_km = rho * d_d
             dr = e_a * dra_km + e_d * ddec_km
             new_r = r + dr
             v_noise = (dr / max(1.0, vel_timescale_sec)) * vel_scale_factor
-            v_noise += np.random.normal(scale=0.1, size=3) * np.linalg.norm(v_noise + 1e-12)
+            v_noise += rng.normal(scale=0.1, size=3) * np.linalg.norm(v_noise + 1e-12)
             new_v = v + v_noise
             out.append(np.hstack([new_r, new_v]))
     if len(out) == 0:
@@ -133,6 +135,7 @@ def add_local_multit_jitter(
     site_kappas: dict | None = None,
     vel_scale_factor: float = 1.0,
     df: float = 4.0,
+    seed: int | None = None,
 ) -> np.ndarray:
     """For each 6D state, sample n_per_state correlated multivariate-t draws.
 
@@ -163,6 +166,7 @@ def add_local_multit_jitter(
     sigma_eff_arcsec = sigma_arcsec * fit_scale * kappa
     sigma_rad = np.deg2rad(sigma_eff_arcsec / 3600.0)
 
+    rng = np.random.default_rng(seed)
     out = []
     for st in states:
         r = st[:3].astype(float)
@@ -176,11 +180,10 @@ def add_local_multit_jitter(
         mean = np.hstack([r, v])
         cov = np.diag([pos_std_km**2] * 3 + [vel_std_km_s**2] * 3)
         d = 6
-        for _ in range(n_per_state):
-            g = np.random.gamma(df / 2.0, 2.0 / df)
-            z = np.random.multivariate_normal(np.zeros(d), cov)
-            sample = mean + z / np.sqrt(g)
-            out.append(sample)
+        g = rng.gamma(df / 2.0, 2.0 / df, size=n_per_state)
+        z = rng.multivariate_normal(np.zeros(d), cov, size=n_per_state)
+        samples = mean[None, :] + z / np.sqrt(g)[:, None]
+        out.extend(list(samples))
     if len(out) == 0:
         return np.empty((0, 6), dtype=float)
     return np.vstack(out)
@@ -194,8 +197,9 @@ def add_attributable_jitter(
     sigma_arcsec: float = 0.5,
     fit_scale: float | None = None,
     site_kappas: dict | None = None,
+    seed: int | None = None,
 ) -> np.ndarray:
-    """Jitter states in attributable space (ra, dec, ra_dot, dec_dot)."""
+    """Vectorized attributable jitter (ra, dec, ra_dot, dec_dot)."""
     from .fit_cli import load_observations
 
     if site_kappas is None:
@@ -228,47 +232,78 @@ def add_attributable_jitter(
     earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
     site_offset = _site_offset_cached(obs[0])
 
-    out = []
-    for st in states:
-        r_helio = st[:3].astype(float)
-        v_helio = st[3:].astype(float)
-        r_geo = r_helio - earth_helio
-        v_geo = v_helio - earth_vel_helio
-        r_topo = r_geo - site_offset
-        rho = np.linalg.norm(r_topo)
-        if rho <= 0:
-            continue
-        s = r_topo / rho
-        rhodot = float(np.dot(v_geo, s))
-        sdot = (v_geo - rhodot * s) / max(rho, 1e-12)
-
-        x, y, z = s
-        xd, yd, zd = sdot
-        rxy2 = max(x * x + y * y, 1e-12)
-        ra = math.atan2(y, x)
-        dec = math.asin(np.clip(z, -1.0, 1.0))
-        ra_dot = (x * yd - y * xd) / rxy2
-        cosdec = max(math.sqrt(rxy2), 1e-12)
-        dec_dot = (zd - z * (x * xd + y * yd) / rxy2) / cosdec
-
-        for _ in range(n_per_state):
-            ra_j = ra + np.random.normal(scale=sigma_rad)
-            dec_j = dec + np.random.normal(scale=sigma_rad)
-            dec_j = np.clip(dec_j, -0.5 * math.pi, 0.5 * math.pi)
-            ra_dot_j = ra_dot + np.random.normal(scale=sigma_rad / dt_seconds)
-            dec_dot_j = dec_dot + np.random.normal(scale=sigma_rad / dt_seconds)
-
-            attrib = Attributable(
-                ra_deg=float(np.degrees(ra_j) % 360.0),
-                dec_deg=float(np.degrees(dec_j)),
-                ra_dot_deg_per_day=float(np.degrees(ra_dot_j) * DAY_S),
-                dec_dot_deg_per_day=float(np.degrees(dec_dot_j) * DAY_S),
-            )
-            new_state = build_state_from_ranging(obs[0], epoch, attrib, rho, rhodot)
-            out.append(new_state)
-    if len(out) == 0:
+    states = np.asarray(states, dtype=float)
+    if states.size == 0:
         return np.empty((0, 6), dtype=float)
-    return np.vstack(out)
+
+    r_helio = states[:, :3]
+    v_helio = states[:, 3:]
+    r_geo = r_helio - earth_helio[None, :]
+    v_geo = v_helio - earth_vel_helio[None, :]
+    r_topo = r_geo - site_offset[None, :]
+    rho = np.linalg.norm(r_topo, axis=1)
+    ok = rho > 0
+    if not np.any(ok):
+        return np.empty((0, 6), dtype=float)
+
+    r_topo = r_topo[ok]
+    v_geo = v_geo[ok]
+    rho_valid = rho[ok]
+
+    s = r_topo / rho_valid[:, None]
+    rhodot = np.einsum("ij,ij->i", v_geo, s)
+    sdot = (v_geo - rhodot[:, None] * s) / np.maximum(rho_valid[:, None], 1e-12)
+
+    x = s[:, 0]
+    y = s[:, 1]
+    z = s[:, 2]
+    rxy2 = np.maximum(x * x + y * y, 1e-12)
+    ra = np.arctan2(y, x)
+    dec = np.arcsin(np.clip(z, -1.0, 1.0))
+    xd = sdot[:, 0]
+    yd = sdot[:, 1]
+    zd = sdot[:, 2]
+    ra_dot = (x * yd - y * xd) / rxy2
+    cosdec = np.maximum(np.sqrt(rxy2), 1e-12)
+    dec_dot = (zd - z * (x * xd + y * yd) / rxy2) / cosdec
+
+    rng = np.random.default_rng(seed)
+    n_states = s.shape[0]
+    n_draws = int(n_per_state)
+
+    ra_j = ra[:, None] + rng.normal(scale=sigma_rad, size=(n_states, n_draws))
+    dec_j = dec[:, None] + rng.normal(scale=sigma_rad, size=(n_states, n_draws))
+    dec_j = np.clip(dec_j, -0.5 * math.pi, 0.5 * math.pi)
+    ra_dot_j = ra_dot[:, None] + rng.normal(
+        scale=sigma_rad / dt_seconds, size=(n_states, n_draws)
+    )
+    dec_dot_j = dec_dot[:, None] + rng.normal(
+        scale=sigma_rad / dt_seconds, size=(n_states, n_draws)
+    )
+
+    cd = np.cos(dec_j)
+    sd = np.sin(dec_j)
+    cr = np.cos(ra_j)
+    sr = np.sin(ra_j)
+    s_prime = np.stack([cd * cr, cd * sr, sd], axis=2)
+
+    sdot_x = -cd * sr * ra_dot_j - sd * cr * dec_dot_j
+    sdot_y = cd * cr * ra_dot_j - sd * sr * dec_dot_j
+    sdot_z = cd * dec_dot_j
+    sdot_prime = np.stack([sdot_x, sdot_y, sdot_z], axis=2)
+
+    rho_nm = rho_valid[:, None, None]
+    rhodot_nm = rhodot[:, None, None]
+    r_topo_new = rho_nm * s_prime
+    r_geo_new = site_offset[None, None, :] + r_topo_new
+    v_geo_new = rhodot_nm * s_prime + rho_nm * sdot_prime
+
+    r_helio_new = earth_helio[None, None, :] + r_geo_new
+    v_helio_new = earth_vel_helio[None, None, :] + v_geo_new
+
+    r_flat = r_helio_new.reshape(-1, 3)
+    v_flat = v_helio_new.reshape(-1, 3)
+    return np.hstack([r_flat, v_flat])
 
 
 _SPREAD_WORKER_CTX: dict[str, object] = {}
@@ -302,6 +337,7 @@ def _spread_chunk_worker(job: dict[str, object]) -> np.ndarray:
     sigma_arcsec = float(job.get("sigma_arcsec", 0.5))
     vel_scale_factor = float(job.get("vel_scale_factor", 1.0))
     df = float(job.get("df", 4.0))
+    seed = job.get("seed", None)
     posterior = _SPREAD_WORKER_CTX["posterior"]
     obs = _SPREAD_WORKER_CTX["obs"]
 
@@ -316,6 +352,7 @@ def _spread_chunk_worker(job: dict[str, object]) -> np.ndarray:
             site_kappas=posterior.site_kappas,
             vel_timescale_sec=None,
             vel_scale_factor=vel_scale_factor,
+            seed=seed,
         )
     if mode == "multit":
         return add_local_multit_jitter(
@@ -328,6 +365,7 @@ def _spread_chunk_worker(job: dict[str, object]) -> np.ndarray:
             site_kappas=posterior.site_kappas,
             vel_scale_factor=vel_scale_factor,
             df=df,
+            seed=seed,
         )
     if mode == "attributable":
         return add_attributable_jitter(
@@ -338,6 +376,7 @@ def _spread_chunk_worker(job: dict[str, object]) -> np.ndarray:
             sigma_arcsec=sigma_arcsec,
             fit_scale=posterior.fit_scale,
             site_kappas=posterior.site_kappas,
+            seed=seed,
         )
     raise RuntimeError(f"Unknown local-spread mode: {mode}")
 
@@ -355,6 +394,7 @@ def add_local_spread_parallel(
     df: float = 4.0,
     n_workers: int = 8,
     chunk_size: int | None = None,
+    seed: int | None = None,
 ) -> np.ndarray:
     """Parallel driver for local-spread jitter using a process pool."""
     if isinstance(obs, str):
@@ -386,7 +426,8 @@ def add_local_spread_parallel(
         chunks.append(states[i : i + chunk_size])
 
     jobs = []
-    for chunk in chunks:
+    for idx, chunk in enumerate(chunks):
+        job_seed = None if seed is None else int(seed) + idx
         jobs.append(
             {
                 "mode": mode,
@@ -395,6 +436,7 @@ def add_local_spread_parallel(
                 "sigma_arcsec": sigma_arcsec,
                 "vel_scale_factor": float(vel_scale_factor),
                 "df": float(df),
+                "seed": job_seed,
             }
         )
 

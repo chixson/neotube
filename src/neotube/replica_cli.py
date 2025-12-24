@@ -276,6 +276,7 @@ def main() -> int:
             df=float(args.local_spread_df),
             n_workers=int(args.n_workers),
             chunk_size=int(args.chunk_size) if args.chunk_size is not None else None,
+            seed=int(args.seed) if args.seed is not None else None,
         )
         combined = np.vstack([states, jittered])
         rng = np.random.default_rng(int(args.seed))
