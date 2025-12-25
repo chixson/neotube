@@ -17,6 +17,7 @@ def load_observations(path: Path, sigma: float | None) -> list[Observation]:
     observations: list[Observation] = []
     with path.open() as fh:
         reader = csv.DictReader(fh)
+        pos_keys = ("obs_x_km", "obs_y_km", "obs_z_km")
         for row in reader:
             if not row.get("t_utc") or not row.get("ra_deg") or not row.get("dec_deg"):
                 continue
@@ -26,6 +27,16 @@ def load_observations(path: Path, sigma: float | None) -> list[Observation]:
             if obs_sigma is None:
                 raise ValueError("Observation row missing sigma_arcsec and no default provided.")
             obs_time = Time(row["t_utc"], scale="utc")
+            observer_pos_km = None
+            if any(key in row for key in pos_keys):
+                raw_vals = [row.get(key) for key in pos_keys]
+                if any(val not in (None, "") for val in raw_vals):
+                    if any(val in (None, "") for val in raw_vals):
+                        raise ValueError(
+                            "Observation row has incomplete observer position; "
+                            "expected obs_x_km, obs_y_km, obs_z_km."
+                        )
+                    observer_pos_km = np.array([float(val) for val in raw_vals], dtype=float)
             observations.append(
                 Observation(
                     time=obs_time,
@@ -33,6 +44,7 @@ def load_observations(path: Path, sigma: float | None) -> list[Observation]:
                     dec_deg=float(row["dec_deg"]),
                     sigma_arcsec=obs_sigma,
                     site=row.get("site"),
+                    observer_pos_km=observer_pos_km,
                 )
             )
     if not observations:

@@ -89,6 +89,8 @@ def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
 
 def _site_offset(obs: Observation) -> np.ndarray:
     # Return the geocentric cartesian vector (km) for the observing site at obs.time.
+    if getattr(obs, "observer_pos_km", None) is not None:
+        return np.asarray(obs.observer_pos_km, dtype=float)
     if not obs.site:
         loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
         gcrs = loc.get_gcrs(obstime=obs.time)
@@ -152,6 +154,8 @@ def _site_offset_cached_for_jd(site_key: str | None, jd_seconds: int) -> tuple[f
 
 def _site_offset_cached(obs: Observation) -> np.ndarray:
     """Cached wrapper for site offsets keyed on integer-second JD."""
+    if getattr(obs, "observer_pos_km", None) is not None:
+        return np.asarray(obs.observer_pos_km, dtype=float)
     site_key = obs.site.strip().upper() if getattr(obs, "site", None) else None
     jd_seconds = int(round(obs.time.jd * 86400.0))
     return np.array(_site_offset_cached_for_jd(site_key, jd_seconds), dtype=float)
@@ -472,6 +476,7 @@ def _predict_batch(
 ) -> tuple[np.ndarray, np.ndarray]:
     times = [ob.time for ob in obs]
     site_codes = [ob.site for ob in obs]
+    observer_positions_km = [ob.observer_pos_km for ob in obs]
     if use_kepler:
         try:
             propagated = propagate_state_kepler(state, epoch, times)
@@ -485,7 +490,12 @@ def _predict_batch(
             )
     else:
         propagated = propagate_state(state, epoch, times, perturbers=perturbers, max_step=max_step)
-    ra, dec = predict_radec_batch(propagated, times, site_codes=site_codes)
+    ra, dec = predict_radec_batch(
+        propagated,
+        times,
+        site_codes=site_codes,
+        observer_positions_km=observer_positions_km,
+    )
     return ra, dec
 
 

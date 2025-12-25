@@ -466,14 +466,23 @@ def predict_radec(
 
 
 def _site_offsets(
-    epochs: Sequence[Time], site_codes: Sequence[str | None] | None
+    epochs: Sequence[Time],
+    site_codes: Sequence[str | None] | None,
+    observer_positions_km: Sequence[np.ndarray | None] | None,
 ) -> np.ndarray:
-    if site_codes is None:
-        return np.zeros((len(epochs), 3), dtype=float)
-    if len(site_codes) != len(epochs):
+    if observer_positions_km is not None and len(observer_positions_km) != len(epochs):
+        raise ValueError("observer_positions_km must match epochs length")
+    if site_codes is not None and len(site_codes) != len(epochs):
         raise ValueError("site_codes must match epochs length")
     offsets = np.zeros((len(epochs), 3), dtype=float)
-    for idx, (code, time) in enumerate(zip(site_codes, epochs)):
+    site_iter = site_codes if site_codes is not None else [None] * len(epochs)
+    observer_iter = (
+        observer_positions_km if observer_positions_km is not None else [None] * len(epochs)
+    )
+    for idx, (code, time, observer_pos) in enumerate(zip(site_iter, epochs, observer_iter)):
+        if observer_pos is not None:
+            offsets[idx] = np.asarray(observer_pos, dtype=float)
+            continue
         if code is None:
             continue
         loc = get_site_location(code)
@@ -488,6 +497,7 @@ def predict_radec_batch(
     states: np.ndarray | Sequence[np.ndarray],
     epochs: Sequence[Time],
     site_codes: Sequence[str | None] | None = None,
+    observer_positions_km: Sequence[np.ndarray | None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Vectorized RA/Dec computation for many heliocentric states/times."""
     if len(epochs) == 0:
@@ -509,7 +519,7 @@ def predict_radec_batch(
     obj_pos = states_arr[:, :3]
     if len(epochs) != obj_pos.shape[0]:
         raise ValueError("Number of states and epochs must match.")
-    site_offsets = _site_offsets(epochs, site_codes)
+    site_offsets = _site_offsets(epochs, site_codes, observer_positions_km)
     vectors = obj_pos - earth_helio.T - site_offsets
 
     coord = SkyCoord(
