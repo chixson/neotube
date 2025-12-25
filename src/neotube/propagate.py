@@ -455,20 +455,31 @@ def predict_radec(
     state: np.ndarray,
     epoch: Time,
     site_code: str | None = None,
+    *,
+    allow_unknown_site: bool = True,
 ) -> tuple[float, float]:
     """Compute topocentric RA/Dec (degrees) from a heliocentric state."""
     ra, dec = predict_radec_batch(
         state[np.newaxis, :],
         (epoch,),
         site_codes=(None if site_code is None else (site_code,)),
+        allow_unknown_site=allow_unknown_site,
     )
     return float(ra[0]), float(dec[0])
+
+
+def _site_error_message(site: str | None, time: Time, message: str) -> str:
+    site_label = (site or "UNKNOWN").strip() if site else "UNKNOWN"
+    time_label = time.isot if hasattr(time, "isot") else str(time)
+    return f"{message} (site='{site_label}', time='{time_label}')"
 
 
 def _site_offsets(
     epochs: Sequence[Time],
     site_codes: Sequence[str | None] | None,
-    observer_positions_km: Sequence[np.ndarray | None] | None,
+    observer_positions_km: Sequence[np.ndarray | None] | None = None,
+    *,
+    allow_unknown_site: bool = True,
 ) -> np.ndarray:
     if observer_positions_km is not None and len(observer_positions_km) != len(epochs):
         raise ValueError("observer_positions_km must match epochs length")
@@ -484,10 +495,16 @@ def _site_offsets(
             offsets[idx] = np.asarray(observer_pos, dtype=float)
             continue
         if code is None:
-            continue
+            if allow_unknown_site:
+                continue
+            raise ValueError(_site_error_message(code, time, "Missing site code"))
         loc = get_site_location(code)
         if loc is None:
-            continue
+            if allow_unknown_site:
+                continue
+            raise ValueError(
+                _site_error_message(code, time, "Site code not found in observatory catalog")
+            )
         gcrs = loc.get_gcrs(obstime=time)
         offsets[idx] = gcrs.cartesian.xyz.to(u.km).value
     return offsets
@@ -498,6 +515,8 @@ def predict_radec_batch(
     epochs: Sequence[Time],
     site_codes: Sequence[str | None] | None = None,
     observer_positions_km: Sequence[np.ndarray | None] | None = None,
+    *,
+    allow_unknown_site: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Vectorized RA/Dec computation for many heliocentric states/times."""
     if len(epochs) == 0:
@@ -519,7 +538,9 @@ def predict_radec_batch(
     obj_pos = states_arr[:, :3]
     if len(epochs) != obj_pos.shape[0]:
         raise ValueError("Number of states and epochs must match.")
-    site_offsets = _site_offsets(epochs, site_codes, observer_positions_km)
+    site_offsets = _site_offsets(
+        epochs, site_codes, observer_positions_km, allow_unknown_site=allow_unknown_site
+    )
     vectors = obj_pos - earth_helio.T - site_offsets
 
     coord = SkyCoord(
