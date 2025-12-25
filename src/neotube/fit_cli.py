@@ -120,6 +120,11 @@ def main() -> int:
         default=0.0,
         help="Minimum allowed per-observation sigma (arcsec) after scaling (default 0.0).",
     )
+    parser.add_argument(
+        "--allow-unknown-site",
+        action="store_true",
+        help="Allow unknown or misconfigured observatory sites (fallback to default Earth).",
+    )
     parser.add_argument("--out-dir", type=Path, required=True, help="Directory to write artifacts.")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARN"], default="INFO", help="Logging level.")
     args = parser.parse_args()
@@ -135,6 +140,7 @@ def main() -> int:
         "seed_method": args.seed_method,
         "likelihood": args.likelihood,
         "nu": args.nu,
+        "allow_unknown_site": args.allow_unknown_site,
     }
     with open(args.out_dir / "fit_params.json", "w") as fh:
         json.dump(params, fh, indent=2)
@@ -156,6 +162,7 @@ def main() -> int:
             estimate_site_scales_alpha=args.estimate_site_scales_alpha,
             estimate_site_scales_tol=args.estimate_site_scales_tol,
             sigma_floor=args.sigma_floor,
+            allow_unknown_site=args.allow_unknown_site,
             use_kepler=not args.no_kepler,
         )
     except RuntimeError as exc:
@@ -179,6 +186,7 @@ def main() -> int:
         tuple(args.perturbers),
         args.max_step,
         use_kepler=not args.no_kepler,
+        allow_unknown_site=args.allow_unknown_site,
     )
 
     residuals_rows = []
