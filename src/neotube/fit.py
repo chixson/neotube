@@ -110,6 +110,28 @@ def _site_kind(obs: Observation) -> str | None:
     return None
 
 
+def _has_dynamic_site_data(obs: Observation) -> bool:
+    if _site_kind(obs) in {"spacecraft", "space", "satellite", "roving", "rover", "mobile"}:
+        return True
+    for attr in (
+        "site_offset_km",
+        "site_xyz_km",
+        "site_gcrs_km",
+        "site_location",
+        "site_lon_deg",
+        "site_lat_deg",
+        "site_lon",
+        "site_lat",
+        "site_height_m",
+        "site_alt_m",
+        "site_ephemeris",
+        "spacecraft_ephemeris",
+    ):
+        if getattr(obs, attr, None) is not None:
+            return True
+    return False
+
+
 def _resolve_spacecraft_offset(obs: Observation) -> np.ndarray | None:
     ephemeris = getattr(obs, "site_ephemeris", None)
     if ephemeris is None:
@@ -256,6 +278,8 @@ def _site_offset_cached(
     obs: Observation, *, allow_unknown_site: bool = False
 ) -> np.ndarray:
     """Cached wrapper for site offsets keyed on integer-second JD."""
+    if _has_dynamic_site_data(obs):
+        return _site_offset(obs, allow_unknown_site=allow_unknown_site)
     site_key = obs.site.strip().upper() if getattr(obs, "site", None) else None
     jd_seconds = int(round(obs.time.jd * 86400.0))
     return np.array(
@@ -450,7 +474,15 @@ def _initial_state_from_attributable(
         v_helio = earth_vel_helio + v_gc
         cand_state = np.concatenate([r_helio, v_helio])
         try:
-            pred_ra, pred_dec = _predict_batch(cand_state, epoch, observations, perturbers, max_step, use_kepler=True)
+            pred_ra, pred_dec = _predict_batch(
+                cand_state,
+                epoch,
+                observations,
+                perturbers,
+                max_step,
+                use_kepler=True,
+                allow_unknown_site=allow_unknown_site,
+            )
         except Exception:
             continue
         res = _tangent_residuals(pred_ra, pred_dec, observations)
@@ -600,6 +632,7 @@ def _predict_batch(
     perturbers: Sequence[str],
     max_step: float,
     use_kepler: bool,
+    allow_unknown_site: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     times = [ob.time for ob in obs]
     site_codes = [ob.site for ob in obs]
@@ -616,7 +649,9 @@ def _predict_batch(
             )
     else:
         propagated = propagate_state(state, epoch, times, perturbers=perturbers, max_step=max_step)
-    ra, dec = predict_radec_batch(propagated, times, site_codes=site_codes)
+    ra, dec = predict_radec_batch(
+        propagated, times, site_codes=site_codes, allow_unknown_site=allow_unknown_site
+    )
     return ra, dec
 
 
@@ -627,8 +662,17 @@ def predict_orbit(
     perturbers: Sequence[str],
     max_step: float,
     use_kepler: bool = True,
+    allow_unknown_site: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    return _predict_batch(state, epoch, obs, perturbers, max_step, use_kepler=use_kepler)
+    return _predict_batch(
+        state,
+        epoch,
+        obs,
+        perturbers,
+        max_step,
+        use_kepler=use_kepler,
+        allow_unknown_site=allow_unknown_site,
+    )
 
 
 def _jacobian_fd(
@@ -639,9 +683,16 @@ def _jacobian_fd(
     eps: np.ndarray,
     max_step: float,
     use_kepler: bool,
+    allow_unknown_site: bool = True,
 ) -> np.ndarray:
     base_ra, base_dec = _predict_batch(
-        base_state, epoch, obs, perturbers, max_step, use_kepler=use_kepler
+        base_state,
+        epoch,
+        obs,
+        perturbers,
+        max_step,
+        use_kepler=use_kepler,
+        allow_unknown_site=allow_unknown_site,
     )
     base_res = _tangent_residuals(base_ra, base_dec, obs)
     _ensure_finite("residuals", base_res)
@@ -651,7 +702,13 @@ def _jacobian_fd(
         perturbed = base_state.copy()
         perturbed[idx] += eps[idx]
         pred_ra, pred_dec = _predict_batch(
-            perturbed, epoch, obs, perturbers, max_step, use_kepler=use_kepler
+            perturbed,
+            epoch,
+            obs,
+            perturbers,
+            max_step,
+            use_kepler=use_kepler,
+            allow_unknown_site=allow_unknown_site,
         )
         res = _tangent_residuals(pred_ra, pred_dec, obs)
         H[:, idx] = (res - base_res) / eps[idx]
@@ -666,10 +723,17 @@ def residuals_for_state(
     perturbers: Sequence[str],
     max_step: float,
     use_kepler: bool = False,
+    allow_unknown_site: bool = True,
 ) -> np.ndarray:
     """Compute tangent residuals for a single state."""
     pred_ra, pred_dec = _predict_batch(
-        state, epoch, observations, perturbers, max_step, use_kepler
+        state,
+        epoch,
+        observations,
+        perturbers,
+        max_step,
+        use_kepler,
+        allow_unknown_site=allow_unknown_site,
     )
     return _tangent_residuals(pred_ra, pred_dec, observations)
 
@@ -681,6 +745,7 @@ def residuals_batch(
     perturbers: Sequence[str],
     max_step: float,
     use_kepler: bool = False,
+    allow_unknown_site: bool = True,
 ) -> np.ndarray:
     """Compute residual vectors for a batch of states (K,6)."""
     states = np.asarray(states, dtype=float)
@@ -689,7 +754,15 @@ def residuals_batch(
     out = []
     for st in states:
         out.append(
-            residuals_for_state(st, epoch, observations, perturbers, max_step, use_kepler=use_kepler)
+            residuals_for_state(
+                st,
+                epoch,
+                observations,
+                perturbers,
+                max_step,
+                use_kepler=use_kepler,
+                allow_unknown_site=allow_unknown_site,
+            )
         )
     return np.vstack(out) if out else np.empty((0, len(observations) * 2), dtype=float)
 
@@ -703,6 +776,7 @@ def _init_resid_worker(
     perturbers: Sequence[str],
     max_step: float,
     use_kepler: bool,
+    allow_unknown_site: bool,
 ) -> None:
     global _RESID_CTX
     _RESID_CTX = {
@@ -711,6 +785,7 @@ def _init_resid_worker(
         "perturbers": tuple(perturbers),
         "max_step": float(max_step),
         "use_kepler": bool(use_kepler),
+        "allow_unknown_site": bool(allow_unknown_site),
     }
 
 
@@ -723,6 +798,7 @@ def _resid_chunk_worker(states: np.ndarray) -> np.ndarray:
         ctx["perturbers"],
         ctx["max_step"],
         use_kepler=ctx["use_kepler"],
+        allow_unknown_site=ctx["allow_unknown_site"],
     )
 
 
@@ -735,6 +811,7 @@ def residuals_parallel(
     n_workers: int = 4,
     chunk_size: int | None = None,
     use_kepler: bool = False,
+    allow_unknown_site: bool = True,
 ) -> np.ndarray:
     """Parallel residuals for many candidate states."""
     states = np.asarray(states, dtype=float)
@@ -748,7 +825,7 @@ def residuals_parallel(
     with ProcessPoolExecutor(
         max_workers=max(1, int(n_workers)),
         initializer=_init_resid_worker,
-        initargs=(epoch, observations, tuple(perturbers), max_step, use_kepler),
+        initargs=(epoch, observations, tuple(perturbers), max_step, use_kepler, allow_unknown_site),
     ) as executor:
         for res in executor.map(_resid_chunk_worker, chunks):
             results.append(res)
@@ -1026,7 +1103,13 @@ def fit_orbit(
     seed_rms: float | None = None
     try:
         seed_ra, seed_dec = _predict_batch(
-            state, epoch, observations, perturbers, max_step, use_kepler=use_kepler
+            state,
+            epoch,
+            observations,
+            perturbers,
+            max_step,
+            use_kepler=use_kepler,
+            allow_unknown_site=allow_unknown_site,
         )
         seed_residuals = _tangent_residuals(seed_ra, seed_dec, observations)
         if np.all(np.isfinite(seed_residuals)):
@@ -1044,7 +1127,14 @@ def fit_orbit(
     for it in range(max_iter):
         eps = np.maximum(np.abs(state) * 1e-8, base_eps)
         H, residuals = _jacobian_fd(
-            state, epoch, observations, perturbers, eps, max_step, use_kepler=use_kepler
+            state,
+            epoch,
+            observations,
+            perturbers,
+            eps,
+            max_step,
+            use_kepler=use_kepler,
+            allow_unknown_site=allow_unknown_site,
         )
 
         col_norm = np.linalg.norm(H, axis=0)
@@ -1076,7 +1166,13 @@ def fit_orbit(
         candidate_state = state + delta
         try:
             cand_ra, cand_dec = _predict_batch(
-                candidate_state, epoch, observations, perturbers, max_step, use_kepler=use_kepler
+                candidate_state,
+                epoch,
+                observations,
+                perturbers,
+                max_step,
+                use_kepler=use_kepler,
+                allow_unknown_site=allow_unknown_site,
             )
             cand_residuals = _tangent_residuals(cand_ra, cand_dec, observations)
             _ensure_finite("candidate residuals", cand_residuals)

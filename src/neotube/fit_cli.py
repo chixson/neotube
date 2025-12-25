@@ -186,6 +186,7 @@ def main() -> int:
         tuple(args.perturbers),
         args.max_step,
         use_kepler=not args.no_kepler,
+        allow_unknown_site=args.allow_unknown_site,
     )
 
     residuals_rows = []
