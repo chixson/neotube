@@ -13,6 +13,7 @@ class Observation:
     dec_deg: float
     sigma_arcsec: float
     site: str | None = None
+    observer_pos_km: np.ndarray | None = None
 
 
 @dataclass
