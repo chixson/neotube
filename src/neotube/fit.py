@@ -32,6 +32,7 @@ from .propagate import (
 from .sites import get_site_location, load_observatories
 
 _MISSING_SITE_REFRESHED: set[str] = set()
+_ALLOW_UNKNOWN_SITE = False
 
 __all__ = ["fit_orbit", "sample_replicas", "predict_orbit", "load_posterior"]
 
@@ -87,12 +88,118 @@ def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
     )
 
 
-def _site_offset(obs: Observation) -> np.ndarray:
-    # Return the geocentric cartesian vector (km) for the observing site at obs.time.
-    if not obs.site:
-        loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
+def _site_error_message(obs: Observation, message: str) -> str:
+    site = (obs.site or "UNKNOWN").strip() if getattr(obs, "site", None) else "UNKNOWN"
+    time = obs.time.isot if getattr(obs, "time", None) else "UNKNOWN"
+    return f"{message} (site='{site}', time='{time}')"
+
+
+def _fallback_earth_offset(time: Time) -> np.ndarray:
+    loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
+    gcrs = loc.get_gcrs(obstime=time)
+    return gcrs.cartesian.xyz.to(u.km).value
+
+
+def _site_kind(obs: Observation) -> str | None:
+    for attr in ("site_kind", "site_type", "site_class"):
+        value = getattr(obs, attr, None)
+        if value is None:
+            continue
+        normalized = str(value).strip().lower()
+        if normalized:
+            return normalized
+    return None
+
+
+def _resolve_spacecraft_offset(obs: Observation) -> np.ndarray | None:
+    ephemeris = getattr(obs, "site_ephemeris", None)
+    if ephemeris is None:
+        ephemeris = getattr(obs, "spacecraft_ephemeris", None)
+    if ephemeris is None:
+        return None
+    vec = ephemeris(obs.time) if callable(ephemeris) else ephemeris
+    arr = np.asarray(vec, dtype=float)
+    if arr.shape != (3,):
+        raise ValueError(
+            _site_error_message(obs, "Spacecraft ephemeris must provide a 3-vector in km")
+        )
+    return arr
+
+
+def _resolve_roving_offset(obs: Observation) -> np.ndarray | None:
+    for attr in ("site_offset_km", "site_xyz_km", "site_gcrs_km"):
+        val = getattr(obs, attr, None)
+        if val is None:
+            continue
+        arr = np.asarray(val, dtype=float)
+        if arr.shape != (3,):
+            raise ValueError(
+                _site_error_message(obs, f"Roving site coordinate '{attr}' must be a 3-vector in km")
+            )
+        return arr
+    loc = getattr(obs, "site_location", None)
+    if isinstance(loc, EarthLocation):
         gcrs = loc.get_gcrs(obstime=obs.time)
         return gcrs.cartesian.xyz.to(u.km).value
+    lon = getattr(obs, "site_lon_deg", None)
+    lat = getattr(obs, "site_lat_deg", None)
+    if lon is None:
+        lon = getattr(obs, "site_lon", None)
+    if lat is None:
+        lat = getattr(obs, "site_lat", None)
+    if lon is not None and lat is not None:
+        height = getattr(obs, "site_height_m", getattr(obs, "site_alt_m", 0.0))
+        loc = EarthLocation.from_geodetic(
+            lon=float(lon) * u.deg,
+            lat=float(lat) * u.deg,
+            height=float(height) * u.m,
+        )
+        gcrs = loc.get_gcrs(obstime=obs.time)
+        return gcrs.cartesian.xyz.to(u.km).value
+    return None
+
+
+def _site_offset(obs: Observation, *, allow_unknown_site: bool | None = None) -> np.ndarray:
+    # Return the geocentric cartesian vector (km) for the observing site at obs.time.
+    allow_unknown_site = _ALLOW_UNKNOWN_SITE if allow_unknown_site is None else bool(allow_unknown_site)
+    site_kind = _site_kind(obs)
+    if site_kind in {"spacecraft", "space", "satellite"}:
+        vec = _resolve_spacecraft_offset(obs)
+        if vec is None:
+            if allow_unknown_site:
+                warnings.warn(
+                    _site_error_message(
+                        obs, "Spacecraft site missing ephemeris; using fallback Earth location."
+                    )
+                )
+                return _fallback_earth_offset(obs.time)
+            raise ValueError(
+                _site_error_message(obs, "Spacecraft site requires a configured ephemeris")
+            )
+        return vec
+    if site_kind in {"roving", "rover", "mobile"}:
+        vec = _resolve_roving_offset(obs)
+        if vec is None:
+            if allow_unknown_site:
+                warnings.warn(
+                    _site_error_message(
+                        obs,
+                        "Roving site missing per-observation coordinates; using fallback Earth location.",
+                    )
+                )
+                return _fallback_earth_offset(obs.time)
+            raise ValueError(
+                _site_error_message(obs, "Roving site requires per-observation coordinates")
+            )
+        return vec
+
+    if not obs.site:
+        if allow_unknown_site:
+            warnings.warn(
+                _site_error_message(obs, "Missing site code; using fallback Earth location.")
+            )
+            return _fallback_earth_offset(obs.time)
+        raise ValueError(_site_error_message(obs, "Missing site code"))
 
     loc = get_site_location(obs.site)
     if loc is None:
@@ -105,12 +212,17 @@ def _site_offset(obs: Observation) -> np.ndarray:
             _MISSING_SITE_REFRESHED.add(site_key)
         loc = get_site_location(obs.site)
     if loc is None:
-        warnings.warn(
-            f"Site code '{obs.site}' not found in observatory catalog; using fallback Earth location."
+        if allow_unknown_site:
+            warnings.warn(
+                _site_error_message(
+                    obs,
+                    "Site code not found in observatory catalog; using fallback Earth location.",
+                )
+            )
+            return _fallback_earth_offset(obs.time)
+        raise ValueError(
+            _site_error_message(obs, "Site code not found in observatory catalog")
         )
-        loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
-        gcrs = loc.get_gcrs(obstime=obs.time)
-        return gcrs.cartesian.xyz.to(u.km).value
 
     gcrs = loc.get_gcrs(obstime=obs.time)
     return gcrs.cartesian.xyz.to(u.km).value
@@ -130,31 +242,28 @@ def _body_bary_posvel_for_time(body: str, obstime: Time):
 
 
 @lru_cache(maxsize=1024)
-def _site_offset_cached_for_jd(site_key: str | None, jd_seconds: int) -> tuple[float, float, float]:
+def _site_offset_cached_for_jd(
+    site_key: str | None, jd_seconds: int, allow_unknown_site: bool
+) -> tuple[float, float, float]:
     """Return cached site offset tuple (km) keyed by site + integer seconds."""
     t = Time(jd_seconds / 86400.0, format="jd")
-    if not site_key:
-        loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
-        gcrs = loc.get_gcrs(obstime=t)
-        return tuple(gcrs.cartesian.xyz.to(u.km).value)
-
     obslite = type("ObsLite", (), {})()
     obslite.site = site_key
     obslite.time = t
-    try:
-        vec = _site_offset(obslite)
-        return tuple(vec)
-    except Exception:
-        loc = EarthLocation.from_geodetic(lon=0.0 * u.deg, lat=0.0 * u.deg, height=0.0 * u.m)
-        gcrs = loc.get_gcrs(obstime=t)
-        return tuple(gcrs.cartesian.xyz.to(u.km).value)
+    vec = _site_offset(obslite, allow_unknown_site=allow_unknown_site)
+    return tuple(vec)
 
 
-def _site_offset_cached(obs: Observation) -> np.ndarray:
+def _site_offset_cached(
+    obs: Observation, *, allow_unknown_site: bool | None = None
+) -> np.ndarray:
     """Cached wrapper for site offsets keyed on integer-second JD."""
+    allow_unknown_site = _ALLOW_UNKNOWN_SITE if allow_unknown_site is None else bool(allow_unknown_site)
     site_key = obs.site.strip().upper() if getattr(obs, "site", None) else None
     jd_seconds = int(round(obs.time.jd * 86400.0))
-    return np.array(_site_offset_cached_for_jd(site_key, jd_seconds), dtype=float)
+    return np.array(
+        _site_offset_cached_for_jd(site_key, jd_seconds, allow_unknown_site), dtype=float
+    )
 
 
 def _observation_line_of_sight(obs: Observation) -> tuple[np.ndarray, np.ndarray]:
@@ -643,8 +752,11 @@ def fit_orbit(
     estimate_site_scales_alpha: float = 0.4,
     estimate_site_scales_tol: float = 1e-3,
     sigma_floor: float = 0.0,
+    allow_unknown_site: bool = False,
     internal_run: bool = False,
 ) -> OrbitPosterior:
+    global _ALLOW_UNKNOWN_SITE
+    _ALLOW_UNKNOWN_SITE = bool(allow_unknown_site)
     observations = sorted(observations, key=lambda ob: ob.time)
     epoch = observations[len(observations) // 2].time
     if seed_method is None:
@@ -715,6 +827,7 @@ def fit_orbit(
                     likelihood=likelihood,
                     nu=nu,
                     estimate_site_scales=False,
+                    allow_unknown_site=allow_unknown_site,
                     internal_run=True,
                 )
             except Exception as exc:
@@ -747,6 +860,7 @@ def fit_orbit(
                         likelihood="studentt",
                         nu=nu,
                         estimate_site_scales=False,
+                        allow_unknown_site=allow_unknown_site,
                         internal_run=True,
                     )
                 except Exception as exc:
@@ -817,6 +931,7 @@ def fit_orbit(
                         likelihood=likelihood,
                         nu=nu,
                         estimate_site_scales=False,
+                        allow_unknown_site=allow_unknown_site,
                         internal_run=True,
                     )
                 except Exception as exc:
@@ -869,6 +984,7 @@ def fit_orbit(
             likelihood=likelihood,
             nu=nu,
             estimate_site_scales=False,
+            allow_unknown_site=allow_unknown_site,
             internal_run=True,
         )
         posterior.site_kappas = site_kappas
