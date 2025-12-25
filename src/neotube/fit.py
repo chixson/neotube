@@ -32,7 +32,6 @@ from .propagate import (
 from .sites import get_site_location, load_observatories
 
 _MISSING_SITE_REFRESHED: set[str] = set()
-_ALLOW_UNKNOWN_SITE = False
 
 __all__ = ["fit_orbit", "sample_replicas", "predict_orbit", "load_posterior"]
 
@@ -159,9 +158,8 @@ def _resolve_roving_offset(obs: Observation) -> np.ndarray | None:
     return None
 
 
-def _site_offset(obs: Observation, *, allow_unknown_site: bool | None = None) -> np.ndarray:
+def _site_offset(obs: Observation, *, allow_unknown_site: bool = False) -> np.ndarray:
     # Return the geocentric cartesian vector (km) for the observing site at obs.time.
-    allow_unknown_site = _ALLOW_UNKNOWN_SITE if allow_unknown_site is None else bool(allow_unknown_site)
     site_kind = _site_kind(obs)
     if site_kind in {"spacecraft", "space", "satellite"}:
         vec = _resolve_spacecraft_offset(obs)
@@ -255,10 +253,9 @@ def _site_offset_cached_for_jd(
 
 
 def _site_offset_cached(
-    obs: Observation, *, allow_unknown_site: bool | None = None
+    obs: Observation, *, allow_unknown_site: bool = False
 ) -> np.ndarray:
     """Cached wrapper for site offsets keyed on integer-second JD."""
-    allow_unknown_site = _ALLOW_UNKNOWN_SITE if allow_unknown_site is None else bool(allow_unknown_site)
     site_key = obs.site.strip().upper() if getattr(obs, "site", None) else None
     jd_seconds = int(round(obs.time.jd * 86400.0))
     return np.array(
@@ -266,7 +263,9 @@ def _site_offset_cached(
     )
 
 
-def _observation_line_of_sight(obs: Observation) -> tuple[np.ndarray, np.ndarray]:
+def _observation_line_of_sight(
+    obs: Observation, *, allow_unknown_site: bool = False
+) -> tuple[np.ndarray, np.ndarray]:
     coord = SkyCoord(
         ra=obs.ra_deg * u.deg,
         dec=obs.dec_deg * u.deg,
@@ -279,13 +278,19 @@ def _observation_line_of_sight(obs: Observation) -> tuple[np.ndarray, np.ndarray
     earth_pos, _ = _body_bary_posvel_for_time("earth", obs.time)
     earth_km = earth_pos.xyz.to(u.km).value
     # Use cached site-offset to avoid repeated EarthLocation/GCRS conversions.
-    offset = _site_offset_cached(obs)
+    offset = _site_offset_cached(obs, allow_unknown_site=allow_unknown_site)
     return earth_km + offset, direction
 
 
-def _initial_state_from_two_points(observations: list[Observation]) -> np.ndarray:
-    pos, _ = _observation_line_of_sight(observations[0])
-    pos1, _ = _observation_line_of_sight(observations[-1])
+def _initial_state_from_two_points(
+    observations: list[Observation], *, allow_unknown_site: bool = False
+) -> np.ndarray:
+    pos, _ = _observation_line_of_sight(
+        observations[0], allow_unknown_site=allow_unknown_site
+    )
+    pos1, _ = _observation_line_of_sight(
+        observations[-1], allow_unknown_site=allow_unknown_site
+    )
     dt = float((observations[-1].time - observations[0].time).to(u.s).value)
     if abs(dt) < 1e-3:
         dt = 1.0
@@ -361,14 +366,16 @@ def _line_intersection(
     return p1 + d1 * t
 
 
-def _initial_state_from_gauss(observations: list[Observation]) -> np.ndarray:
+def _initial_state_from_gauss(
+    observations: list[Observation], *, allow_unknown_site: bool = False
+) -> np.ndarray:
     if len(observations) < 3:
         return _initial_state_from_observations(observations)
 
     obs1, obs2, obs3 = observations[0], observations[len(observations) // 2], observations[-1]
-    p1, d1 = _observation_line_of_sight(obs1)
-    p2, d2 = _observation_line_of_sight(obs2)
-    p3, d3 = _observation_line_of_sight(obs3)
+    p1, d1 = _observation_line_of_sight(obs1, allow_unknown_site=allow_unknown_site)
+    p2, d2 = _observation_line_of_sight(obs2, allow_unknown_site=allow_unknown_site)
+    p3, d3 = _observation_line_of_sight(obs3, allow_unknown_site=allow_unknown_site)
 
     points = []
     for (p_a, d_a), (p_b, d_b) in (( (p1, d1), (p2, d2) ), ( (p1, d1), (p3, d3) ), ( (p2, d2), (p3, d3) )):
@@ -398,6 +405,7 @@ def _initial_state_from_attributable(
     perturbers: Sequence[str] = ("earth", "mars", "jupiter"),
     max_step: float = 3600.0,
     site_choice: str | None = None,
+    allow_unknown_site: bool = False,
 ) -> np.ndarray:
     ra0, dec0, ra_dot, dec_dot = _compute_attributable(observations, epoch)
     s, s_dot = _s_and_sdot_from_ra_dec(ra0, dec0, ra_dot, dec_dot)
@@ -411,7 +419,21 @@ def _initial_state_from_attributable(
     site_offset = np.zeros(3, dtype=float)
     if site_code:
         loc = get_site_location(site_code)
-        if loc is not None:
+        if loc is None:
+            if allow_unknown_site:
+                warnings.warn(
+                    _site_error_message(
+                        observations[0],
+                        "Site code not found in observatory catalog; using fallback Earth location.",
+                    )
+                )
+            else:
+                raise ValueError(
+                    _site_error_message(
+                        observations[0], "Site code not found in observatory catalog"
+                    )
+                )
+        else:
             gcrs = loc.get_gcrs(obstime=epoch)
             icrs = gcrs.transform_to(ICRS())
             site_offset = icrs.cartesian.xyz.to(u.km).value.flatten()
@@ -755,8 +777,6 @@ def fit_orbit(
     allow_unknown_site: bool = False,
     internal_run: bool = False,
 ) -> OrbitPosterior:
-    global _ALLOW_UNKNOWN_SITE
-    _ALLOW_UNKNOWN_SITE = bool(allow_unknown_site)
     observations = sorted(observations, key=lambda ob: ob.time)
     epoch = observations[len(observations) // 2].time
     if seed_method is None:
@@ -766,9 +786,13 @@ def fit_orbit(
     elif seed_method == "observations":
         state = _initial_state_from_observations(observations)
     elif seed_method == "gauss":
-        state = _initial_state_from_gauss(observations)
+        state = _initial_state_from_gauss(
+            observations, allow_unknown_site=allow_unknown_site
+        )
     elif seed_method == "attributable":
-        state = _initial_state_from_attributable(observations, epoch)
+        state = _initial_state_from_attributable(
+            observations, epoch, allow_unknown_site=allow_unknown_site
+        )
     else:
         raise ValueError(f"Unknown seed_method '{seed_method}'")
 
