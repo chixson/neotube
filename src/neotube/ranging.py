@@ -230,7 +230,7 @@ def add_attributable_jitter(
     sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
     earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
     earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
-    site_offset = _site_offset_cached(obs[0])
+    site_offset = _site_offset_cached(obs[0], allow_unknown_site=True)
 
     states = np.asarray(states, dtype=float)
     if states.size == 0:
@@ -601,7 +601,7 @@ def build_state_from_ranging(
     earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
     earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
 
-    site_offset = _site_offset(obs)
+    site_offset = _site_offset(obs, allow_unknown_site=True)
     r_geo = site_offset + rho_km * s
     v_geo = rhodot_km_s * s + rho_km * sdot
     r_helio = earth_helio + r_geo

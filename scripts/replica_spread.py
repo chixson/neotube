@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy.coordinates import get_body_barycentric_posvel
-from astropy.coordinates import SkyCoord
 from astropy.time import Time
 import astropy.units as u
 
@@ -164,41 +163,25 @@ def _load_epoch_utc(meta_path: Path) -> str | None:
     return meta.get("epoch_utc")
 
 
-def _topocentric_distance_au(pos_km: np.ndarray, epoch_utc: str) -> np.ndarray:
+def _topocentric_distance_au(
+    pos_km: np.ndarray, epoch_utc: str, site_offset_km: np.ndarray
+) -> np.ndarray:
     time_array = Time([epoch_utc] * len(pos_km), scale="utc")
     earth_pos, _ = get_body_barycentric_posvel("earth", time_array)
     sun_pos, _ = get_body_barycentric_posvel("sun", time_array)
     earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.T
-    vectors = pos_km - earth_helio
+    vectors = pos_km - earth_helio - site_offset_km[None, :]
     return np.linalg.norm(vectors, axis=1) / 149597870.7
 
 
-def _topocentric_vectors(pos_km: np.ndarray, epoch_utc: str, site_code: str | None) -> np.ndarray:
+def _topocentric_vectors(
+    pos_km: np.ndarray, epoch_utc: str, site_offset_km: np.ndarray
+) -> np.ndarray:
     time_val = Time(epoch_utc, scale="utc")
     earth_pos, _ = get_body_barycentric_posvel("earth", time_val)
     sun_pos, _ = get_body_barycentric_posvel("sun", time_val)
     earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value
-    site_offset = np.zeros(3, dtype=float)
-    if site_code:
-        from neotube.sites import get_site_location
-
-        loc = get_site_location(site_code)
-        if loc is not None:
-            gcrs = loc.get_gcrs(obstime=time_val)
-            site_offset = gcrs.cartesian.xyz.to(u.km).value
-    return pos_km - earth_helio - site_offset
-
-
-def _radec_from_vectors(vectors_km: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    coord = SkyCoord(
-        x=vectors_km[:, 0] * u.km,
-        y=vectors_km[:, 1] * u.km,
-        z=vectors_km[:, 2] * u.km,
-        representation_type="cartesian",
-        frame="icrs",
-    )
-    sph = coord.represent_as("spherical")
-    return np.array(sph.lon.deg), np.array(sph.lat.deg)
+    return pos_km - earth_helio - site_offset_km
 
 
 def mirror_to_data_dir(*paths: Path) -> None:
@@ -207,6 +190,25 @@ def mirror_to_data_dir(*paths: Path) -> None:
     for path in paths:
         if path.exists():
             shutil.copy2(path, data_dir / path.name)
+
+
+def write_composite(out_path: Path, image_paths: list[Path], cols: int = 3) -> None:
+    existing = [p for p in image_paths if p.exists()]
+    if not existing:
+        return
+    rows = (len(existing) + cols - 1) // cols
+    fig, axs = plt.subplots(rows, cols, figsize=(cols * 4.5, rows * 4.5))
+    axs = np.atleast_1d(axs).ravel()
+    for ax in axs[len(existing) :]:
+        ax.axis("off")
+    for ax, img_path in zip(axs, existing):
+        img = plt.imread(img_path)
+        ax.imshow(img)
+        ax.axis("off")
+        ax.set_title(img_path.name, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
 
 
 def main() -> int:
@@ -244,9 +246,17 @@ def main() -> int:
     args = parser.parse_args()
 
     df = load_replicas(args.replicas)
+    if {"x_km", "y_km", "z_km", "vx_km_s", "vy_km_s", "vz_km_s"}.issubset(df.columns):
+        states = df[["x_km", "y_km", "z_km", "vx_km_s", "vy_km_s", "vz_km_s"]].to_numpy(
+            dtype=float
+        )
+    else:
+        states = None
     dra, ddec, ra0, dec0 = tangent_offsets(df)
     r_au = None
     topo_au = None
+    obs_list = None
+    site_offset_km = None
     if {"x_km", "y_km", "z_km"}.issubset(df.columns):
         pos = df[["x_km", "y_km", "z_km"]].to_numpy(dtype=float)
         r_au = np.linalg.norm(pos, axis=1) / 149597870.7
@@ -254,10 +264,7 @@ def main() -> int:
             args.replicas.with_name(args.replicas.stem + "_meta.json")
         )
         if epoch_utc is not None:
-            try:
-                topo_au = _topocentric_distance_au(pos, epoch_utc)
-            except Exception:
-                topo_au = None
+            topo_au = None
     else:
         print("replica CSV missing x_km/y_km/z_km; skipping PC1 vs r(AU) plot")
 
@@ -276,6 +283,7 @@ def main() -> int:
     topo_radec_path = base.parent / f"{base.name}_topo_radec.png"
     topo_pca_path = base.parent / f"{base.name}_topo_pca.png"
     topo_pca23_path = base.parent / f"{base.name}_topo_pca23.png"
+    composite_path = base.parent / f"{base.name}_composite.png"
     plot_ra_dec(dra, ddec, radec_path, jpl_offset)
     pc1, pc2, eigvecs = pca_components(dra, ddec)
     jpl_pc = None
@@ -284,16 +292,6 @@ def main() -> int:
         jpl_pc = tuple((eigvecs.T @ np.array(jpl_offset)).tolist())
         jpl_pc1 = float(jpl_pc[0])
     plot_pca(pc1, pc2, pca_path, jpl_pc)
-    if r_au is not None:
-        plot_pca1_r_au(pc1, r_au, pca1_r_path, jpl_pc1, args.jpl_r_au)
-        if topo_au is not None:
-            plot_pca1_topo_au(pc1, topo_au, pca1_topo_path, jpl_pc1, args.jpl_topo_au)
-            mirror_to_data_dir(radec_path, pca_path, pca1_r_path, pca1_topo_path)
-        else:
-            mirror_to_data_dir(radec_path, pca_path, pca1_r_path)
-    else:
-        mirror_to_data_dir(radec_path, pca_path)
-
     # Optional topocentric plots (require obs + epoch + positions).
     epoch_utc = args.epoch_utc or _load_epoch_utc(
         args.replicas.with_name(args.replicas.stem + "_meta.json")
@@ -309,20 +307,41 @@ def main() -> int:
                     obs_path = Path(meta["obs"])
             except Exception:
                 obs_path = None
-    if epoch_utc is not None and obs_path is not None and {"x_km", "y_km", "z_km"}.issubset(df.columns):
+    if epoch_utc is not None and obs_path is not None and states is not None:
         from neotube.fit_cli import load_observations
+        from neotube.propagate import predict_radec_batch
 
         obs_list = load_observations(obs_path, None)
         site_code = obs_list[0].site if obs_list else None
-        topo_vec = _topocentric_vectors(pos, epoch_utc, site_code)
-        topo_ra, topo_dec = _radec_from_vectors(topo_vec)
+        time_val = Time(epoch_utc, scale="utc")
+        epochs = [time_val] * len(states)
+        site_codes = [site_code] * len(states)
+        topo_ra, topo_dec = predict_radec_batch(
+            states,
+            epochs,
+            site_codes=site_codes,
+            allow_unknown_site=True,
+        )
         topo_df = df.copy()
         topo_df["ra_deg"] = topo_ra
         topo_df["dec_deg"] = topo_dec
         topo_dra, topo_ddec, topo_ra0, topo_dec0 = tangent_offsets(topo_df)
 
         jpl_topo_offset = None
-        if args.jpl_ra is not None and args.jpl_dec is not None:
+        if args.jpl_helio_pos_km is not None:
+            jpl_helio = np.array(args.jpl_helio_pos_km, dtype=float)
+            jpl_state = np.hstack([jpl_helio, np.zeros(3, dtype=float)])
+            jpl_ra, jpl_dec = predict_radec_batch(
+                jpl_state[None, :],
+                [time_val],
+                site_codes=[site_code],
+                allow_unknown_site=True,
+            )
+            cosd = np.cos(np.deg2rad(topo_dec0))
+            dra_j = (float(jpl_ra[0]) - topo_ra0) * cosd * 3600.0
+            ddec_j = (float(jpl_dec[0]) - topo_dec0) * 3600.0
+            jpl_topo_offset = (float(dra_j), float(ddec_j))
+        elif args.jpl_ra is not None and args.jpl_dec is not None:
             cosd = np.cos(np.deg2rad(topo_dec0))
             dra_j = (args.jpl_ra - topo_ra0) * cosd * 3600.0
             ddec_j = (args.jpl_dec - topo_dec0) * 3600.0
@@ -330,11 +349,19 @@ def main() -> int:
 
         plot_ra_dec(topo_dra, topo_ddec, topo_radec_path, jpl_topo_offset)
 
+        site_offset_km = None
+        if obs_list:
+            from neotube.fit import _site_offset
+
+            site_offset_km = _site_offset(obs_list[0], allow_unknown_site=True)
+        else:
+            site_offset_km = np.zeros(3, dtype=float)
+        topo_vec = _topocentric_vectors(pos, epoch_utc, site_offset_km)
         proj, comps, mean = pca_components_3d(topo_vec)
         jpl_pc_topo = None
         if args.jpl_helio_pos_km is not None:
             jpl_helio = np.array(args.jpl_helio_pos_km, dtype=float)
-            jpl_topo = _topocentric_vectors(jpl_helio[None, :], epoch_utc, site_code)[0]
+            jpl_topo = _topocentric_vectors(jpl_helio[None, :], epoch_utc, site_offset_km)[0]
             jpl_proj = (jpl_topo - mean) @ comps.T
             jpl_pc_topo = (float(jpl_proj[0]), float(jpl_proj[1]))
             jpl_pc23 = (float(jpl_proj[1]), float(jpl_proj[2]))
@@ -344,6 +371,33 @@ def main() -> int:
         plot_pca(proj[:, 0], proj[:, 1], topo_pca_path, jpl_pc_topo)
         plot_pca23(proj[:, 1], proj[:, 2], topo_pca23_path, jpl_pc23, "Replica cloud (topocentric PC2 vs PC3)")
         mirror_to_data_dir(topo_radec_path, topo_pca_path, topo_pca23_path)
+
+    if r_au is not None:
+        if topo_au is None and epoch_utc is not None and site_offset_km is not None:
+            try:
+                topo_au = _topocentric_distance_au(pos, epoch_utc, site_offset_km)
+            except Exception:
+                topo_au = None
+        plot_pca1_r_au(pc1, r_au, pca1_r_path, jpl_pc1, args.jpl_r_au)
+        if topo_au is not None:
+            plot_pca1_topo_au(pc1, topo_au, pca1_topo_path, jpl_pc1, args.jpl_topo_au)
+            mirror_to_data_dir(radec_path, pca_path, pca1_r_path, pca1_topo_path)
+        else:
+            mirror_to_data_dir(radec_path, pca_path, pca1_r_path)
+    else:
+        mirror_to_data_dir(radec_path, pca_path)
+    write_composite(
+        composite_path,
+        [
+            radec_path,
+            pca_path,
+            pca1_r_path,
+            pca1_topo_path,
+            topo_radec_path,
+            topo_pca_path,
+            topo_pca23_path,
+        ],
+    )
     return 0
 
 

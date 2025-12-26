@@ -8,6 +8,7 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Mapping
+import json
 
 import requests
 from astropy import units as u
@@ -16,6 +17,7 @@ from astropy.coordinates import EarthLocation
 
 OBS_CODES_URL = "https://minorplanetcenter.net/iau/lists/ObsCodes.html"
 CACHE_PATH = Path.home() / ".cache" / "neotube" / "observatories.csv"
+OVERRIDES_PATH = Path(__file__).resolve().parents[2] / "data" / "site_overrides.json"
 _OBS_CACHE: Mapping[str, "ObservatoryEntry"] | None = None
 EARTH_RADIUS_KM = float(R_earth.to(u.km).value)
 
@@ -27,6 +29,11 @@ class ObservatoryEntry:
     rho_cos_phi: float | None
     rho_sin_phi: float | None
     description: str | None
+    site_kind: str | None = None
+    ephemeris_id: str | None = None
+    ephemeris_id_type: str | None = None
+    ephemeris_location: str | None = None
+    ephemeris_frame: str | None = None
 
     @property
     def rho(self) -> float:
@@ -98,6 +105,13 @@ def _parse_line(line: str) -> tuple[str, float | None, float | None, float | Non
 
 def classify_site(code: str, entry: ObservatoryEntry | None) -> SiteKind:
     key = code.strip().upper()
+    if entry and entry.site_kind:
+        try:
+            return SiteKind(entry.site_kind)
+        except ValueError:
+            pass
+    if entry and entry.ephemeris_id:
+        return SiteKind.SPACECRAFT
     if key in {"500", "244"}:
         return SiteKind.GEOCENTER
     if key in {"247", "270"}:
@@ -142,6 +156,69 @@ def _fetch_catalog() -> Mapping[str, ObservatoryEntry]:
     return entries
 
 
+@lru_cache(maxsize=1)
+def _load_site_overrides() -> Mapping[str, dict]:
+    if not OVERRIDES_PATH.exists():
+        return {}
+    try:
+        data = json.loads(OVERRIDES_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    normalized: dict[str, dict] = {}
+    for key, payload in data.items():
+        if not isinstance(payload, dict):
+            continue
+        code = str(key).strip().upper()
+        if not code:
+            continue
+        normalized[code] = payload
+    return normalized
+
+
+def _apply_site_overrides(entries: Mapping[str, ObservatoryEntry]) -> Mapping[str, ObservatoryEntry]:
+    overrides = _load_site_overrides()
+    if not overrides:
+        return entries
+    updated = dict(entries)
+    for code, payload in overrides.items():
+        entry = updated.get(code)
+        description = payload.get("description")
+        site_kind = payload.get("site_kind")
+        ephemeris_id = payload.get("ephemeris_id")
+        ephemeris_id_type = payload.get("ephemeris_id_type")
+        ephemeris_location = payload.get("ephemeris_location")
+        ephemeris_frame = payload.get("ephemeris_frame")
+        if entry is None:
+            updated[code] = ObservatoryEntry(
+                code=code,
+                lon_deg=None,
+                rho_cos_phi=None,
+                rho_sin_phi=None,
+                description=description,
+                site_kind=site_kind,
+                ephemeris_id=ephemeris_id,
+                ephemeris_id_type=ephemeris_id_type,
+                ephemeris_location=ephemeris_location,
+                ephemeris_frame=ephemeris_frame,
+            )
+        else:
+            updated[code] = ObservatoryEntry(
+                code=entry.code,
+                lon_deg=entry.lon_deg,
+                rho_cos_phi=entry.rho_cos_phi,
+                rho_sin_phi=entry.rho_sin_phi,
+                description=description or entry.description,
+                site_kind=site_kind or entry.site_kind,
+                ephemeris_id=ephemeris_id or entry.ephemeris_id,
+                ephemeris_id_type=ephemeris_id_type or entry.ephemeris_id_type,
+                ephemeris_location=ephemeris_location or entry.ephemeris_location,
+                ephemeris_frame=ephemeris_frame or entry.ephemeris_frame,
+            )
+    return updated
+
+
 def _write_cache(entries: Iterable[ObservatoryEntry]) -> None:
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CACHE_PATH.open("w", newline="") as fh:
@@ -184,18 +261,18 @@ def load_observatories(refresh: bool = False) -> Mapping[str, ObservatoryEntry]:
     if not refresh:
         cached = _read_cache()
         if cached:
-            _OBS_CACHE = cached
-            return cached
+            _OBS_CACHE = _apply_site_overrides(cached)
+            return _OBS_CACHE
     fetched = _fetch_catalog()
     if fetched:
         _write_cache(fetched.values())
-        _OBS_CACHE = fetched
-        return fetched
+        _OBS_CACHE = _apply_site_overrides(fetched)
+        return _OBS_CACHE
     if _OBS_CACHE is not None:
         return _OBS_CACHE
     cached = _read_cache()
-    _OBS_CACHE = cached
-    return cached
+    _OBS_CACHE = _apply_site_overrides(cached)
+    return _OBS_CACHE
 
 
 @lru_cache(maxsize=1024)
@@ -208,6 +285,8 @@ def get_site_location(code: str | None) -> EarthLocation | None:
     catalog = load_observatories()
     entry = catalog.get(key)
     if entry is None:
+        return None
+    if entry.site_kind and entry.site_kind.lower() == SiteKind.SPACECRAFT.value:
         return None
     return entry.to_location()
 
@@ -222,3 +301,22 @@ def get_site_kind(code: str | None) -> SiteKind:
     catalog = load_observatories()
     entry = catalog.get(key)
     return classify_site(key, entry)
+
+
+@lru_cache(maxsize=1024)
+def get_site_ephemeris(code: str | None) -> dict | None:
+    if code is None:
+        return None
+    key = code.strip().upper()
+    if not key:
+        return None
+    catalog = load_observatories()
+    entry = catalog.get(key)
+    if entry is None or not entry.ephemeris_id:
+        return None
+    return {
+        "ephemeris_id": entry.ephemeris_id,
+        "ephemeris_id_type": entry.ephemeris_id_type or "spacecraft",
+        "ephemeris_location": entry.ephemeris_location or "@ssb",
+        "ephemeris_frame": entry.ephemeris_frame or "icrs",
+    }

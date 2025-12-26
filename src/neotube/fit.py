@@ -11,6 +11,7 @@ from typing import Optional, Sequence
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import (
+    BarycentricTrueEcliptic,
     CartesianDifferential,
     CartesianRepresentation,
     GCRS,
@@ -26,10 +27,11 @@ from astroquery.jplhorizons import Horizons
 from .models import Observation, OrbitPosterior
 from .propagate import (
     predict_radec_batch,
+    predict_radec_from_epoch,
     propagate_state,
     propagate_state_kepler,
 )
-from .sites import get_site_location, load_observatories
+from .sites import get_site_ephemeris, get_site_kind, get_site_location, load_observatories
 
 _MISSING_SITE_REFRESHED: set[str] = set()
 
@@ -107,6 +109,9 @@ def _site_kind(obs: Observation) -> str | None:
         normalized = str(value).strip().lower()
         if normalized:
             return normalized
+    if getattr(obs, "site", None):
+        kind = get_site_kind(obs.site)
+        return kind.value
     return None
 
 
@@ -132,12 +137,58 @@ def _has_dynamic_site_data(obs: Observation) -> bool:
     return False
 
 
+@lru_cache(maxsize=2048)
+def _spacecraft_barycentric_km(
+    ephemeris_id: str,
+    ephemeris_id_type: str,
+    ephemeris_location: str,
+    jd_seconds: int,
+) -> np.ndarray:
+    t = Time(jd_seconds / 86400.0, format="jd")
+    id_type = ephemeris_id_type
+    if id_type.lower() in {"id", "majorbody", "spacecraft"}:
+        id_type = None
+    obj = Horizons(
+        id=ephemeris_id,
+        id_type=id_type,
+        location=ephemeris_location,
+        epochs=t.jd,
+    )
+    vec = obj.vectors(refplane="earth")
+    x = float(vec["x"][0])
+    y = float(vec["y"][0])
+    z = float(vec["z"][0])
+    rep = CartesianRepresentation(x * u.au, y * u.au, z * u.au)
+    coord = SkyCoord(rep, frame=ICRS())
+    pos = coord.cartesian.xyz.to(u.km).value
+    return pos
+
+
 def _resolve_spacecraft_offset(obs: Observation) -> np.ndarray | None:
     ephemeris = getattr(obs, "site_ephemeris", None)
     if ephemeris is None:
         ephemeris = getattr(obs, "spacecraft_ephemeris", None)
     if ephemeris is None:
-        return None
+        config = get_site_ephemeris(getattr(obs, "site", None))
+        if config is None:
+            return None
+        ephemeris_id = str(config.get("ephemeris_id"))
+        ephemeris_id_type = str(config.get("ephemeris_id_type", "id"))
+        if ephemeris_id_type.lower() == "spacecraft":
+            ephemeris_id_type = "id"
+        ephemeris_location = str(config.get("ephemeris_location", "500@399"))
+        jd_seconds = int(round(float(obs.time.jd) * 86400.0))
+        pos_bary = _spacecraft_barycentric_km(
+            ephemeris_id, ephemeris_id_type, ephemeris_location, jd_seconds
+        )
+        if ephemeris_location.lower() in {"@ssb", "500@0", "@sun"}:
+            if ephemeris_location.lower() in {"@sun", "500@0"}:
+                sun_pos, _ = get_body_barycentric_posvel("sun", obs.time)
+                pos_bary = pos_bary + sun_pos.xyz.to(u.km).value.flatten()
+            earth_pos, _ = get_body_barycentric_posvel("earth", obs.time)
+            earth_km = earth_pos.xyz.to(u.km).value.flatten()
+            return pos_bary - earth_km
+        return pos_bary
     vec = ephemeris(obs.time) if callable(ephemeris) else ephemeris
     arr = np.asarray(vec, dtype=float)
     if arr.shape != (3,):
@@ -184,7 +235,18 @@ def _site_offset(obs: Observation, *, allow_unknown_site: bool = False) -> np.nd
     # Return the geocentric cartesian vector (km) for the observing site at obs.time.
     site_kind = _site_kind(obs)
     if site_kind in {"spacecraft", "space", "satellite"}:
-        vec = _resolve_spacecraft_offset(obs)
+        try:
+            vec = _resolve_spacecraft_offset(obs)
+        except Exception as exc:
+            if allow_unknown_site:
+                warnings.warn(
+                    _site_error_message(
+                        obs,
+                        f"Spacecraft ephemeris lookup failed ({exc}); using fallback Earth location.",
+                    )
+                )
+                return _fallback_earth_offset(obs.time)
+            raise
         if vec is None:
             if allow_unknown_site:
                 warnings.warn(
@@ -442,25 +504,30 @@ def _initial_state_from_attributable(
     site_code = site_choice or observations[0].site
     site_offset = np.zeros(3, dtype=float)
     if site_code:
-        loc = get_site_location(site_code)
-        if loc is None:
-            if allow_unknown_site:
-                warnings.warn(
-                    _site_error_message(
-                        observations[0],
-                        "Site code not found in observatory catalog; using fallback Earth location.",
-                    )
-                )
-            else:
-                raise ValueError(
-                    _site_error_message(
-                        observations[0], "Site code not found in observatory catalog"
-                    )
-                )
-        else:
-            gcrs = loc.get_gcrs(obstime=epoch)
-            icrs = gcrs.transform_to(ICRS())
-            site_offset = icrs.cartesian.xyz.to(u.km).value.flatten()
+        obslite = type("ObsLite", (), {})()
+        obslite.site = site_code
+        obslite.time = epoch
+        for attr in (
+            "site_kind",
+            "site_type",
+            "site_class",
+            "site_ephemeris",
+            "spacecraft_ephemeris",
+            "site_offset_km",
+            "site_xyz_km",
+            "site_gcrs_km",
+            "site_location",
+            "site_lon_deg",
+            "site_lat_deg",
+            "site_lon",
+            "site_lat",
+            "site_height_m",
+            "site_alt_m",
+            "observer_pos_km",
+        ):
+            if hasattr(observations[0], attr):
+                setattr(obslite, attr, getattr(observations[0], attr))
+        site_offset = _site_offset(obslite, allow_unknown_site=allow_unknown_site)
 
     best_state = None
     best_rms = np.inf
@@ -634,30 +701,16 @@ def _predict_batch(
     use_kepler: bool,
     allow_unknown_site: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    times = [ob.time for ob in obs]
-    site_codes = [ob.site for ob in obs]
-    observer_positions_km = [ob.observer_pos_km for ob in obs]
-    if use_kepler:
-        try:
-            propagated = propagate_state_kepler(state, epoch, times)
-        except (ValueError, OverflowError) as exc:
-            warnings.warn(
-                f"Kepler propagation failed; falling back to full propagation ({exc})",
-                RuntimeWarning,
-            )
-            propagated = propagate_state(
-                state, epoch, times, perturbers=perturbers, max_step=max_step
-            )
-    else:
-        propagated = propagate_state(state, epoch, times, perturbers=perturbers, max_step=max_step)
-    ra, dec = predict_radec_batch(
-        propagated,
-        times,
-        site_codes=site_codes,
-        observer_positions_km=observer_positions_km,
+    return predict_radec_from_epoch(
+        state,
+        epoch,
+        obs,
+        perturbers,
+        max_step,
+        use_kepler=use_kepler,
         allow_unknown_site=allow_unknown_site,
+        light_time_iters=2,
     )
-    return ra, dec
 
 
 def predict_orbit(
@@ -872,9 +925,17 @@ def fit_orbit(
             observations, allow_unknown_site=allow_unknown_site
         )
     elif seed_method == "attributable":
-        state = _initial_state_from_attributable(
-            observations, epoch, allow_unknown_site=allow_unknown_site
-        )
+        try:
+            state = _initial_state_from_attributable(
+                observations, epoch, allow_unknown_site=allow_unknown_site
+            )
+        except Exception as exc:
+            warnings.warn(
+                f"Attributable seed failed ({exc}); falling back to Gauss seed."
+            )
+            state = _initial_state_from_gauss(
+                observations, allow_unknown_site=allow_unknown_site
+            )
     else:
         raise ValueError(f"Unknown seed_method '{seed_method}'")
 

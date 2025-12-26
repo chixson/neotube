@@ -48,33 +48,22 @@ if USE_EXISTING_JPL:
 else:
     try:
         from astroquery.jplhorizons import Horizons
-        from astropy.coordinates import (
-            CartesianRepresentation,
-            CartesianDifferential,
-            HeliocentricTrueEcliptic,
-            ICRS,
-        )
+        from astropy.coordinates import CartesianRepresentation, CartesianDifferential, ICRS, SkyCoord
         obj = Horizons(id="1", location="@sun", epochs=Time(epoch.isot).jd, id_type="smallbody")
-        vec = obj.vectors()
+        vec = obj.vectors(refplane="earth")
         x = float(vec["x"][0])
         y = float(vec["y"][0])
         z = float(vec["z"][0])
         vx = float(vec["vx"][0])
         vy = float(vec["vy"][0])
         vz = float(vec["vz"][0])
-        # The table is returned in AU & AU/day in the ecliptic plane by default:
         AU_KM = 149597870.7
-        # transform ecliptic -> ICRS and AU -> km, AU/day -> km/s
         rep = CartesianRepresentation(x * u.AU, y * u.AU, z * u.AU)
         diff = CartesianDifferential(vx * u.AU / u.day, vy * u.AU / u.day, vz * u.AU / u.day)
         rep_w = rep.with_differentials(diff)
-        hce = HeliocentricTrueEcliptic(rep_w, obstime=Time(epoch.isot))
-        sc_icrs = hce.transform_to(ICRS())
-        pos_icrs_km = sc_icrs.cartesian.xyz.to(u.km).value
-        diff_icrs = sc_icrs.cartesian.differentials.get("s", None)
-        if diff_icrs is None:
-            raise RuntimeError("Transformed coordinate lacks velocity differential")
-        vel_icrs_km_s = diff_icrs.d_xyz.to(u.km / u.s).value
+        coord = SkyCoord(rep_w, frame=ICRS())
+        pos_icrs_km = coord.cartesian.xyz.to(u.km).value
+        vel_icrs_km_s = coord.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
         jpl_km = np.hstack((pos_icrs_km, vel_icrs_km_s))
         print("Fetched JPL (heliocentric ICRS) km-state norm:", np.linalg.norm(jpl_km[:3]))
     except Exception as exc:
@@ -107,6 +96,35 @@ def signed_deltas(ra1_deg, dec1_deg, ra2_deg, dec2_deg):
 
 dx, dy = signed_deltas(pred_ra_post, pred_dec_post, pred_ra_jpl, pred_dec_jpl)
 sep = np.sqrt(dx * dx + dy * dy)
+
+# offsets relative to observations (tangent plane at obs)
+obs_ra = np.array([o.ra_deg for o in obs], dtype=float)
+obs_dec = np.array([o.dec_deg for o in obs], dtype=float)
+
+def residuals_against_obs(pred_ra, pred_dec):
+    d_ra = ((pred_ra - obs_ra + 180.0) % 360.0) - 180.0
+    dx_arcsec = d_ra * np.cos(np.deg2rad(obs_dec)) * 3600.0
+    dy_arcsec = (pred_dec - obs_dec) * 3600.0
+    return dx_arcsec, dy_arcsec
+
+dx_post, dy_post = residuals_against_obs(np.array(pred_ra_post), np.array(pred_dec_post))
+dx_jpl, dy_jpl = residuals_against_obs(np.array(pred_ra_jpl), np.array(pred_dec_jpl))
+
+# Optional: compare against Horizons apparent RA/Dec for the observer (C51/WISE).
+hz_ra = None
+hz_dec = None
+try:
+    from astroquery.jplhorizons import Horizons
+
+    epochs = Time([o.time.isot for o in obs]).jd
+    hz = Horizons(id="1", location="500@-163", epochs=epochs, id_type="smallbody")
+    eph = hz.ephemerides()
+    hz_ra = np.array(eph["RA"], dtype=float)
+    hz_dec = np.array(eph["DEC"], dtype=float)
+    dx_hz, dy_hz = residuals_against_obs(hz_ra, hz_dec)
+except Exception as exc:
+    print("Horizons apparent ephemerides fetch failed:", exc)
+    dx_hz, dy_hz = None, None
 
 # write per-observation CSV
 out_csv = OUT_DIR / "deltas_by_obs.csv"
@@ -208,6 +226,40 @@ plt.grid(True)
 plt.gca().set_aspect("equal", "box")
 plt.savefig(OUT_DIR / "deltas_vector.png", dpi=200)
 plt.close()
+
+# overlay plot: posterior vs JPL residuals relative to obs
+fig, ax = plt.subplots(figsize=(7, 7))
+ax.scatter(dx_post, dy_post, s=30, alpha=0.8, label="posterior vs obs")
+ax.scatter(dx_jpl, dy_jpl, s=30, alpha=0.8, label="JPL vs obs")
+for x1, y1, x2, y2 in zip(dx_post, dy_post, dx_jpl, dy_jpl):
+    ax.plot([x1, x2], [y1, y2], color="#999999", alpha=0.5, linewidth=0.7)
+ax.axhline(0, color="#bbbbbb", lw=1)
+ax.axvline(0, color="#bbbbbb", lw=1)
+ax.set_xlabel("ΔRA cosδ (arcsec) [pred − obs]")
+ax.set_ylabel("ΔDec (arcsec) [pred − obs]")
+ax.set_title("Posterior vs JPL residuals per observation")
+ax.grid(True, lw=0.5, color="#dddddd")
+ax.legend()
+fig.tight_layout()
+fig.savefig(OUT_DIR / "obs_overlay.png", dpi=150)
+plt.close(fig)
+
+if dx_hz is not None:
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(dx_post, dy_post, s=30, alpha=0.8, label="posterior vs obs")
+    ax.scatter(dx_hz, dy_hz, s=30, alpha=0.8, label="Horizons apparent vs obs")
+    for x1, y1, x2, y2 in zip(dx_post, dy_post, dx_hz, dy_hz):
+        ax.plot([x1, x2], [y1, y2], color="#999999", alpha=0.5, linewidth=0.7)
+    ax.axhline(0, color="#bbbbbb", lw=1)
+    ax.axvline(0, color="#bbbbbb", lw=1)
+    ax.set_xlabel("ΔRA cosδ (arcsec) [pred − obs]")
+    ax.set_ylabel("ΔDec (arcsec) [pred − obs]")
+    ax.set_title("Posterior vs Horizons (apparent) residuals")
+    ax.grid(True, lw=0.5, color="#dddddd")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(OUT_DIR / "obs_overlay_horizons.png", dpi=150)
+    plt.close(fig)
 
 print("\nSaved plots to:", OUT_DIR)
 print("Done.")

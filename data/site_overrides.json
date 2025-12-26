@@ -1,0 +1,10 @@
+{
+  "C51": {
+    "site_kind": "spacecraft",
+    "ephemeris_id": "WISE",
+    "ephemeris_id_type": "id",
+    "ephemeris_location": "500@399",
+    "ephemeris_frame": "icrs",
+    "description": "WISE spacecraft (override)"
+  }
+}

@@ -3,12 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import ceil
 from typing import Iterable, Sequence, Optional
+from functools import lru_cache
 
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import (
+    BarycentricTrueEcliptic,
+    CartesianDifferential,
+    CartesianRepresentation,
     EarthLocation,
     GCRS,
+    ICRS,
     SkyCoord,
     SphericalRepresentation,
     get_body_barycentric_posvel,
@@ -17,8 +22,9 @@ from astropy.time import Time, TimeDelta
 from concurrent.futures import ProcessPoolExecutor
 from scipy.integrate import solve_ivp
 import os
+from astroquery.jplhorizons import Horizons
 
-from .sites import get_site_location
+from .sites import get_site_location, get_site_ephemeris
 
 __all__ = [
     "propagate_state",
@@ -26,6 +32,7 @@ __all__ = [
     "propagate_state_sun",
     "predict_radec",
     "predict_radec_batch",
+    "predict_radec_from_epoch",
     "ReplicaCloud",
     "propagate_replicas",
 ]
@@ -468,10 +475,204 @@ def predict_radec(
     return float(ra[0]), float(dec[0])
 
 
+def predict_radec_from_epoch(
+    state: np.ndarray,
+    epoch: Time,
+    obs: Sequence["Observation"],
+    perturbers: Sequence[str],
+    max_step: float,
+    use_kepler: bool = True,
+    *,
+    allow_unknown_site: bool = True,
+    light_time_iters: int = 2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute apparent RA/Dec from a heliocentric state at epoch with light-time iteration."""
+    if not obs:
+        return np.empty(0, dtype=float), np.empty(0, dtype=float)
+
+    from .models import Observation  # local import to avoid cycles
+
+    if not isinstance(obs[0], Observation):
+        raise ValueError("obs must be a sequence of Observation objects")
+
+    ra_vals = np.empty(len(obs), dtype=float)
+    dec_vals = np.empty(len(obs), dtype=float)
+    c_km_s = 299792.458
+
+    for idx, ob in enumerate(obs):
+        t_obs = ob.time.tdb
+        site_codes = [ob.site]
+        observer_positions = [ob.observer_pos_km]
+        obs_pos_km, obs_vel_km_s = _site_states(
+            [t_obs],
+            site_codes,
+            observer_positions_km=observer_positions,
+            observer_velocities_km_s=None,
+            allow_unknown_site=allow_unknown_site,
+        )
+        site_pos = obs_pos_km[0]
+        site_vel = obs_vel_km_s[0]
+
+        earth_pos, earth_vel = get_body_barycentric_posvel("earth", t_obs)
+        earth_bary = earth_pos.xyz.to(u.km).value.flatten()
+        earth_bary_vel = earth_vel.xyz.to(u.km / u.s).value.flatten()
+
+        t_emit = t_obs
+        obj_bary = None
+        for _ in range(max(1, light_time_iters)):
+            if use_kepler:
+                try:
+                    emit_state = propagate_state_kepler(state, epoch, (t_emit,))[0]
+                except Exception:
+                    emit_state = propagate_state(
+                        state, epoch, (t_emit,), perturbers=perturbers, max_step=max_step
+                    )[0]
+            else:
+                emit_state = propagate_state(
+                    state, epoch, (t_emit,), perturbers=perturbers, max_step=max_step
+                )[0]
+            sun_pos, _ = get_body_barycentric_posvel("sun", t_emit)
+            sun_bary = sun_pos.xyz.to(u.km).value.flatten()
+            obj_bary = emit_state[:3] + sun_bary
+            obs_bary = earth_bary + site_pos
+            rho = float(np.linalg.norm(obj_bary - obs_bary))
+            t_emit = t_obs - TimeDelta(rho / c_km_s, format="sec")
+
+        if obj_bary is None:
+            obj_bary = state[:3] + earth_bary * 0.0
+
+        coord = SkyCoord(
+            x=obj_bary[0] * u.km,
+            y=obj_bary[1] * u.km,
+            z=obj_bary[2] * u.km,
+            representation_type="cartesian",
+            frame=ICRS(),
+            obstime=t_emit,
+        )
+        gcrs_frame = GCRS(
+            obstime=t_obs,
+            obsgeoloc=site_pos * u.km,
+            obsgeovel=site_vel * (u.km / u.s),
+        )
+        gcrs = coord.transform_to(gcrs_frame)
+        ra_vals[idx] = gcrs.ra.deg
+        dec_vals[idx] = gcrs.dec.deg
+
+    return ra_vals, dec_vals
+
+
 def _site_error_message(site: str | None, time: Time, message: str) -> str:
     site_label = (site or "UNKNOWN").strip() if site else "UNKNOWN"
     time_label = time.isot if hasattr(time, "isot") else str(time)
     return f"{message} (site='{site_label}', time='{time_label}')"
+
+
+@lru_cache(maxsize=2048)
+def _spacecraft_barycentric_state(
+    ephemeris_id: str,
+    ephemeris_id_type: str | None,
+    ephemeris_location: str,
+    jd_seconds: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    t = Time(jd_seconds / 86400.0, format="jd")
+    id_type = ephemeris_id_type
+    if id_type is not None and id_type.lower() in {"id", "majorbody", "spacecraft"}:
+        id_type = None
+    obj = Horizons(
+        id=ephemeris_id,
+        id_type=id_type,
+        location=ephemeris_location,
+        epochs=t.jd,
+    )
+    vec = obj.vectors(refplane="earth")
+    x = float(vec["x"][0])
+    y = float(vec["y"][0])
+    z = float(vec["z"][0])
+    vx = float(vec["vx"][0])
+    vy = float(vec["vy"][0])
+    vz = float(vec["vz"][0])
+    rep = CartesianRepresentation(x * u.au, y * u.au, z * u.au)
+    diff = CartesianDifferential(vx * u.au / u.day, vy * u.au / u.day, vz * u.au / u.day)
+    coord = SkyCoord(rep.with_differentials(diff), frame=ICRS())
+    pos = coord.cartesian.xyz.to(u.km).value
+    vel = coord.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
+    return pos, vel
+
+
+def _site_states(
+    epochs: Sequence[Time],
+    site_codes: Sequence[str | None] | None,
+    observer_positions_km: Sequence[np.ndarray | None] | None = None,
+    observer_velocities_km_s: Sequence[np.ndarray | None] | None = None,
+    *,
+    allow_unknown_site: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    if observer_positions_km is not None and len(observer_positions_km) != len(epochs):
+        raise ValueError("observer_positions_km must match epochs length")
+    if observer_velocities_km_s is not None and len(observer_velocities_km_s) != len(epochs):
+        raise ValueError("observer_velocities_km_s must match epochs length")
+    if site_codes is not None and len(site_codes) != len(epochs):
+        raise ValueError("site_codes must match epochs length")
+    positions = np.zeros((len(epochs), 3), dtype=float)
+    velocities = np.zeros((len(epochs), 3), dtype=float)
+    site_iter = site_codes if site_codes is not None else [None] * len(epochs)
+    observer_pos_iter = (
+        observer_positions_km if observer_positions_km is not None else [None] * len(epochs)
+    )
+    observer_vel_iter = (
+        observer_velocities_km_s
+        if observer_velocities_km_s is not None
+        else [None] * len(epochs)
+    )
+    for idx, (code, time, observer_pos, observer_vel) in enumerate(
+        zip(site_iter, epochs, observer_pos_iter, observer_vel_iter)
+    ):
+        if observer_pos is not None:
+            positions[idx] = np.asarray(observer_pos, dtype=float)
+            if observer_vel is not None:
+                velocities[idx] = np.asarray(observer_vel, dtype=float)
+            continue
+        if code is None:
+            if allow_unknown_site:
+                continue
+            raise ValueError(_site_error_message(code, time, "Missing site code"))
+        loc = get_site_location(code)
+        if loc is None:
+            config = get_site_ephemeris(code)
+            if config is not None:
+                ephemeris_id = str(config.get("ephemeris_id"))
+                ephemeris_id_type = config.get("ephemeris_id_type")
+                ephemeris_location = str(config.get("ephemeris_location", "500@399"))
+                jd_seconds = int(round(float(time.jd) * 86400.0))
+                pos_bary, vel_bary = _spacecraft_barycentric_state(
+                    ephemeris_id, ephemeris_id_type, ephemeris_location, jd_seconds
+                )
+                if ephemeris_location.lower() in {"@ssb", "500@0", "@sun"}:
+                    if ephemeris_location.lower() in {"@sun", "500@0"}:
+                        sun_pos, sun_vel = get_body_barycentric_posvel("sun", time)
+                        pos_bary = pos_bary + sun_pos.xyz.to(u.km).value.flatten()
+                        vel_bary = vel_bary + sun_vel.xyz.to(u.km / u.s).value.flatten()
+                    earth_pos, earth_vel = get_body_barycentric_posvel("earth", time)
+                    earth_km = earth_pos.xyz.to(u.km).value.flatten()
+                    earth_kms = earth_vel.xyz.to(u.km / u.s).value.flatten()
+                    positions[idx] = pos_bary - earth_km
+                    velocities[idx] = vel_bary - earth_kms
+                else:
+                    positions[idx] = pos_bary
+                    velocities[idx] = vel_bary
+                continue
+            if allow_unknown_site:
+                continue
+            raise ValueError(
+                _site_error_message(code, time, "Site code not found in observatory catalog")
+            )
+        gcrs = loc.get_gcrs(obstime=time)
+        positions[idx] = gcrs.cartesian.xyz.to(u.km).value
+        if gcrs.cartesian.differentials:
+            velocities[idx] = (
+                gcrs.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
+            )
+    return positions, velocities
 
 
 def _site_offsets(
@@ -481,33 +682,14 @@ def _site_offsets(
     *,
     allow_unknown_site: bool = True,
 ) -> np.ndarray:
-    if observer_positions_km is not None and len(observer_positions_km) != len(epochs):
-        raise ValueError("observer_positions_km must match epochs length")
-    if site_codes is not None and len(site_codes) != len(epochs):
-        raise ValueError("site_codes must match epochs length")
-    offsets = np.zeros((len(epochs), 3), dtype=float)
-    site_iter = site_codes if site_codes is not None else [None] * len(epochs)
-    observer_iter = (
-        observer_positions_km if observer_positions_km is not None else [None] * len(epochs)
+    positions, _ = _site_states(
+        epochs,
+        site_codes,
+        observer_positions_km,
+        observer_velocities_km_s=None,
+        allow_unknown_site=allow_unknown_site,
     )
-    for idx, (code, time, observer_pos) in enumerate(zip(site_iter, epochs, observer_iter)):
-        if observer_pos is not None:
-            offsets[idx] = np.asarray(observer_pos, dtype=float)
-            continue
-        if code is None:
-            if allow_unknown_site:
-                continue
-            raise ValueError(_site_error_message(code, time, "Missing site code"))
-        loc = get_site_location(code)
-        if loc is None:
-            if allow_unknown_site:
-                continue
-            raise ValueError(
-                _site_error_message(code, time, "Site code not found in observatory catalog")
-            )
-        gcrs = loc.get_gcrs(obstime=time)
-        offsets[idx] = gcrs.cartesian.xyz.to(u.km).value
-    return offsets
+    return positions
 
 
 def predict_radec_batch(
@@ -515,10 +697,13 @@ def predict_radec_batch(
     epochs: Sequence[Time],
     site_codes: Sequence[str | None] | None = None,
     observer_positions_km: Sequence[np.ndarray | None] | None = None,
+    observer_velocities_km_s: Sequence[np.ndarray | None] | None = None,
     *,
     allow_unknown_site: bool = True,
+    light_time_mode: str = "auto",
+    light_time_iters: int = 2,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Vectorized RA/Dec computation for many heliocentric states/times."""
+    """Vectorized apparent RA/Dec computation for many heliocentric states/times."""
     if len(epochs) == 0:
         return np.empty(0, dtype=float), np.empty(0, dtype=float)
 
@@ -528,30 +713,86 @@ def predict_radec_batch(
     if states_arr.shape[1] != 6:
         raise ValueError("Expected states with 6 components (r/v).")
 
-    time_array = Time(epochs)
-    earth_pos, _ = get_body_barycentric_posvel("earth", time_array)
-    sun_pos, _ = get_body_barycentric_posvel("sun", time_array)
-    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value
-    if earth_helio.shape[1] != len(epochs):
-        earth_helio = earth_helio[:, : len(epochs)]
+    time_array = Time(epochs).tdb
+    sun_pos, sun_vel = get_body_barycentric_posvel("sun", time_array)
+    sun_bary = sun_pos.xyz.to(u.km).value
+    sun_bary_vel = sun_vel.xyz.to(u.km / u.s).value
+    if sun_bary.shape[1] != len(epochs):
+        sun_bary = sun_bary[:, : len(epochs)]
+        sun_bary_vel = sun_bary_vel[:, : len(epochs)]
 
     obj_pos = states_arr[:, :3]
+    obj_vel = states_arr[:, 3:]
     if len(epochs) != obj_pos.shape[0]:
         raise ValueError("Number of states and epochs must match.")
-    site_offsets = _site_offsets(
-        epochs, site_codes, observer_positions_km, allow_unknown_site=allow_unknown_site
+    obs_pos_km, obs_vel_km_s = _site_states(
+        epochs,
+        site_codes,
+        observer_positions_km,
+        observer_velocities_km_s,
+        allow_unknown_site=allow_unknown_site,
     )
-    vectors = obj_pos - earth_helio.T - site_offsets
+    obj_bary = obj_pos + sun_bary.T
+    obj_bary_vel = obj_vel + sun_bary_vel.T
+    earth_pos, earth_vel = get_body_barycentric_posvel("earth", time_array)
+    earth_bary = earth_pos.xyz.to(u.km).value
+    earth_bary_vel = earth_vel.xyz.to(u.km / u.s).value
+    if earth_bary.shape[1] != len(epochs):
+        earth_bary = earth_bary[:, : len(epochs)]
+        earth_bary_vel = earth_bary_vel[:, : len(epochs)]
+    obs_bary = earth_bary.T + obs_pos_km
+    obs_bary_vel = earth_bary_vel.T + obs_vel_km_s
+
+    # Light-time correction: iterate emission time using barycentric positions.
+    c_km_s = 299792.458
+    mode = light_time_mode.lower()
+    if mode not in {"auto", "linear", "kepler"}:
+        raise ValueError(f"Unsupported light_time_mode: {light_time_mode}")
+    if mode == "auto":
+        mode = "kepler" if len(epochs) <= 128 else "linear"
+
+    obj_bary_lt = obj_bary.copy()
+    if mode == "kepler":
+        # Use Kepler propagation per-state to emission time; robust for small batches.
+        for _ in range(max(1, light_time_iters)):
+            vec = obj_bary_lt - obs_bary
+            rho = np.linalg.norm(vec, axis=1)
+            dt = rho / c_km_s
+            obj_helio_emit = np.empty_like(obj_pos)
+            for idx in range(len(epochs)):
+                if not np.isfinite(dt[idx]) or dt[idx] <= 0.0:
+                    obj_helio_emit[idx] = obj_pos[idx]
+                    continue
+                t_emit = time_array[idx] - TimeDelta(float(dt[idx]), format="sec")
+                try:
+                    emit_state = propagate_state_kepler(
+                        states_arr[idx], time_array[idx], (t_emit,)
+                    )[0]
+                except Exception:
+                    emit_state = states_arr[idx]
+                obj_helio_emit[idx] = emit_state[:3]
+            obj_bary_lt = obj_helio_emit + sun_bary.T
+    else:
+        for _ in range(max(1, light_time_iters)):
+            vec = obj_bary_lt - obs_bary
+            rho = np.linalg.norm(vec, axis=1)
+            dt = rho / c_km_s
+            obj_bary_lt = obj_bary - obj_bary_vel * dt[:, None]
+
+    obs_geoloc = (obs_pos_km.T * u.km)
+    obs_geovel = (obs_vel_km_s.T * (u.km / u.s))
+    gcrs_frame = GCRS(obstime=time_array, obsgeoloc=obs_geoloc, obsgeovel=obs_geovel)
 
     coord = SkyCoord(
-        x=vectors[:, 0] * u.km,
-        y=vectors[:, 1] * u.km,
-        z=vectors[:, 2] * u.km,
+        x=obj_bary_lt[:, 0] * u.km,
+        y=obj_bary_lt[:, 1] * u.km,
+        z=obj_bary_lt[:, 2] * u.km,
         representation_type="cartesian",
-        frame="icrs",
+        frame=ICRS(),
+        obstime=time_array,
     )
-    sph = coord.represent_as(SphericalRepresentation)
-    return np.array(sph.lon.deg), np.array(sph.lat.deg)
+    gcrs = coord.transform_to(gcrs_frame)
+    return np.array(gcrs.ra.deg), np.array(gcrs.dec.deg)
 
 
 @dataclass
