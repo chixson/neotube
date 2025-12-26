@@ -20,6 +20,7 @@ from astropy.time import Time
 import astropy.units as u
 
 from neotube.fit import load_posterior, _predict_batch
+from neotube.propagate import predict_radec_batch
 from neotube.fit_cli import load_observations
 
 # Config
@@ -35,6 +36,8 @@ epoch = post.epoch
 print("posterior epoch:", epoch.isot)
 s = np.array(post.state, float)
 cov = np.array(post.cov, float)
+
+PERTURBERS = ("mercury", "venus", "earth", "mars", "jupiter", "saturn", "uranus", "neptune", "moon")
 
 # fetch JPL vector via astroquery (heliocentric ICRS, converted to km/km/s)
 USE_EXISTING_JPL = False
@@ -74,11 +77,44 @@ obs = load_observations(OBS_CSV, None)
 
 # compute predicted RA/Dec arrays (one value per obs)
 pred_ra_post, pred_dec_post = _predict_batch(
-    s, epoch, obs, ("earth", "mars", "jupiter"), max_step=3600.0, use_kepler=False
+    s, epoch, obs, PERTURBERS, max_step=3600.0, use_kepler=False
 )
 pred_ra_jpl, pred_dec_jpl = _predict_batch(
-    jpl_km, epoch, obs, ("earth", "mars", "jupiter"), max_step=3600.0, use_kepler=False
+    jpl_km, epoch, obs, PERTURBERS, max_step=3600.0, use_kepler=False
 )
+
+# JPL per-observation vectors (no propagation) -> our apparent transform
+jpl_states_by_obs = []
+try:
+    from astroquery.jplhorizons import Horizons
+    from astropy.coordinates import FK5
+    epochs = Time([o.time.isot for o in obs]).jd
+    vec_obj = Horizons(id="1", location="@sun", epochs=epochs, id_type="smallbody")
+    vec = vec_obj.vectors(refplane="earth")
+    for row in vec:
+        x = float(row["x"])
+        y = float(row["y"])
+        z = float(row["z"])
+        vx = float(row["vx"])
+        vy = float(row["vy"])
+        vz = float(row["vz"])
+        rep = CartesianRepresentation(x * u.AU, y * u.AU, z * u.AU)
+        diff = CartesianDifferential(vx * u.AU / u.day, vy * u.AU / u.day, vz * u.AU / u.day)
+        coord = SkyCoord(rep.with_differentials(diff), frame=ICRS())
+        pos = coord.cartesian.xyz.to(u.km).value
+        vel = coord.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
+        jpl_states_by_obs.append(np.hstack([pos, vel]))
+        # FK5 equinox-of-date interpretation test
+        t_row = Time(row["datetime_jd"], format="jd")
+        coord_fk5 = SkyCoord(rep.with_differentials(diff), frame=FK5(equinox=t_row))
+        coord_fk5_to_icrs = coord_fk5.transform_to(ICRS())
+        pos_fk = coord_fk5_to_icrs.cartesian.xyz.to(u.km).value
+        vel_fk = coord_fk5_to_icrs.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
+        jpl_states_by_obs_fk5.append(np.hstack([pos_fk, vel_fk]))
+except Exception as exc:
+    print("Horizons per-obs vector fetch failed:", exc)
+    jpl_states_by_obs = []
+    jpl_states_by_obs_fk5 = []
 
 
 def signed_deltas(ra1_deg, dec1_deg, ra2_deg, dec2_deg):
@@ -122,9 +158,15 @@ try:
     hz_ra = np.array(eph["RA"], dtype=float)
     hz_dec = np.array(eph["DEC"], dtype=float)
     dx_hz, dy_hz = residuals_against_obs(hz_ra, hz_dec)
+    dx_jpl_hz, dy_jpl_hz = signed_deltas(pred_ra_jpl, pred_dec_jpl, hz_ra, hz_dec)
+    sep_hz = np.sqrt(dx_hz * dx_hz + dy_hz * dy_hz)
+    print("\nHorizons apparent vs obs (arcsec):")
+    print("mean dx,dy,sep:", float(np.mean(dx_hz)), float(np.mean(dy_hz)), float(np.mean(sep_hz)))
+    print("median dx,dy,sep:", float(np.median(dx_hz)), float(np.median(dy_hz)), float(np.median(sep_hz)))
 except Exception as exc:
     print("Horizons apparent ephemerides fetch failed:", exc)
     dx_hz, dy_hz = None, None
+    dx_jpl_hz, dy_jpl_hz = None, None
 
 # write per-observation CSV
 out_csv = OUT_DIR / "deltas_by_obs.csv"
@@ -260,6 +302,118 @@ if dx_hz is not None:
     fig.tight_layout()
     fig.savefig(OUT_DIR / "obs_overlay_horizons.png", dpi=150)
     plt.close(fig)
+
+    # JPL (pipeline) vs Horizons apparent comparison
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(dx_jpl_hz, dy_jpl_hz, s=30, alpha=0.8, label="JPL pipeline − Horizons apparent")
+    ax.axhline(0, color="#bbbbbb", lw=1)
+    ax.axvline(0, color="#bbbbbb", lw=1)
+    ax.set_xlabel("ΔRA cosδ (arcsec)")
+    ax.set_ylabel("ΔDec (arcsec)")
+    ax.set_title("Pipeline JPL vs Horizons apparent")
+    ax.grid(True, lw=0.5, color="#dddddd")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(OUT_DIR / "jpl_vs_horizons.png", dpi=150)
+    plt.close(fig)
+
+    if dx_jpl_hz is not None:
+        sep_jpl_hz = np.sqrt(dx_jpl_hz * dx_jpl_hz + dy_jpl_hz * dy_jpl_hz)
+        print("\nJPL pipeline vs Horizons apparent (arcsec):")
+        print("mean dx,dy,sep:", float(np.mean(dx_jpl_hz)), float(np.mean(dy_jpl_hz)), float(np.mean(sep_jpl_hz)))
+        print("median dx,dy,sep:", float(np.median(dx_jpl_hz)), float(np.median(dy_jpl_hz)), float(np.median(sep_jpl_hz)))
+
+    if jpl_states_by_obs:
+        states = np.array(jpl_states_by_obs, dtype=float)
+        epochs_t = [o.time for o in obs]
+        site_codes = [o.site for o in obs]
+        observer_positions = [o.observer_pos_km for o in obs]
+        ra_lin, dec_lin = predict_radec_batch(
+            states,
+            epochs_t,
+            site_codes=site_codes,
+            observer_positions_km=observer_positions,
+            allow_unknown_site=True,
+            light_time_mode="linear",
+            light_time_iters=2,
+        )
+        dx_lin_hz, dy_lin_hz = signed_deltas(ra_lin, dec_lin, hz_ra, hz_dec)
+        sep_lin_hz = np.sqrt(dx_lin_hz * dx_lin_hz + dy_lin_hz * dy_lin_hz)
+        print("\nJPL per-obs vectors (linear LT) vs Horizons apparent (arcsec):")
+        print("mean dx,dy,sep:", float(np.mean(dx_lin_hz)), float(np.mean(dy_lin_hz)), float(np.mean(sep_lin_hz)))
+        print("median dx,dy,sep:", float(np.median(dx_lin_hz)), float(np.median(dy_lin_hz)), float(np.median(sep_lin_hz)))
+
+        ra_none, dec_none = predict_radec_batch(
+            states,
+            epochs_t,
+            site_codes=site_codes,
+            observer_positions_km=observer_positions,
+            allow_unknown_site=True,
+            light_time_mode="none",
+            light_time_iters=0,
+        )
+        dx_none_hz, dy_none_hz = signed_deltas(ra_none, dec_none, hz_ra, hz_dec)
+        sep_none_hz = np.sqrt(dx_none_hz * dx_none_hz + dy_none_hz * dy_none_hz)
+        print("\nJPL per-obs vectors (no LT) vs Horizons apparent (arcsec):")
+        print("mean dx,dy,sep:", float(np.mean(dx_none_hz)), float(np.mean(dy_none_hz)), float(np.mean(sep_none_hz)))
+        print("median dx,dy,sep:", float(np.median(dx_none_hz)), float(np.median(dy_none_hz)), float(np.median(sep_none_hz)))
+
+        # atco13 test using ICRS pv -> apparent with parallax
+        try:
+            import erfa
+            atco_ra = []
+            atco_dec = []
+            for st, ob in zip(states, obs):
+                # pv in km, km/s -> use pv2s for spherical + rates
+                pv = np.array([[st[0], st[1], st[2]], [st[3], st[4], st[5]]], dtype=float)
+                theta, phi, r, td, pd, rd = erfa.pv2s(pv)
+                # parallax in arcsec from distance (km)
+                px = (149597870.7 / r) * 206264.806 if r > 0 else 0.0
+                # proper motion in rad/year
+                pr = td * (86400.0 * 365.25)
+                pmd = pd * (86400.0 * 365.25)
+                # radial velocity km/s
+                rv = rd
+                if ob.observer_pos_km is not None:
+                    site_pos = np.asarray(ob.observer_pos_km, dtype=float)
+                else:
+                    from neotube.fit import _site_offset
+                    site_pos = _site_offset(ob, allow_unknown_site=True)
+                loc = EarthLocation.from_geocentric(
+                    site_pos[0] * u.km,
+                    site_pos[1] * u.km,
+                    site_pos[2] * u.km,
+                )
+                dut1 = float(getattr(ob.time, "delta_ut1_utc", 0.0) or 0.0)
+                rob, dob = erfa.atco13(
+                    theta,
+                    phi,
+                    pr,
+                    pmd,
+                    px,
+                    rv,
+                    ob.time.utc.jd1,
+                    ob.time.utc.jd2,
+                    dut1,
+                    loc.lon.to_value(u.rad),
+                    loc.lat.to_value(u.rad),
+                    loc.height.to_value(u.m),
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.55,
+                )[4:6]
+                atco_ra.append(np.degrees(rob))
+                atco_dec.append(np.degrees(dob))
+            dx_atco, dy_atco = signed_deltas(atco_ra, atco_dec, hz_ra, hz_dec)
+            sep_atco = np.sqrt(dx_atco * dx_atco + dy_atco * dy_atco)
+            print("\nJPL per-obs vectors (atco13) vs Horizons apparent (arcsec):")
+            print("mean dx,dy,sep:", float(np.mean(dx_atco)), float(np.mean(dy_atco)), float(np.mean(sep_atco)))
+            print("median dx,dy,sep:", float(np.median(dx_atco)), float(np.median(dy_atco)), float(np.median(sep_atco)))
+        except Exception as exc:
+            print("atco13 test failed:", exc)
 
 print("\nSaved plots to:", OUT_DIR)
 print("Done.")
