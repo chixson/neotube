@@ -55,9 +55,8 @@ def _normalize_horizons_id(raw: str) -> str:
 
 def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
     obj = Horizons(id=_normalize_horizons_id(target), location="@sun", epochs=epoch.jd)
-    # Horizons' refplane='ecliptic' vectors are stable, but must be interpreted
-    # in the ecliptic-of-date frame (set obstime) before converting to ICRS.
-    vec = obj.vectors(refplane="ecliptic")
+    # Request equatorial vectors directly to avoid ecliptic-of-date conversion drift.
+    vec = obj.vectors(refplane="earth")
     row = vec[0]
 
     pos = CartesianRepresentation(
@@ -70,10 +69,7 @@ def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
         row["vy"] * u.au / u.day,
         row["vz"] * u.au / u.day,
     )
-    coord = SkyCoord(
-        pos.with_differentials(vel),
-        frame=HeliocentricTrueEcliptic(obstime=epoch),
-    ).icrs
+    coord = SkyCoord(pos.with_differentials(vel), frame=ICRS())
     cart = coord.cartesian
 
     return np.array(
@@ -154,14 +150,12 @@ def _spacecraft_barycentric_km(
         location=ephemeris_location,
         epochs=t.jd,
     )
+    # Use equatorial refplane to align with Horizons ephemerides.
     vec = obj.vectors(refplane="earth")
     x = float(vec["x"][0])
     y = float(vec["y"][0])
     z = float(vec["z"][0])
-    rep = CartesianRepresentation(x * u.au, y * u.au, z * u.au)
-    coord = SkyCoord(rep, frame=ICRS())
-    pos = coord.cartesian.xyz.to(u.km).value
-    return pos
+    return np.array([x, y, z], dtype=float) * float(u.au.to(u.km))
 
 
 def _resolve_spacecraft_offset(obs: Observation) -> np.ndarray | None:

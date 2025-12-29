@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from astropy.coordinates import SkyCoord, get_body_barycentric_posvel
 from astropy.time import Time
 
 from .fit import _predict_batch, _site_offset, _site_offset_cached
+from .propagate import _site_states
+from .sites import get_site_ephemeris, get_site_kind
 from .models import Observation
 
 AU_KM = 149597870.7
@@ -77,10 +80,10 @@ def add_tangent_jitter(
     if fit_scale is None:
         fit_scale = float(getattr(posterior, "fit_scale", 1.0))
 
-    if isinstance(obs, str):
+    if isinstance(obs, (str, Path)):
         from neotube.fit_cli import load_observations
 
-        obs = load_observations(obs, None)
+        obs = load_observations(Path(obs), None)
 
     dt_seconds = 86400.0
     try:
@@ -93,19 +96,27 @@ def add_tangent_jitter(
     if vel_timescale_sec is None:
         vel_timescale_sec = dt_seconds
 
-    site = obs[0].site if len(obs) > 0 else None
-    kappa = site_kappas.get(site, 1.0)
-    sigma_eff_arcsec = sigma_arcsec * fit_scale * kappa
-    sigma_rad = np.deg2rad(sigma_eff_arcsec / 3600.0)
+    obs_count = len(obs)
+    if obs_count == 0:
+        sigma_rad_states = np.full(len(states), np.deg2rad(sigma_arcsec * fit_scale / 3600.0))
+    else:
+        site_kappas_arr = np.array([site_kappas.get(o.site, 1.0) for o in obs], dtype=float)
+        if obs_count == 1:
+            obs_idx = np.zeros(len(states), dtype=int)
+        else:
+            obs_idx = rng.integers(0, obs_count, size=len(states))
+        sigma_eff_arcsec = sigma_arcsec * fit_scale * site_kappas_arr[obs_idx]
+        sigma_rad_states = np.deg2rad(sigma_eff_arcsec / 3600.0)
 
     rng = np.random.default_rng(seed)
     out = []
-    for st in states:
+    for i, st in enumerate(states):
         r = st[:3].astype(float)
         v = st[3:].astype(float)
         rho = np.linalg.norm(r)
         if rho <= 0:
             continue
+        sigma_rad = float(sigma_rad_states[i])
         s = r / rho
         e_a, e_d = tangent_basis_from_unit(s)
         d_alpha = rng.normal(scale=sigma_rad, size=n_per_state)
@@ -151,8 +162,8 @@ def add_local_multit_jitter(
     if fit_scale is None:
         fit_scale = float(getattr(posterior, "fit_scale", 1.0))
 
-    if isinstance(obs, str):
-        obs = load_observations(obs, None)
+    if isinstance(obs, (str, Path)):
+        obs = load_observations(Path(obs), None)
 
     if len(obs) >= 2:
         times = np.array([o.time.jd for o in obs])
@@ -161,19 +172,26 @@ def add_local_multit_jitter(
     else:
         dt_seconds = 86400.0
 
-    site = obs[0].site if len(obs) > 0 else None
-    kappa = site_kappas.get(site, 1.0)
-    sigma_eff_arcsec = sigma_arcsec * fit_scale * kappa
-    sigma_rad = np.deg2rad(sigma_eff_arcsec / 3600.0)
+    obs_count = len(obs)
+    if obs_count == 0:
+        sigma_rad_states = np.full(len(states), np.deg2rad(sigma_arcsec * fit_scale / 3600.0))
+    else:
+        site_kappas_arr = np.array([site_kappas.get(o.site, 1.0) for o in obs], dtype=float)
+        if obs_count == 1:
+            obs_idx = np.zeros(len(states), dtype=int)
+        else:
+            obs_idx = rng.integers(0, obs_count, size=len(states))
+        sigma_eff_arcsec = sigma_arcsec * fit_scale * site_kappas_arr[obs_idx]
+        sigma_rad_states = np.deg2rad(sigma_eff_arcsec / 3600.0)
 
-    rng = np.random.default_rng(seed)
     out = []
-    for st in states:
+    for i, st in enumerate(states):
         r = st[:3].astype(float)
         v = st[3:].astype(float)
         rho = np.linalg.norm(r)
         if rho <= 0:
             continue
+        sigma_rad = float(sigma_rad_states[i])
         pos_std_km = float(rho * sigma_rad)
         vel_std_km_s = float((pos_std_km / max(1.0, dt_seconds)) * vel_scale_factor)
 
@@ -217,10 +235,31 @@ def add_attributable_jitter(
     else:
         dt_seconds = DAY_S
 
-    site = obs[0].site if len(obs) > 0 else None
-    kappa = site_kappas.get(site, 1.0)
-    sigma_eff_arcsec = sigma_arcsec * fit_scale * kappa
-    sigma_rad = np.deg2rad(sigma_eff_arcsec / 3600.0)
+    rng = np.random.default_rng(seed)
+    obs_count = len(obs)
+    if obs_count == 0:
+        site_offsets = np.zeros((states.shape[0], 3), dtype=float)
+        site_vels = np.zeros((states.shape[0], 3), dtype=float)
+        sigma_rad_states = np.full(states.shape[0], np.deg2rad(sigma_arcsec * fit_scale / 3600.0))
+    else:
+        site_kappas_arr = np.array([site_kappas.get(o.site, 1.0) for o in obs], dtype=float)
+        if obs_count == 1:
+            obs_idx = np.zeros(states.shape[0], dtype=int)
+        else:
+            # Select an observation per-state to respect varying sites (spacecraft).
+            obs_idx = rng.integers(0, obs_count, size=states.shape[0])
+        obs_positions = [o.observer_pos_km for o in obs]
+        site_pos_all, site_vel_all = _site_states(
+            [o.time for o in obs],
+            [o.site for o in obs],
+            observer_positions_km=obs_positions,
+            observer_velocities_km_s=None,
+            allow_unknown_site=True,
+        )
+        site_offsets = site_pos_all[obs_idx]
+        site_vels = site_vel_all[obs_idx]
+        sigma_eff_arcsec = sigma_arcsec * fit_scale * site_kappas_arr[obs_idx]
+        sigma_rad_states = np.deg2rad(sigma_eff_arcsec / 3600.0)
 
     epoch = getattr(posterior, "epoch", None)
     if epoch is None:
@@ -230,7 +269,7 @@ def add_attributable_jitter(
     sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
     earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
     earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
-    site_offset = _site_offset_cached(obs[0], allow_unknown_site=True)
+    site_offset = site_offsets
 
     states = np.asarray(states, dtype=float)
     if states.size == 0:
@@ -240,7 +279,7 @@ def add_attributable_jitter(
     v_helio = states[:, 3:]
     r_geo = r_helio - earth_helio[None, :]
     v_geo = v_helio - earth_vel_helio[None, :]
-    r_topo = r_geo - site_offset[None, :]
+    r_topo = r_geo - site_offset
     rho = np.linalg.norm(r_topo, axis=1)
     ok = rho > 0
     if not np.any(ok):
@@ -249,10 +288,15 @@ def add_attributable_jitter(
     r_topo = r_topo[ok]
     v_geo = v_geo[ok]
     rho_valid = rho[ok]
+    site_offset = site_offset[ok]
+    site_vels = site_vels[ok]
+    sigma_rad_states = sigma_rad_states[ok]
 
     s = r_topo / rho_valid[:, None]
-    rhodot = np.einsum("ij,ij->i", v_geo, s)
-    sdot = (v_geo - rhodot[:, None] * s) / np.maximum(rho_valid[:, None], 1e-12)
+    # Use observer-relative velocity for attributable conversion.
+    v_geo_rel = v_geo - site_vels
+    rhodot = np.einsum("ij,ij->i", v_geo_rel, s)
+    sdot = (v_geo_rel - rhodot[:, None] * s) / np.maximum(rho_valid[:, None], 1e-12)
 
     x = s[:, 0]
     y = s[:, 1]
@@ -267,18 +311,17 @@ def add_attributable_jitter(
     cosdec = np.maximum(np.sqrt(rxy2), 1e-12)
     dec_dot = (zd - z * (x * xd + y * yd) / rxy2) / cosdec
 
-    rng = np.random.default_rng(seed)
     n_states = s.shape[0]
     n_draws = int(n_per_state)
 
-    ra_j = ra[:, None] + rng.normal(scale=sigma_rad, size=(n_states, n_draws))
-    dec_j = dec[:, None] + rng.normal(scale=sigma_rad, size=(n_states, n_draws))
+    ra_j = ra[:, None] + rng.normal(scale=sigma_rad_states[:, None], size=(n_states, n_draws))
+    dec_j = dec[:, None] + rng.normal(scale=sigma_rad_states[:, None], size=(n_states, n_draws))
     dec_j = np.clip(dec_j, -0.5 * math.pi, 0.5 * math.pi)
     ra_dot_j = ra_dot[:, None] + rng.normal(
-        scale=sigma_rad / dt_seconds, size=(n_states, n_draws)
+        scale=sigma_rad_states[:, None] / dt_seconds, size=(n_states, n_draws)
     )
     dec_dot_j = dec_dot[:, None] + rng.normal(
-        scale=sigma_rad / dt_seconds, size=(n_states, n_draws)
+        scale=sigma_rad_states[:, None] / dt_seconds, size=(n_states, n_draws)
     )
 
     cd = np.cos(dec_j)
@@ -295,7 +338,7 @@ def add_attributable_jitter(
     rho_nm = rho_valid[:, None, None]
     rhodot_nm = rhodot[:, None, None]
     r_topo_new = rho_nm * s_prime
-    r_geo_new = site_offset[None, None, :] + r_topo_new
+    r_geo_new = site_offset[:, None, :] + r_topo_new
     v_geo_new = rhodot_nm * s_prime + rho_nm * sdot_prime
 
     r_helio_new = earth_helio[None, None, :] + r_geo_new
@@ -304,6 +347,94 @@ def add_attributable_jitter(
     r_flat = r_helio_new.reshape(-1, 3)
     v_flat = v_helio_new.reshape(-1, 3)
     return np.hstack([r_flat, v_flat])
+
+
+def _attrib_rho_from_state(
+    state: np.ndarray,
+    obs: Observation,
+    epoch: Time,
+) -> tuple[Attributable, float, float]:
+    """Compute attributable + (rho, rhodot) from a heliocentric state at epoch."""
+    earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
+    sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
+    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
+    earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+    site_pos, site_vel = _site_states(
+        [epoch],
+        [obs.site],
+        observer_positions_km=[obs.observer_pos_km],
+        observer_velocities_km_s=None,
+        allow_unknown_site=True,
+    )
+    site_offset = site_pos[0]
+    site_vel = site_vel[0]
+
+    r_helio = state[:3].astype(float)
+    v_helio = state[3:].astype(float)
+    r_geo = r_helio - earth_helio
+    v_geo = v_helio - earth_vel_helio - site_vel
+    r_topo = r_geo - site_offset
+    rho = float(np.linalg.norm(r_topo))
+    if rho <= 0:
+        raise RuntimeError("Non-positive rho in attributable conversion.")
+    s = r_topo / rho
+    rhodot = float(np.dot(v_geo, s))
+    sdot = (v_geo - rhodot * s) / max(rho, 1e-12)
+
+    x, y, z = s
+    xd, yd, zd = sdot
+    rxy2 = max(x * x + y * y, 1e-12)
+    ra = math.atan2(y, x)
+    dec = math.asin(np.clip(z, -1.0, 1.0))
+    ra_dot = (x * yd - y * xd) / rxy2
+    cosdec = max(math.sqrt(rxy2), 1e-12)
+    dec_dot = (zd - z * (x * xd + y * yd) / rxy2) / cosdec
+
+    attrib = Attributable(
+        ra_deg=float(math.degrees(ra) % 360.0),
+        dec_deg=float(math.degrees(dec)),
+        ra_dot_deg_per_day=float(math.degrees(ra_dot) * DAY_S),
+        dec_dot_deg_per_day=float(math.degrees(dec_dot) * DAY_S),
+    )
+    return attrib, rho, rhodot
+
+
+def add_range_jitter(
+    states: np.ndarray,
+    obs: Sequence[Observation] | Path | str,
+    epoch: Time,
+    n_per_state: int = 10,
+    rho_min_au: float = 1.8,
+    rho_max_au: float = 4.5,
+    rhodot_max_kms: float = 20.0,
+    seed: int | None = None,
+) -> np.ndarray:
+    """Generate range-jittered states by resampling rho/rhodot per attributable."""
+    if isinstance(obs, (str, Path)):
+        from neotube.fit_cli import load_observations
+
+        obs = load_observations(Path(obs), None)
+    if not obs:
+        return np.empty((0, 6), dtype=float)
+    obs0 = obs[0]
+
+    rng = np.random.default_rng(None if seed is None else int(seed))
+    log_rho_min = math.log(max(1e-12, rho_min_au))
+    log_rho_max = math.log(max(rho_min_au, rho_max_au))
+
+    out = []
+    for st in states:
+        try:
+            attrib, _, _ = _attrib_rho_from_state(st, obs0, epoch)
+        except Exception:
+            continue
+        rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n_per_state)) * AU_KM
+        rhodots = rng.uniform(-rhodot_max_kms, rhodot_max_kms, size=n_per_state)
+        for rho_km, rhodot_km_s in zip(rhos, rhodots):
+            out.append(build_state_from_ranging(obs0, epoch, attrib, float(rho_km), float(rhodot_km_s)))
+    if not out:
+        return np.empty((0, 6), dtype=float)
+    return np.array(out, dtype=float)
 
 
 _SPREAD_WORKER_CTX: dict[str, object] = {}
@@ -397,10 +528,10 @@ def add_local_spread_parallel(
     seed: int | None = None,
 ) -> np.ndarray:
     """Parallel driver for local-spread jitter using a process pool."""
-    if isinstance(obs, str):
+    if isinstance(obs, (str, Path)):
         from neotube.fit_cli import load_observations
 
-        obs = load_observations(obs, None)
+        obs = load_observations(Path(obs), None)
 
     if site_kappas is None:
         site_kappas = getattr(posterior, "site_kappas", {}) or {}
@@ -601,12 +732,124 @@ def build_state_from_ranging(
     earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
     earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
 
-    site_offset = _site_offset(obs, allow_unknown_site=True)
+    site_pos, site_vel = _site_states(
+        [epoch],
+        [obs.site],
+        observer_positions_km=[obs.observer_pos_km],
+        observer_velocities_km_s=None,
+        allow_unknown_site=True,
+    )
+    site_offset = site_pos[0]
+    site_vel = site_vel[0]
     r_geo = site_offset + rho_km * s
-    v_geo = rhodot_km_s * s + rho_km * sdot
+    v_geo = site_vel + rhodot_km_s * s + rho_km * sdot
     r_helio = earth_helio + r_geo
     v_helio = earth_vel_helio + v_geo
     return np.hstack([r_helio, v_helio]).astype(float)
+
+
+def _state_residuals(
+    state: np.ndarray,
+    epoch: Time,
+    observations: Sequence[Observation],
+    perturbers: Sequence[str],
+    max_step: float,
+    use_kepler: bool,
+) -> np.ndarray:
+    pred_ra, pred_dec = _predict_batch(
+        state, epoch, list(observations), perturbers, max_step, use_kepler=use_kepler
+    )
+    residuals = []
+    for ra, dec, ob in zip(pred_ra, pred_dec, observations):
+        d_ra = ((ob.ra_deg - ra + 180.0) % 360.0) - 180.0
+        ra_arcsec = d_ra * math.cos(math.radians(dec)) * 3600.0
+        dec_arcsec = (ob.dec_deg - dec) * 3600.0
+        residuals.extend([ra_arcsec, dec_arcsec])
+    return np.array(residuals, dtype=float)
+
+
+def build_state_from_ranging_multiobs(
+    observations: Sequence[Observation],
+    obs_ref: Observation,
+    epoch: Time,
+    attrib: Attributable,
+    rho_km: float,
+    rhodot_km_s: float,
+    perturbers: Sequence[str],
+    max_step: float,
+    use_kepler: bool,
+    max_iter: int = 2,
+) -> np.ndarray:
+    rho = float(rho_km)
+    rhodot = float(rhodot_km_s)
+    obs_list = list(observations)
+    if not obs_list:
+        return build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
+    for _ in range(max_iter):
+        state = build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
+        res = _state_residuals(state, epoch, obs_list, perturbers, max_step, use_kepler)
+        if not np.all(np.isfinite(res)):
+            break
+        eps_rho = max(1e-6 * abs(rho), 1e3)
+        eps_rhodot = max(1e-6 * abs(rhodot), 1e-3)
+        st_rho = build_state_from_ranging(obs_ref, epoch, attrib, rho + eps_rho, rhodot)
+        st_rhodot = build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot + eps_rhodot)
+        res_rho = _state_residuals(st_rho, epoch, obs_list, perturbers, max_step, use_kepler)
+        res_rhodot = _state_residuals(st_rhodot, epoch, obs_list, perturbers, max_step, use_kepler)
+        if not (np.all(np.isfinite(res_rho)) and np.all(np.isfinite(res_rhodot))):
+            break
+        j_rho = (res_rho - res) / eps_rho
+        j_rhodot = (res_rhodot - res) / eps_rhodot
+        J = np.vstack([j_rho, j_rhodot]).T
+        try:
+            JTJ = J.T @ J + np.eye(2) * 1e-6
+            delta = -np.linalg.solve(JTJ, J.T @ res)
+        except np.linalg.LinAlgError:
+            delta = -np.linalg.lstsq(J, res, rcond=None)[0]
+        rho += float(delta[0])
+        rhodot += float(delta[1])
+        if rho <= 1e-6:
+            rho = 1e-6
+        if np.linalg.norm(delta) < 1e-6:
+            break
+    return build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
+
+
+def _ranging_reference_observation(
+    observations: Sequence[Observation],
+    epoch: Time,
+) -> Observation:
+    if not observations:
+        raise RuntimeError("No observations provided for ranging reference.")
+    sites = [o.site for o in observations if o.site]
+    site = None
+    if sites:
+        counts: dict[str, int] = {}
+        for s in sites:
+            counts[s] = counts.get(s, 0) + 1
+        site = max(counts.items(), key=lambda kv: kv[1])[0]
+        if len(counts) > 1:
+            print(
+                f"[ranging] multiple sites found; using site '{site}' as reference for proposals",
+                flush=True,
+            )
+
+    obs_ref = Observation(
+        time=epoch,
+        ra_deg=0.0,
+        dec_deg=0.0,
+        sigma_arcsec=1.0,
+        site=site,
+        observer_pos_km=None,
+    )
+    if site is not None:
+        site_kind = get_site_kind(site)
+        if site_kind in {"spacecraft", "space", "satellite"} or get_site_ephemeris(site):
+            return obs_ref
+    obs_pos = [o.observer_pos_km for o in observations if o.observer_pos_km is not None]
+    if obs_pos:
+        obs_ref.observer_pos_km = np.mean(np.array(obs_pos, dtype=float), axis=0)
+    return obs_ref
 
 
 def studentt_loglike(residuals: np.ndarray, sigma_vec: np.ndarray, nu: float) -> float:
@@ -646,7 +889,7 @@ _RANGE_CTX: dict[str, object] = {}
 
 
 def _init_worker(
-    obs0: Observation,
+    obs_ref: Observation,
     epoch: Time,
     attrib: Attributable,
     observations: Sequence[Observation],
@@ -655,10 +898,13 @@ def _init_worker(
     nu: float,
     site_kappas: dict[str, float],
     use_kepler: bool,
+    multiobs: bool,
+    multiobs_max_iter: int,
+    obs_eval: Sequence[Observation] | None,
 ) -> None:
     global _RANGE_CTX
     _RANGE_CTX = {
-        "obs0": obs0,
+        "obs_ref": obs_ref,
         "epoch": epoch,
         "attrib": attrib,
         "observations": observations,
@@ -667,6 +913,9 @@ def _init_worker(
         "nu": nu,
         "site_kappas": site_kappas,
         "use_kepler": use_kepler,
+        "multiobs": multiobs,
+        "multiobs_max_iter": multiobs_max_iter,
+        "obs_eval": obs_eval,
     }
 
 
@@ -674,13 +923,27 @@ def _score_chunk(chunk: Sequence[tuple[float, float]]) -> list[tuple[float, floa
     ctx = _RANGE_CTX
     out: list[tuple[float, float, float, np.ndarray]] = []
     for rho_km, rhodot_km_s in chunk:
-        state = build_state_from_ranging(
-            ctx["obs0"],
-            ctx["epoch"],
-            ctx["attrib"],
-            rho_km,
-            rhodot_km_s,
-        )
+        if ctx.get("multiobs"):
+            state = build_state_from_ranging_multiobs(
+                ctx["obs_eval"] or ctx["observations"],
+                ctx["obs_ref"],
+                ctx["epoch"],
+                ctx["attrib"],
+                rho_km,
+                rhodot_km_s,
+                ctx["perturbers"],
+                ctx["max_step"],
+                ctx["use_kepler"],
+                max_iter=int(ctx.get("multiobs_max_iter", 2)),
+            )
+        else:
+            state = build_state_from_ranging(
+                ctx["obs_ref"],
+                ctx["epoch"],
+                ctx["attrib"],
+                rho_km,
+                rhodot_km_s,
+            )
         try:
             ll, _ = score_candidate(
                 state,
@@ -760,9 +1023,16 @@ def sample_ranged_replicas(
     top_k_nbody: int = 2000,
     rho_prior_power: float = 2.0,
     rho_prior_mode: str | None = "log",
+    multiobs: bool = False,
+    multiobs_indices: Sequence[int] | None = None,
+    multiobs_max_iter: int = 2,
 ) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(int(seed))
-    obs0 = min(observations, key=lambda ob: abs((ob.time - epoch).to(u.s).value))
+    obs_ref = _ranging_reference_observation(observations, epoch)
+    if multiobs_indices:
+        obs_eval = [observations[i] for i in multiobs_indices]
+    else:
+        obs_eval = list(observations)
     attrib = build_attributable(observations, epoch)
     log_rho_min = math.log(max(1e-12, rho_min_au))
     log_rho_max = math.log(max(rho_min_au, rho_max_au))
@@ -791,7 +1061,21 @@ def sample_ranged_replicas(
         n_fail = 0
         best_ll = -np.inf
         for i, (rho_km, rhodot_km_s) in enumerate(proposals):
-            state = build_state_from_ranging(obs0, epoch, attrib, rho_km, rhodot_km_s)
+            if multiobs:
+                state = build_state_from_ranging_multiobs(
+                    obs_eval,
+                    obs_ref,
+                    epoch,
+                    attrib,
+                    rho_km,
+                    rhodot_km_s,
+                    perturbers,
+                    max_step,
+                    use_kepler,
+                    max_iter=multiobs_max_iter,
+                )
+            else:
+                state = build_state_from_ranging(obs_ref, epoch, attrib, rho_km, rhodot_km_s)
             try:
                 ll, _ = score_candidate(
                     state,
@@ -825,7 +1109,7 @@ def sample_ranged_replicas(
             processes=n_workers,
             initializer=_init_worker,
             initargs=(
-                obs0,
+                obs_ref,
                 epoch,
                 attrib,
                 list(observations),
@@ -834,6 +1118,9 @@ def sample_ranged_replicas(
                 nu,
                 site_kappas,
                 use_kepler,
+                multiobs,
+                multiobs_max_iter,
+                obs_eval,
             ),
         ) as pool:
             chunk_results = pool.map(_score_chunk, chunks)

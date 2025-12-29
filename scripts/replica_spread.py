@@ -14,6 +14,7 @@ import pandas as pd
 from astropy.coordinates import get_body_barycentric_posvel
 from astropy.time import Time
 import astropy.units as u
+from astroquery.jplhorizons import Horizons
 
 
 def load_replicas(path: Path) -> pd.DataFrame:
@@ -100,7 +101,7 @@ def plot_pca23(
     title: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(pc2, pc3, s=6, alpha=0.3)
+    ax.scatter(pc2, pc3, s=14, alpha=0.6)
     if jpl_pc is not None:
         ax.plot(jpl_pc[0], jpl_pc[1], "r+", markersize=12, mew=2, label="JPL")
         ax.legend()
@@ -161,6 +162,21 @@ def _load_epoch_utc(meta_path: Path) -> str | None:
     except Exception:
         return None
     return meta.get("epoch_utc")
+
+
+def _fetch_jpl_helio_state(target: str, epoch_utc: str) -> tuple[np.ndarray, np.ndarray]:
+    t = Time(epoch_utc, scale="utc")
+    obj = Horizons(id=target, location="@sun", epochs=t.jd, id_type="smallbody")
+    vec = obj.vectors(refplane="earth")
+    x = float(vec["x"][0])
+    y = float(vec["y"][0])
+    z = float(vec["z"][0])
+    vx = float(vec["vx"][0])
+    vy = float(vec["vy"][0])
+    vz = float(vec["vz"][0])
+    pos_km = np.array([x, y, z], dtype=float) * 149597870.7
+    vel_km_s = np.array([vx, vy, vz], dtype=float) * 149597870.7 / 86400.0
+    return pos_km, vel_km_s
 
 
 def _topocentric_distance_au(
@@ -232,6 +248,17 @@ def main() -> int:
         help="Optional JPL heliocentric position (x y z km) for topo PCA crosshair.",
     )
     parser.add_argument(
+        "--jpl-target",
+        type=str,
+        default=None,
+        help="Optional JPL/Horizons target name for auto crosshair (e.g., Ceres).",
+    )
+    parser.add_argument(
+        "--base-topo",
+        action="store_true",
+        help="When obs/epoch are available, build base RA/Dec PCA plots from topocentric RA/Dec.",
+    )
+    parser.add_argument(
         "--epoch-utc",
         type=str,
         default=None,
@@ -252,7 +279,7 @@ def main() -> int:
         )
     else:
         states = None
-    dra, ddec, ra0, dec0 = tangent_offsets(df)
+    dra = ddec = ra0 = dec0 = None
     r_au = None
     topo_au = None
     obs_list = None
@@ -269,11 +296,7 @@ def main() -> int:
         print("replica CSV missing x_km/y_km/z_km; skipping PC1 vs r(AU) plot")
 
     jpl_offset = None
-    if args.jpl_ra is not None and args.jpl_dec is not None:
-        cosd = np.cos(np.deg2rad(dec0))
-        dra_j = (args.jpl_ra - ra0) * cosd * 3600.0
-        ddec_j = (args.jpl_dec - dec0) * 3600.0
-        jpl_offset = (dra_j, ddec_j)
+    jpl_state_km = None
 
     base = args.output_prefix
     radec_path = base.parent / f"{base.name}_radec.png"
@@ -284,14 +307,6 @@ def main() -> int:
     topo_pca_path = base.parent / f"{base.name}_topo_pca.png"
     topo_pca23_path = base.parent / f"{base.name}_topo_pca23.png"
     composite_path = base.parent / f"{base.name}_composite.png"
-    plot_ra_dec(dra, ddec, radec_path, jpl_offset)
-    pc1, pc2, eigvecs = pca_components(dra, ddec)
-    jpl_pc = None
-    jpl_pc1 = None
-    if jpl_offset is not None:
-        jpl_pc = tuple((eigvecs.T @ np.array(jpl_offset)).tolist())
-        jpl_pc1 = float(jpl_pc[0])
-    plot_pca(pc1, pc2, pca_path, jpl_pc)
     # Optional topocentric plots (require obs + epoch + positions).
     epoch_utc = args.epoch_utc or _load_epoch_utc(
         args.replicas.with_name(args.replicas.stem + "_meta.json")
@@ -307,6 +322,7 @@ def main() -> int:
                     obs_path = Path(meta["obs"])
             except Exception:
                 obs_path = None
+    topo_df = None
     if epoch_utc is not None and obs_path is not None and states is not None:
         from neotube.fit_cli import load_observations
         from neotube.propagate import predict_radec_batch
@@ -327,12 +343,21 @@ def main() -> int:
         topo_df["dec_deg"] = topo_dec
         topo_dra, topo_ddec, topo_ra0, topo_dec0 = tangent_offsets(topo_df)
 
+        # Resolve JPL heliocentric state if possible.
+        if jpl_state_km is None and args.jpl_helio_pos_km is not None:
+            jpl_state_km = np.hstack([np.array(args.jpl_helio_pos_km, dtype=float), np.zeros(3)])
+        if jpl_state_km is None and args.jpl_target is not None:
+            try:
+                jpl_pos, jpl_vel = _fetch_jpl_helio_state(args.jpl_target, epoch_utc)
+                jpl_state_km = np.hstack([jpl_pos, jpl_vel])
+            except Exception as exc:
+                print(f"Failed to fetch JPL target '{args.jpl_target}': {exc}")
+                jpl_state_km = None
+
         jpl_topo_offset = None
-        if args.jpl_helio_pos_km is not None:
-            jpl_helio = np.array(args.jpl_helio_pos_km, dtype=float)
-            jpl_state = np.hstack([jpl_helio, np.zeros(3, dtype=float)])
+        if jpl_state_km is not None:
             jpl_ra, jpl_dec = predict_radec_batch(
-                jpl_state[None, :],
+                jpl_state_km[None, :],
                 [time_val],
                 site_codes=[site_code],
                 allow_unknown_site=True,
@@ -341,6 +366,9 @@ def main() -> int:
             dra_j = (float(jpl_ra[0]) - topo_ra0) * cosd * 3600.0
             ddec_j = (float(jpl_dec[0]) - topo_dec0) * 3600.0
             jpl_topo_offset = (float(dra_j), float(ddec_j))
+            if args.jpl_ra is None or args.jpl_dec is None:
+                args.jpl_ra = float(jpl_ra[0])
+                args.jpl_dec = float(jpl_dec[0])
         elif args.jpl_ra is not None and args.jpl_dec is not None:
             cosd = np.cos(np.deg2rad(topo_dec0))
             dra_j = (args.jpl_ra - topo_ra0) * cosd * 3600.0
@@ -359,8 +387,8 @@ def main() -> int:
         topo_vec = _topocentric_vectors(pos, epoch_utc, site_offset_km)
         proj, comps, mean = pca_components_3d(topo_vec)
         jpl_pc_topo = None
-        if args.jpl_helio_pos_km is not None:
-            jpl_helio = np.array(args.jpl_helio_pos_km, dtype=float)
+        if jpl_state_km is not None:
+            jpl_helio = jpl_state_km[:3]
             jpl_topo = _topocentric_vectors(jpl_helio[None, :], epoch_utc, site_offset_km)[0]
             jpl_proj = (jpl_topo - mean) @ comps.T
             jpl_pc_topo = (float(jpl_proj[0]), float(jpl_proj[1]))
@@ -372,12 +400,34 @@ def main() -> int:
         plot_pca23(proj[:, 1], proj[:, 2], topo_pca23_path, jpl_pc23, "Replica cloud (topocentric PC2 vs PC3)")
         mirror_to_data_dir(topo_radec_path, topo_pca_path, topo_pca23_path)
 
+    df_base = topo_df if (args.base_topo and topo_df is not None) else df
+    dra, ddec, ra0, dec0 = tangent_offsets(df_base)
+    pc1, pc2, eigvecs = pca_components(dra, ddec)
+
+    if args.jpl_ra is not None and args.jpl_dec is not None:
+        cosd = np.cos(np.deg2rad(dec0))
+        dra_j = (args.jpl_ra - ra0) * cosd * 3600.0
+        ddec_j = (args.jpl_dec - dec0) * 3600.0
+        jpl_offset = (dra_j, ddec_j)
+    jpl_pc = None
+    jpl_pc1 = None
+    if jpl_offset is not None:
+        jpl_pc = tuple((eigvecs.T @ np.array(jpl_offset)).tolist())
+        jpl_pc1 = float(jpl_pc[0])
+    plot_ra_dec(dra, ddec, radec_path, jpl_offset)
+    plot_pca(pc1, pc2, pca_path, jpl_pc)
+
     if r_au is not None:
         if topo_au is None and epoch_utc is not None and site_offset_km is not None:
             try:
                 topo_au = _topocentric_distance_au(pos, epoch_utc, site_offset_km)
             except Exception:
                 topo_au = None
+        if args.jpl_r_au is None and jpl_state_km is not None:
+            args.jpl_r_au = float(np.linalg.norm(jpl_state_km[:3]) / 149597870.7)
+        if args.jpl_topo_au is None and topo_au is not None and jpl_state_km is not None:
+            jpl_topo = _topocentric_vectors(jpl_state_km[:3][None, :], epoch_utc, site_offset_km)[0]
+            args.jpl_topo_au = float(np.linalg.norm(jpl_topo) / 149597870.7)
         plot_pca1_r_au(pc1, r_au, pca1_r_path, jpl_pc1, args.jpl_r_au)
         if topo_au is not None:
             plot_pca1_topo_au(pc1, topo_au, pca1_topo_path, jpl_pc1, args.jpl_topo_au)

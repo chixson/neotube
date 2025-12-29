@@ -9,10 +9,40 @@ from pathlib import Path
 import numpy as np
 from astropy.time import Time
 
-from .fit import load_posterior, sample_replicas
+from .fit import load_posterior, residuals_parallel, sample_replicas
 from .propagate import predict_radec_batch
 from .fit_cli import load_observations
-from .ranging import add_local_spread_parallel, sample_ranged_replicas
+from .ranging import (
+    _ranging_reference_observation,
+    add_local_spread_parallel,
+    add_range_jitter,
+    build_attributable,
+    build_state_from_ranging,
+    sample_ranged_replicas,
+    score_candidate,
+    build_state_from_ranging_multiobs,
+)
+
+try:
+    from numba import njit
+
+    _HAS_NUMBA = True
+except Exception:
+    _HAS_NUMBA = False
+
+
+if _HAS_NUMBA:
+
+    @njit(cache=True)
+    def _studentt_loglike_numba(residuals, sigma_vec, nu):
+        out = np.empty(residuals.shape[0], dtype=np.float64)
+        for i in range(residuals.shape[0]):
+            acc = 0.0
+            for j in range(residuals.shape[1]):
+                t = (residuals[i, j] / sigma_vec[j]) ** 2
+                acc += (nu + 1.0) * np.log1p(t / nu)
+            out[i] = -0.5 * acc
+        return out
 
 
 def _radec_chunk_worker(payload):
@@ -37,6 +67,112 @@ def main() -> int:
         help="Sampling method ('multit'=Student-t, 'gaussian'=Gaussian).",
     )
     parser.add_argument("--nu", type=float, default=4.0, help="Degrees of freedom when using Student-t sampling.")
+    parser.add_argument(
+        "--smc",
+        action="store_true",
+        help="Use SMC sampling over the posterior likelihood instead of ranged/gaussian sampling.",
+    )
+    parser.add_argument(
+        "--smc-param",
+        choices=("cartesian", "attributable"),
+        default="cartesian",
+        help="Parameterization for SMC: cartesian (6D state) or attributable (rho,rhodot).",
+    )
+    parser.add_argument("--smc-steps", type=int, default=6, help="Number of SMC tempering steps.")
+    parser.add_argument(
+        "--smc-ess-frac",
+        type=float,
+        default=0.5,
+        help="Resample when ESS < ess_frac * N.",
+    )
+    parser.add_argument(
+        "--smc-mcmc-steps",
+        type=int,
+        default=1,
+        help="Number of MCMC rejuvenation steps per SMC stage.",
+    )
+    parser.add_argument(
+        "--smc-proposal-scale",
+        type=float,
+        default=0.5,
+        help="Proposal scale for SMC rejuvenation (fraction of std for cartesian; rho-scale for attributable).",
+    )
+    parser.add_argument(
+        "--smc-prior-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor applied to posterior covariance for SMC cartesian prior.",
+    )
+    parser.add_argument(
+        "--smc-prior-a-min-au",
+        type=float,
+        default=None,
+        help="Optional minimum semi-major axis (AU) for SMC cartesian prior.",
+    )
+    parser.add_argument(
+        "--smc-prior-a-max-au",
+        type=float,
+        default=None,
+        help="Optional maximum semi-major axis (AU) for SMC cartesian prior.",
+    )
+    parser.add_argument(
+        "--smc-prior-bound-only",
+        action="store_true",
+        help="If set, require bound heliocentric orbits (E < 0) in SMC cartesian prior.",
+    )
+    parser.add_argument(
+        "--mix-posterior-frac",
+        type=float,
+        default=0.0,
+        help="If >0 with --ranged, draw a mixture of posterior and ranged proposals and reweight by likelihood.",
+    )
+    parser.add_argument(
+        "--mix-oversample",
+        type=float,
+        default=1.0,
+        help="Oversampling factor for mixture pool before reweighting (e.g. 2.0).",
+    )
+    parser.add_argument(
+        "--mix-likelihood",
+        choices=("studentt", "gaussian"),
+        default="studentt",
+        help="Likelihood used for mixture reweighting (default: studentt).",
+    )
+    parser.add_argument(
+        "--range-jitter-n",
+        type=int,
+        default=0,
+        help="Per-state range jitter count (0 disables).",
+    )
+    parser.add_argument(
+        "--range-jitter-rho-min-au",
+        type=float,
+        default=1.8,
+        help="Min rho (AU) for range jitter.",
+    )
+    parser.add_argument(
+        "--range-jitter-rho-max-au",
+        type=float,
+        default=4.5,
+        help="Max rho (AU) for range jitter.",
+    )
+    parser.add_argument(
+        "--range-jitter-rhodot-max-kms",
+        type=float,
+        default=20.0,
+        help="Max |rhodot| (km/s) for range jitter.",
+    )
+    parser.add_argument(
+        "--range-jitter-reweight",
+        action="store_true",
+        help="Reweight range-jitter pool by likelihood before resampling.",
+    )
+    parser.add_argument(
+        "--range-jitter-likelihood",
+        choices=("studentt", "gaussian"),
+        default="studentt",
+        help="Likelihood used for range jitter reweighting.",
+    )
     parser.add_argument(
         "--ranged",
         action="store_true",
@@ -74,6 +210,23 @@ def main() -> int:
         type=float,
         default=2.0,
         help="Power for rho prior (log weight term = power * log(rho)).",
+    )
+    parser.add_argument(
+        "--ranging-multiobs",
+        action="store_true",
+        help="Construct ranged proposals by fitting rho/rhodot across multiple observations.",
+    )
+    parser.add_argument(
+        "--ranging-multiobs-indices",
+        type=str,
+        default=None,
+        help="Comma-separated observation indices to use for multi-obs construction (default: all).",
+    )
+    parser.add_argument(
+        "--ranging-multiobs-max-iter",
+        type=int,
+        default=2,
+        help="Max Gauss-Newton iterations for multi-obs ranging construction.",
     )
     parser.add_argument(
         "--scoring-mode",
@@ -147,6 +300,15 @@ def main() -> int:
         help="degrees-of-freedom for multivariate-t.",
     )
     args = parser.parse_args()
+    if args.ranging_multiobs_indices:
+        try:
+            args.ranging_multiobs_indices = [
+                int(x.strip())
+                for x in args.ranging_multiobs_indices.split(",")
+                if x.strip() != ""
+            ]
+        except Exception as exc:
+            raise SystemExit(f"Invalid --ranging-multiobs-indices: {exc}") from exc
     # Apply range-profile overrides (explicit profile wins)
     if args.range_profile is not None:
         prof = args.range_profile
@@ -183,74 +345,398 @@ def main() -> int:
 
     posterior = load_posterior(args.posterior)
     nu_val = posterior.nu if posterior.nu is not None else args.nu
-    if args.ranged:
+    if args.smc:
         if args.obs is None:
-            raise SystemExit("--ranged requires --obs (observation CSV).")
+            raise SystemExit("--smc requires --obs (observation CSV).")
         observations = load_observations(args.obs, None)
-        scoring_mode = "nbody" if args.no_kepler else args.scoring_mode
-        ranged = sample_ranged_replicas(
-            observations=observations,
-            epoch=posterior.epoch,
-            n_replicas=args.n,
-            n_proposals=args.n_proposals,
-            rho_min_au=args.rho_min_au,
-            rho_max_au=args.rho_max_au,
-            rhodot_max_kms=args.rhodot_max_kms,
-            perturbers=tuple(args.perturbers),
-            max_step=args.max_step,
-            nu=nu_val,
-            site_kappas=getattr(posterior, "site_kappas", {}),
-            seed=args.seed,
-            log_every=args.log_every,
-            scoring_mode=scoring_mode,
-            n_workers=args.n_workers,
-            chunk_size=args.chunk_size,
-            top_k_nbody=args.top_k_nbody,
-            rho_prior_power=args.rho_prior_power,
-            rho_prior_mode=args.rho_prior,
-        )
-        weights = ranged["weights"]
-        states = ranged["states"]
-        if args.emit_debug:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            diag_path = args.output.parent / "ranging_debug.npz"
-            top_k = min(len(weights), max(1, args.top_k_nbody))
-            top_idx = np.argsort(-weights)[:top_k]
-            try:
-                np.savez(
-                    diag_path,
-                    rhos=ranged.get("rhos"),
-                    rhodots=ranged.get("rhodots"),
-                    weights=weights,
-                    top_idx=top_idx,
-                    top_rhos=ranged.get("rhos")[top_idx],
-                    top_rhodots=ranged.get("rhodots")[top_idx],
-                    top_weights=weights[top_idx],
-                    top_states=states[top_idx],
-                )
-                print("Wrote diagnostics to", diag_path)
-            except Exception as exc:
-                print("Failed to write debug npz:", exc)
-        ess = 1.0 / np.sum(weights**2)
-        if ess < max(50, 0.05 * len(weights)):
-            from .ranging import stratified_resample
+        site_kappas = getattr(posterior, "site_kappas", {})
+        sigma_vec = []
+        for ob in observations:
+            kappa = site_kappas.get(ob.site or "UNK", 1.0)
+            sigma = max(1e-6, float(ob.sigma_arcsec) * float(kappa))
+            sigma_vec.extend([sigma, sigma])
+        sigma_vec = np.array(sigma_vec, dtype=float)
 
-            replicas = stratified_resample(
+        def _loglikes_from_residuals(residuals: np.ndarray) -> np.ndarray:
+            t = (residuals / sigma_vec) ** 2
+            if args.mix_likelihood == "gaussian":
+                return -0.5 * np.sum(t, axis=1)
+            nu_like = max(1.0, float(nu_val))
+            if _HAS_NUMBA:
+                return _studentt_loglike_numba(residuals, sigma_vec, nu_like)
+            return -0.5 * np.sum((nu_like + 1.0) * np.log1p(t / nu_like), axis=1)
+
+        def score_states(states: np.ndarray) -> np.ndarray:
+            res = residuals_parallel(
                 states,
-                weights,
-                nrep=args.n,
-                n_clusters=12,
-                jitter_scale=1e-6,
-                nu=nu_val,
-                seed=args.seed,
-            ).T
-        else:
-            idx = np.random.default_rng(int(args.seed)).choice(
-                len(states), size=args.n, replace=True, p=weights
+                posterior.epoch,
+                observations,
+                tuple(args.perturbers),
+                args.max_step,
+                n_workers=int(args.n_workers),
+                chunk_size=int(args.chunk_size) if args.chunk_size is not None else None,
+                use_kepler=not args.no_kepler,
+                allow_unknown_site=True,
             )
-            replicas = states[idx].T
+            return _loglikes_from_residuals(res)
+
+        def systematic_resample(weights: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+            n = len(weights)
+            positions = (rng.random() + np.arange(n)) / n
+            cdf = np.cumsum(weights)
+            return np.searchsorted(cdf, positions)
+
+        def smc_cartesian() -> np.ndarray:
+            rng = np.random.default_rng(int(args.seed))
+            cov = np.array(posterior.cov, dtype=float) * (float(posterior.fit_scale) ** 2)
+            cov *= float(args.smc_prior_scale) ** 2
+            mean = np.array(posterior.state, dtype=float)
+            parts = sample_replicas(
+                posterior, args.n, seed=int(args.seed), method=args.method, nu=nu_val
+            ).T
+            parts = np.asarray(parts, dtype=float)
+            loglikes = score_states(parts)
+            betas = np.linspace(0.0, 1.0, max(2, int(args.smc_steps)))
+            stds = np.sqrt(np.maximum(np.diag(cov), 1e-12))
+            prop_scale = float(args.smc_proposal_scale) * stds
+            inv_cov = np.linalg.pinv(cov)
+            mu_sun_km3_s2 = 1.32712440018e11
+
+            def logprior(theta: np.ndarray) -> float:
+                d = theta - mean
+                lp = float(-0.5 * d.dot(inv_cov).dot(d))
+                r = np.linalg.norm(theta[:3])
+                v2 = float(np.dot(theta[3:], theta[3:]))
+                if r <= 0.0:
+                    return -np.inf
+                energy = 0.5 * v2 - mu_sun_km3_s2 / r
+                if args.smc_prior_bound_only and energy >= 0.0:
+                    return -np.inf
+                if args.smc_prior_a_min_au is not None or args.smc_prior_a_max_au is not None:
+                    if energy >= 0.0:
+                        return -np.inf
+                    a_km = -mu_sun_km3_s2 / (2.0 * energy)
+                    a_au = a_km / 149597870.7
+                    if args.smc_prior_a_min_au is not None and a_au < float(args.smc_prior_a_min_au):
+                        return -np.inf
+                    if args.smc_prior_a_max_au is not None and a_au > float(args.smc_prior_a_max_au):
+                        return -np.inf
+                return lp
+
+            weights = np.ones(len(parts), dtype=float) / len(parts)
+            for b0, b1 in zip(betas[:-1], betas[1:]):
+                delta = b1 - b0
+                logw = delta * loglikes
+                logw -= np.max(logw)
+                weights = np.exp(logw)
+                weights /= np.sum(weights)
+                ess = 1.0 / np.sum(weights**2)
+                if ess < float(args.smc_ess_frac) * len(parts):
+                    idx = systematic_resample(weights, rng)
+                    parts = parts[idx]
+                    loglikes = loglikes[idx]
+                    weights = np.ones(len(parts), dtype=float) / len(parts)
+                for _ in range(int(args.smc_mcmc_steps)):
+                    for i in range(len(parts)):
+                        cur = parts[i]
+                        prop = cur + rng.normal(scale=prop_scale, size=cur.shape)
+                    props = parts + rng.normal(scale=prop_scale, size=parts.shape)
+                    ll_props = score_states(props)
+                    logp_cur = np.array([logprior(p) for p in parts]) + b1 * loglikes
+                    logp_prop = np.array([logprior(p) for p in props]) + b1 * ll_props
+                    accept = np.log(rng.random(size=len(parts))) < (logp_prop - logp_cur)
+                    parts[accept] = props[accept]
+                    loglikes[accept] = ll_props[accept]
+            return parts
+
+        def smc_attributable() -> np.ndarray:
+            rng = np.random.default_rng(int(args.seed))
+            attrib = build_attributable(observations, posterior.epoch)
+            obs_ref = _ranging_reference_observation(observations, posterior.epoch)
+            obs_eval = observations
+            if args.ranging_multiobs_indices:
+                obs_eval = [observations[i] for i in args.ranging_multiobs_indices]
+            n = int(args.n)
+            log_rho_min = np.log(max(1e-12, float(args.rho_min_au)))
+            log_rho_max = np.log(max(float(args.rho_min_au), float(args.rho_max_au)))
+            rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n)) * 149597870.7
+            rhodots = rng.uniform(-float(args.rhodot_max_kms), float(args.rhodot_max_kms), size=n)
+            if args.ranging_multiobs:
+                parts = np.array(
+                    [
+                        build_state_from_ranging_multiobs(
+                            obs_eval,
+                            obs_ref,
+                            posterior.epoch,
+                            attrib,
+                            r,
+                            rd,
+                            tuple(args.perturbers),
+                            args.max_step,
+                            use_kepler=not args.no_kepler,
+                            max_iter=int(args.ranging_multiobs_max_iter),
+                        )
+                        for r, rd in zip(rhos, rhodots)
+                    ],
+                    dtype=float,
+                )
+            else:
+                parts = np.array(
+                    [
+                        build_state_from_ranging(obs_ref, posterior.epoch, attrib, r, rd)
+                        for r, rd in zip(rhos, rhodots)
+                    ],
+                    dtype=float,
+                )
+            loglikes = score_states(parts)
+            betas = np.linspace(0.0, 1.0, max(2, int(args.smc_steps)))
+            weights = np.ones(n, dtype=float) / n
+            for b0, b1 in zip(betas[:-1], betas[1:]):
+                delta = b1 - b0
+                logw = delta * loglikes
+                logw -= np.max(logw)
+                weights = np.exp(logw)
+                weights /= np.sum(weights)
+                ess = 1.0 / np.sum(weights**2)
+                if ess < float(args.smc_ess_frac) * n:
+                    idx = systematic_resample(weights, rng)
+                    rhos = rhos[idx]
+                    rhodots = rhodots[idx]
+                    parts = parts[idx]
+                    loglikes = loglikes[idx]
+                    weights = np.ones(n, dtype=float) / n
+                for _ in range(int(args.smc_mcmc_steps)):
+                    rho_prop = rhos + rng.normal(scale=float(args.smc_proposal_scale) * rhos)
+                    rhodot_prop = rhodots + rng.normal(
+                        scale=float(args.smc_proposal_scale) * float(args.rhodot_max_kms),
+                        size=n,
+                    )
+                    rho_prop = np.clip(
+                        rho_prop,
+                        float(args.rho_min_au) * 149597870.7,
+                        float(args.rho_max_au) * 149597870.7,
+                    )
+                    rhodot_prop = np.clip(
+                        rhodot_prop, -float(args.rhodot_max_kms), float(args.rhodot_max_kms)
+                    )
+                    if args.ranging_multiobs:
+                        props = np.array(
+                            [
+                                build_state_from_ranging_multiobs(
+                                    obs_eval,
+                                    obs_ref,
+                                    posterior.epoch,
+                                    attrib,
+                                    r,
+                                    rd,
+                                    tuple(args.perturbers),
+                                    args.max_step,
+                                    use_kepler=not args.no_kepler,
+                                    max_iter=int(args.ranging_multiobs_max_iter),
+                                )
+                                for r, rd in zip(rho_prop, rhodot_prop)
+                            ],
+                            dtype=float,
+                        )
+                    else:
+                        props = np.array(
+                            [
+                                build_state_from_ranging(obs_ref, posterior.epoch, attrib, r, rd)
+                                for r, rd in zip(rho_prop, rhodot_prop)
+                            ],
+                            dtype=float,
+                        )
+                    ll_props = score_states(props)
+                    logp_cur = b1 * loglikes
+                    logp_prop = b1 * ll_props
+                    accept = np.log(rng.random(size=n)) < (logp_prop - logp_cur)
+                    rhos[accept] = rho_prop[accept]
+                    rhodots[accept] = rhodot_prop[accept]
+                    parts[accept] = props[accept]
+                    loglikes[accept] = ll_props[accept]
+            return parts
+
+        if args.smc_param == "cartesian":
+            replicas = smc_cartesian().T
+        else:
+            replicas = smc_attributable().T
     else:
-        replicas = sample_replicas(posterior, args.n, seed=args.seed, method=args.method, nu=nu_val)
+        if args.ranged:
+            if args.obs is None:
+                raise SystemExit("--ranged requires --obs (observation CSV).")
+            observations = load_observations(args.obs, None)
+            scoring_mode = "nbody" if args.no_kepler else args.scoring_mode
+            ranged = sample_ranged_replicas(
+                observations=observations,
+                epoch=posterior.epoch,
+                n_replicas=args.n,
+                n_proposals=args.n_proposals,
+                rho_min_au=args.rho_min_au,
+                rho_max_au=args.rho_max_au,
+                rhodot_max_kms=args.rhodot_max_kms,
+                perturbers=tuple(args.perturbers),
+                max_step=args.max_step,
+                nu=nu_val,
+                site_kappas=getattr(posterior, "site_kappas", {}),
+                seed=args.seed,
+                log_every=args.log_every,
+                scoring_mode=scoring_mode,
+                n_workers=args.n_workers,
+                chunk_size=args.chunk_size,
+                top_k_nbody=args.top_k_nbody,
+                rho_prior_power=args.rho_prior_power,
+                rho_prior_mode=args.rho_prior,
+                multiobs=args.ranging_multiobs,
+                multiobs_indices=args.ranging_multiobs_indices,
+                multiobs_max_iter=args.ranging_multiobs_max_iter,
+            )
+            weights = ranged["weights"]
+            states = ranged["states"]
+            if args.emit_debug:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                diag_path = args.output.parent / "ranging_debug.npz"
+                top_k = min(len(weights), max(1, args.top_k_nbody))
+                top_idx = np.argsort(-weights)[:top_k]
+                try:
+                    np.savez(
+                        diag_path,
+                        rhos=ranged.get("rhos"),
+                        rhodots=ranged.get("rhodots"),
+                        weights=weights,
+                        top_idx=top_idx,
+                        top_rhos=ranged.get("rhos")[top_idx],
+                        top_rhodots=ranged.get("rhodots")[top_idx],
+                        top_weights=weights[top_idx],
+                        top_states=states[top_idx],
+                    )
+                    print("Wrote diagnostics to", diag_path)
+                except Exception as exc:
+                    print("Failed to write debug npz:", exc)
+            if args.mix_posterior_frac and args.mix_posterior_frac > 0.0:
+                mix_frac = float(args.mix_posterior_frac)
+                mix_frac = min(1.0, max(0.0, mix_frac))
+                pool_n = max(args.n, int(round(args.n * float(args.mix_oversample))))
+                n_post = int(round(pool_n * mix_frac))
+                n_range = max(0, pool_n - n_post)
+
+                rng = np.random.default_rng(int(args.seed))
+                post_states = sample_replicas(
+                    posterior, n_post, seed=args.seed, method=args.method, nu=nu_val
+                ).T
+
+                if n_range > 0:
+                    idx = rng.choice(len(states), size=n_range, replace=True, p=weights)
+                    range_states = states[idx]
+                    pool_states = np.vstack([post_states, range_states])
+                else:
+                    pool_states = post_states
+
+                sigma_vec = []
+                for ob in observations:
+                    kappa = getattr(posterior, "site_kappas", {}).get(ob.site or "UNK", 1.0)
+                    sigma = max(1e-6, float(ob.sigma_arcsec) * float(kappa))
+                    sigma_vec.extend([sigma, sigma])
+                sigma_vec = np.array(sigma_vec, dtype=float)
+
+                res = residuals_parallel(
+                    pool_states,
+                    posterior.epoch,
+                    observations,
+                    tuple(args.perturbers),
+                    args.max_step,
+                    n_workers=int(args.n_workers),
+                    chunk_size=int(args.chunk_size) if args.chunk_size is not None else None,
+                    use_kepler=not args.no_kepler,
+                    allow_unknown_site=True,
+                )
+                t = (res / sigma_vec) ** 2
+                if args.mix_likelihood == "gaussian":
+                    logw = -0.5 * np.sum(t, axis=1)
+                else:
+                    nu_like = max(1.0, float(nu_val))
+                    logw = -0.5 * np.sum((nu_like + 1.0) * np.log1p(t / nu_like), axis=1)
+                logw -= np.max(logw)
+                w = np.exp(logw)
+                if not np.all(np.isfinite(w)) or np.sum(w) <= 0:
+                    raise RuntimeError("Mixture reweight produced invalid weights.")
+                w /= np.sum(w)
+                idx = rng.choice(pool_states.shape[0], size=args.n, replace=True, p=w)
+                replicas = pool_states[idx].T
+            else:
+                ess = 1.0 / np.sum(weights**2)
+                if ess < max(50, 0.05 * len(weights)):
+                    from .ranging import stratified_resample
+
+                    replicas = stratified_resample(
+                        states,
+                        weights,
+                        nrep=args.n,
+                        n_clusters=12,
+                        jitter_scale=1e-6,
+                        nu=nu_val,
+                        seed=args.seed,
+                    ).T
+                else:
+                    idx = np.random.default_rng(int(args.seed)).choice(
+                        len(states), size=args.n, replace=True, p=weights
+                    )
+                    replicas = states[idx].T
+        else:
+            replicas = sample_replicas(posterior, args.n, seed=args.seed, method=args.method, nu=nu_val)
+
+    # Optional: range jitter around posterior to explicitly span rho/rhodot.
+    if args.range_jitter_n and args.range_jitter_n > 0:
+        if args.obs is None:
+            raise SystemExit("--range-jitter requires --obs (observation CSV).")
+        obs_for_jitter = observations if args.ranged else args.obs
+        base_states = replicas.T.copy()
+        jittered = add_range_jitter(
+            base_states,
+            obs_for_jitter,
+            posterior.epoch,
+            n_per_state=int(args.range_jitter_n),
+            rho_min_au=float(args.range_jitter_rho_min_au),
+            rho_max_au=float(args.range_jitter_rho_max_au),
+            rhodot_max_kms=float(args.range_jitter_rhodot_max_kms),
+            seed=int(args.seed) if args.seed is not None else None,
+        )
+        pool_states = np.vstack([base_states, jittered])
+        rng = np.random.default_rng(int(args.seed))
+        if args.range_jitter_reweight:
+            observations = observations if args.ranged else load_observations(args.obs, None)
+            sigma_vec = []
+            for ob in observations:
+                kappa = getattr(posterior, "site_kappas", {}).get(ob.site or "UNK", 1.0)
+                sigma = max(1e-6, float(ob.sigma_arcsec) * float(kappa))
+                sigma_vec.extend([sigma, sigma])
+            sigma_vec = np.array(sigma_vec, dtype=float)
+            res = residuals_parallel(
+                pool_states,
+                posterior.epoch,
+                observations,
+                tuple(args.perturbers),
+                args.max_step,
+                n_workers=int(args.n_workers),
+                chunk_size=int(args.chunk_size) if args.chunk_size is not None else None,
+                use_kepler=not args.no_kepler,
+                allow_unknown_site=True,
+            )
+            t = (res / sigma_vec) ** 2
+            if args.range_jitter_likelihood == "gaussian":
+                logw = -0.5 * np.sum(t, axis=1)
+            else:
+                nu_like = max(1.0, float(nu_val))
+                logw = -0.5 * np.sum((nu_like + 1.0) * np.log1p(t / nu_like), axis=1)
+            logw -= np.max(logw)
+            w = np.exp(logw)
+            if not np.all(np.isfinite(w)) or np.sum(w) <= 0:
+                raise RuntimeError("Range jitter reweight produced invalid weights.")
+            w /= np.sum(w)
+            idx = rng.choice(pool_states.shape[0], size=args.n, replace=True, p=w)
+            replicas = pool_states[idx].T
+        else:
+            idx = rng.choice(pool_states.shape[0], size=args.n, replace=True)
+            replicas = pool_states[idx].T
 
     # replicas currently shaped (6, N)
     # Optionally expand each sampled state with local tangent-plane jitter to create thickness
@@ -313,6 +799,15 @@ def main() -> int:
                 "top_k_nbody": args.top_k_nbody,
                 "n_workers": args.n_workers,
                 "log_every": args.log_every,
+                "mix_posterior_frac": args.mix_posterior_frac,
+                "mix_oversample": args.mix_oversample,
+                "mix_likelihood": args.mix_likelihood,
+                "range_jitter_n": args.range_jitter_n,
+                "range_jitter_rho_min_au": args.range_jitter_rho_min_au,
+                "range_jitter_rho_max_au": args.range_jitter_rho_max_au,
+                "range_jitter_rhodot_max_kms": args.range_jitter_rhodot_max_kms,
+                "range_jitter_reweight": args.range_jitter_reweight,
+                "range_jitter_likelihood": args.range_jitter_likelihood,
             },
             fh,
             indent=2,

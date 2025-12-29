@@ -11,15 +11,15 @@ from astropy.coordinates import (
     BarycentricTrueEcliptic,
     CartesianDifferential,
     CartesianRepresentation,
-    EarthLocation,
+    FK5,
     GCRS,
     ICRS,
     SkyCoord,
     SphericalRepresentation,
+    TETE,
     get_body_barycentric_posvel,
     solar_system_ephemeris,
 )
-import erfa
 import astropy.constants as const
 from astropy.time import Time, TimeDelta
 from concurrent.futures import ProcessPoolExecutor
@@ -28,6 +28,14 @@ import os
 from astroquery.jplhorizons import Horizons
 
 from .sites import get_site_location, get_site_ephemeris
+
+try:
+    import numba as nb
+
+    _HAS_NUMBA = True
+except Exception:  # pragma: no cover - optional dependency
+    nb = None
+    _HAS_NUMBA = False
 
 __all__ = [
     "propagate_state",
@@ -105,6 +113,183 @@ def _stumpff_C3(z: float) -> float:
         raise ValueError(f"stumpff_C3 overflow for z={z}") from exc
 
 
+def _propagate_state_kepler_single(
+    r0: np.ndarray,
+    v0: np.ndarray,
+    dt: float,
+    mu_km3_s2: float,
+    max_iter: int,
+    tol: float,
+) -> np.ndarray:
+    """Kepler propagation for a single dt using the universal variable formulation."""
+    r0_norm = float(np.linalg.norm(r0))
+    v0_sq = float(np.dot(v0, v0))
+    vr0 = float(np.dot(r0, v0)) / (r0_norm + 1e-30)
+    alpha = 2.0 / (r0_norm + 1e-30) - v0_sq / mu_km3_s2
+    sqrt_mu = np.sqrt(mu_km3_s2)
+
+    # initial guess for chi
+    if alpha > 1e-12:
+        chi = sqrt_mu * dt * alpha
+    else:
+        chi = np.sign(dt) * sqrt_mu * abs(dt) * 1e-3
+
+    success = False
+    for _ in range(max_iter):
+        z = alpha * chi * chi
+        if not np.isfinite(z) or abs(z) > 1.0e6:
+            raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+        C2 = _stumpff_C2(z)
+        C3 = _stumpff_C3(z)
+        F = (
+            (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+            + (1.0 - alpha * r0_norm) * chi**3 * C3
+            + r0_norm * chi
+            - sqrt_mu * dt
+        )
+        dF = (
+            (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+            + (1.0 - alpha * r0_norm) * chi * chi * C2
+            + r0_norm
+        )
+        step = F / (dF + 1e-30)
+        if not np.isfinite(step):
+            raise ValueError(f"Kepler update became non-finite for dt={dt}")
+        chi -= step
+        if not np.isfinite(chi) or abs(chi) > 1.0e8:
+            raise ValueError(f"Kepler universal-anomaly chi unstable (chi={chi:.3e}) for dt={dt}")
+        if abs(step) < tol:
+            success = True
+            break
+
+    if not success:
+        raise ValueError(f"Kepler solver did not converge for dt={dt}")
+
+    z = alpha * chi * chi
+    C2 = _stumpff_C2(z)
+    C3 = _stumpff_C3(z)
+    if not np.isfinite(C2) or not np.isfinite(C3):
+        raise ValueError(f"Kepler coefficients became non-finite for dt={dt}")
+    f = 1.0 - (chi * chi / (r0_norm + 1e-30)) * C2
+    g = dt - (chi**3 / sqrt_mu) * C3
+    r = f * r0 + g * v0
+    r_norm = float(np.linalg.norm(r))
+    if not np.isfinite(r_norm):
+        raise ValueError(f"Kepler propagation produced non-finite radius for dt={dt}")
+    gdot = 1.0 - (chi * chi / (r_norm + 1e-30)) * C2
+    fdot = (sqrt_mu / ((r_norm + 1e-30) * (r0_norm + 1e-30))) * chi * (z * C3 - 1.0)
+    v = fdot * r0 + gdot * v0
+    return np.hstack([r, v])
+
+
+if _HAS_NUMBA:
+    @nb.njit(cache=True)
+    def _stumpff_C2_numba(z):
+        if z > 1e-8:
+            s = np.sqrt(z)
+            if s > 1e6:
+                return np.nan
+            return (1.0 - np.cos(s)) / z
+        if z < -1e-8:
+            s = np.sqrt(-z)
+            if s > 1e6:
+                return np.nan
+            return (np.cosh(s) - 1.0) / (-z)
+        return 0.5
+
+    @nb.njit(cache=True)
+    def _stumpff_C3_numba(z):
+        if z > 1e-8:
+            s = np.sqrt(z)
+            if s > 1e6:
+                return np.nan
+            return (s - np.sin(s)) / (s * s * s)
+        if z < -1e-8:
+            s = np.sqrt(-z)
+            if s > 1e6:
+                return np.nan
+            return (np.sinh(s) - s) / (s * s * s)
+        return 1.0 / 6.0
+
+    @nb.njit(cache=True)
+    def _propagate_state_kepler_batch_numba(r0, v0, dt_arr, mu_km3_s2, max_iter, tol):
+        n = dt_arr.shape[0]
+        out = np.empty((n, 6), dtype=np.float64)
+        ok = np.ones(n, dtype=np.bool_)
+
+        r0_norm = np.sqrt(np.dot(r0, r0))
+        v0_sq = np.dot(v0, v0)
+        vr0 = np.dot(r0, v0) / (r0_norm + 1e-30)
+        alpha = 2.0 / (r0_norm + 1e-30) - v0_sq / mu_km3_s2
+        sqrt_mu = np.sqrt(mu_km3_s2)
+
+        for i in range(n):
+            dt = dt_arr[i]
+            if abs(dt) < 1e-9:
+                out[i, :3] = r0
+                out[i, 3:] = v0
+                continue
+            if alpha > 1e-12:
+                chi = sqrt_mu * dt * alpha
+            else:
+                chi = np.sign(dt) * sqrt_mu * abs(dt) * 1e-3
+            success = False
+            for _ in range(max_iter):
+                z = alpha * chi * chi
+                if not np.isfinite(z) or abs(z) > 1.0e6:
+                    ok[i] = False
+                    break
+                C2 = _stumpff_C2_numba(z)
+                C3 = _stumpff_C3_numba(z)
+                if not np.isfinite(C2) or not np.isfinite(C3):
+                    ok[i] = False
+                    break
+                F = (
+                    (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+                    + (1.0 - alpha * r0_norm) * chi**3 * C3
+                    + r0_norm * chi
+                    - sqrt_mu * dt
+                )
+                dF = (
+                    (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+                    + (1.0 - alpha * r0_norm) * chi * chi * C2
+                    + r0_norm
+                )
+                step = F / (dF + 1e-30)
+                if not np.isfinite(step):
+                    ok[i] = False
+                    break
+                chi -= step
+                if not np.isfinite(chi) or abs(chi) > 1.0e8:
+                    ok[i] = False
+                    break
+                if abs(step) < tol:
+                    success = True
+                    break
+            if not success:
+                ok[i] = False
+                continue
+            z = alpha * chi * chi
+            C2 = _stumpff_C2_numba(z)
+            C3 = _stumpff_C3_numba(z)
+            if not np.isfinite(C2) or not np.isfinite(C3):
+                ok[i] = False
+                continue
+            f = 1.0 - (chi * chi / (r0_norm + 1e-30)) * C2
+            g = dt - (chi**3 / sqrt_mu) * C3
+            r = f * r0 + g * v0
+            r_norm = np.sqrt(np.dot(r, r))
+            if not np.isfinite(r_norm):
+                ok[i] = False
+                continue
+            gdot = 1.0 - (chi * chi / (r_norm + 1e-30)) * C2
+            fdot = (sqrt_mu / ((r_norm + 1e-30) * (r0_norm + 1e-30))) * chi * (z * C3 - 1.0)
+            v = fdot * r0 + gdot * v0
+            out[i, :3] = r
+            out[i, 3:] = v
+        return out, ok
+
+
 def propagate_state_kepler(
     state: np.ndarray,
     epoch: Time,
@@ -125,11 +310,23 @@ def propagate_state_kepler(
 
     r0 = np.array(state[:3], dtype=float)
     v0 = np.array(state[3:], dtype=float)
-    r0_norm = float(np.linalg.norm(r0))
-    v0_sq = float(np.dot(v0, v0))
-    vr0 = float(np.dot(r0, v0)) / (r0_norm + 1e-30)
-    alpha = 2.0 / (r0_norm + 1e-30) - v0_sq / mu_km3_s2
-    sqrt_mu = np.sqrt(mu_km3_s2)
+
+    dt_arr = np.array([(t - epoch).to(u.s).value for t in targets], dtype=float)
+
+    if _HAS_NUMBA:
+        out, ok = _propagate_state_kepler_batch_numba(r0, v0, dt_arr, mu_km3_s2, max_iter, tol)
+        if np.all(ok):
+            return out
+        # fallback for failed steps
+        for i in range(len(targets)):
+            if ok[i]:
+                continue
+            dt = float(dt_arr[i])
+            if abs(dt) < 1e-9:
+                out[i] = state
+                continue
+            out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+        return out
 
     out = np.empty((len(targets), 6), dtype=float)
     for i, t in enumerate(targets):
@@ -137,61 +334,7 @@ def propagate_state_kepler(
         if abs(dt) < 1e-9:
             out[i] = state
             continue
-
-        # initial guess for chi
-        if alpha > 1e-12:
-            chi = sqrt_mu * dt * alpha
-        else:
-            chi = np.sign(dt) * sqrt_mu * abs(dt) * 1e-3
-
-        # Newton solve for universal anomaly chi
-        success = False
-        for _ in range(max_iter):
-            z = alpha * chi * chi
-            if not np.isfinite(z) or abs(z) > 1.0e6:
-                raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
-            C2 = _stumpff_C2(z)
-            C3 = _stumpff_C3(z)
-            F = (
-                (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
-                + (1.0 - alpha * r0_norm) * chi**3 * C3
-                + r0_norm * chi
-                - sqrt_mu * dt
-            )
-            dF = (
-                (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
-                + (1.0 - alpha * r0_norm) * chi * chi * C2
-                + r0_norm
-            )
-            step = F / (dF + 1e-30)
-            if not np.isfinite(step):
-                raise ValueError(f"Kepler update became non-finite for dt={dt}")
-            chi -= step
-            if not np.isfinite(chi) or abs(chi) > 1.0e8:
-                raise ValueError(f"Kepler universal-anomaly chi unstable (chi={chi:.3e}) for dt={dt}")
-            if abs(step) < tol:
-                success = True
-                break
-
-        if not success:
-            raise ValueError(f"Kepler solver did not converge for dt={dt}")
-
-        z = alpha * chi * chi
-        C2 = _stumpff_C2(z)
-        C3 = _stumpff_C3(z)
-        if not np.isfinite(C2) or not np.isfinite(C3):
-            raise ValueError(f"Kepler coefficients became non-finite for dt={dt}")
-        f = 1.0 - (chi * chi / (r0_norm + 1e-30)) * C2
-        g = dt - (chi**3 / sqrt_mu) * C3
-        r = f * r0 + g * v0
-        r_norm = float(np.linalg.norm(r))
-        if not np.isfinite(r_norm):
-            raise ValueError(f"Kepler propagation produced non-finite radius for dt={dt}")
-        gdot = 1.0 - (chi * chi / (r_norm + 1e-30)) * C2
-        fdot = (sqrt_mu / ((r_norm + 1e-30) * (r0_norm + 1e-30))) * chi * (z * C3 - 1.0)
-        v = fdot * r0 + gdot * v0
-        out[i, :3] = r
-        out[i, 3:] = v
+        out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
     return out
 
 
@@ -494,7 +637,7 @@ def predict_radec_from_epoch(
     allow_unknown_site: bool = True,
     light_time_iters: int = 2,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute apparent RA/Dec from a heliocentric state at epoch with light-time iteration."""
+    """Compute astrometric topocentric RA/Dec (ICRS) from a heliocentric state with light-time."""
     if not obs:
         return np.empty(0, dtype=float), np.empty(0, dtype=float)
 
@@ -522,9 +665,8 @@ def predict_radec_from_epoch(
         site_pos = obs_pos_km[0]
         site_vel = obs_vel_km_s[0]
 
-        earth_pos, earth_vel = _body_posvel("earth", t_obs_tdb)
+        earth_pos, _ = _body_posvel("earth", t_obs_tdb)
         earth_bary = earth_pos.xyz.to(u.km).value.flatten()
-        earth_bary_vel = earth_vel.xyz.to(u.km / u.s).value.flatten()
 
         t_emit = t_obs_tdb
         obj_bary = None
@@ -550,55 +692,11 @@ def predict_radec_from_epoch(
         if obj_bary is None:
             obj_bary = state[:3] + earth_bary * 0.0
 
-        # ERFA observed pipeline (space vs terrestrial).
-        unit_vec = obj_bary / np.linalg.norm(obj_bary)
-        ra_icrs, dec_icrs = erfa.c2s(unit_vec)
-        is_space = False
-        if ob.site:
-            if get_site_location(ob.site) is None and get_site_ephemeris(ob.site) is not None:
-                is_space = True
-        if is_space:
-            coord = SkyCoord(
-                x=obj_bary[0] * u.km,
-                y=obj_bary[1] * u.km,
-                z=obj_bary[2] * u.km,
-                representation_type="cartesian",
-                frame=ICRS(),
-                obstime=t_emit,
-            )
-            obs_vel = site_vel * (u.km / u.s)
-            gcrs = coord.transform_to(
-                GCRS(
-                    obstime=t_obs,
-                    obsgeoloc=site_pos * u.km,
-                    obsgeovel=obs_vel,
-                )
-            )
-            ra_vals[idx] = gcrs.ra.deg
-            dec_vals[idx] = gcrs.dec.deg
-        else:
-            obs_loc = EarthLocation.from_geocentric(
-                site_pos[0] * u.km, site_pos[1] * u.km, site_pos[2] * u.km
-            )
-            dut1 = float(getattr(t_obs, "delta_ut1_utc", 0.0) or 0.0)
-            astrom, _ = erfa.apco13(
-                t_obs.utc.jd1,
-                t_obs.utc.jd2,
-                dut1,
-                obs_loc.lon.to_value(u.rad),
-                obs_loc.lat.to_value(u.rad),
-                obs_loc.height.to_value(u.m),
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.55,
-            )
-            ri, di = erfa.atciqz(ra_icrs, dec_icrs, astrom)
-            _, _, _, dob, rob = erfa.atioq(ri, di, astrom)
-            ra_vals[idx] = np.degrees(rob)
-            dec_vals[idx] = np.degrees(dob)
+        obs_bary = earth_bary + site_pos
+        topovec = obj_bary - obs_bary
+        xy = np.hypot(topovec[0], topovec[1])
+        ra_vals[idx] = (np.degrees(np.arctan2(topovec[1], topovec[0])) + 360.0) % 360.0
+        dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
 
     return ra_vals, dec_vals
 
@@ -615,6 +713,7 @@ def _spacecraft_barycentric_state(
     ephemeris_id_type: str | None,
     ephemeris_location: str,
     jd_seconds: int,
+    ephemeris_frame: str | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     t = Time(jd_seconds / 86400.0, format="jd")
     id_type = ephemeris_id_type
@@ -626,6 +725,7 @@ def _spacecraft_barycentric_state(
         location=ephemeris_location,
         epochs=t.jd,
     )
+    # Use equatorial refplane to align with Horizons ephemerides.
     vec = obj.vectors(refplane="earth")
     x = float(vec["x"][0])
     y = float(vec["y"][0])
@@ -635,7 +735,18 @@ def _spacecraft_barycentric_state(
     vz = float(vec["vz"][0])
     rep = CartesianRepresentation(x * u.au, y * u.au, z * u.au)
     diff = CartesianDifferential(vx * u.au / u.day, vy * u.au / u.day, vz * u.au / u.day)
-    coord = SkyCoord(rep.with_differentials(diff), frame=ICRS())
+    frame_key = (ephemeris_frame or "icrs").strip().lower()
+    if frame_key in {"tete", "tod", "earth"}:
+        coord = SkyCoord(rep.with_differentials(diff), frame=TETE(obstime=t))
+        coord = coord.transform_to(ICRS())
+    elif frame_key in {"fk5", "mean"}:
+        coord = SkyCoord(rep.with_differentials(diff), frame=FK5(equinox=t))
+        coord = coord.transform_to(ICRS())
+    elif frame_key == "gcrs":
+        coord = SkyCoord(rep.with_differentials(diff), frame=GCRS(obstime=t))
+        coord = coord.transform_to(ICRS())
+    else:
+        coord = SkyCoord(rep.with_differentials(diff), frame=ICRS())
     pos = coord.cartesian.xyz.to(u.km).value
     vel = coord.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
     return pos, vel
@@ -685,9 +796,14 @@ def _site_states(
                 ephemeris_id = str(config.get("ephemeris_id"))
                 ephemeris_id_type = config.get("ephemeris_id_type")
                 ephemeris_location = str(config.get("ephemeris_location", "500@399"))
+                ephemeris_frame = config.get("ephemeris_frame") or "icrs"
                 jd_seconds = int(round(float(time.jd) * 86400.0))
                 pos_bary, vel_bary = _spacecraft_barycentric_state(
-                    ephemeris_id, ephemeris_id_type, ephemeris_location, jd_seconds
+                    ephemeris_id,
+                    ephemeris_id_type,
+                    ephemeris_location,
+                    jd_seconds,
+                    ephemeris_frame,
                 )
                 if ephemeris_location.lower() in {"@ssb", "500@0", "@sun"}:
                     if ephemeris_location.lower() in {"@sun", "500@0"}:
@@ -745,7 +861,7 @@ def predict_radec_batch(
     light_time_mode: str = "auto",
     light_time_iters: int = 2,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Vectorized apparent RA/Dec computation for many heliocentric states/times."""
+    """Vectorized astrometric topocentric RA/Dec (ICRS) for many heliocentric states/times."""
     if len(epochs) == 0:
         return np.empty(0, dtype=float), np.empty(0, dtype=float)
 
@@ -824,58 +940,10 @@ def predict_radec_batch(
             dt = rho / c_km_s
             obj_bary_lt = obj_bary - obj_bary_vel * dt[:, None]
 
-    # Vectorized ERFA observed pipeline for apparent RA/Dec
-    ra_out = np.empty(len(epochs), dtype=float)
-    dec_out = np.empty(len(epochs), dtype=float)
-    for i, (t_obs, site_pos, site_vel) in enumerate(zip(time_obs, obs_pos_km, obs_vel_km_s)):
-        unit_vec = obj_bary_lt[i] / np.linalg.norm(obj_bary_lt[i])
-        ra_icrs, dec_icrs = erfa.c2s(unit_vec)
-        is_space = False
-        if site_codes is not None and site_codes[i]:
-            if get_site_location(site_codes[i]) is None and get_site_ephemeris(site_codes[i]) is not None:
-                is_space = True
-        if is_space:
-            coord = SkyCoord(
-                x=obj_bary_lt[i, 0] * u.km,
-                y=obj_bary_lt[i, 1] * u.km,
-                z=obj_bary_lt[i, 2] * u.km,
-                representation_type="cartesian",
-                frame=ICRS(),
-                obstime=time_tdb[i],
-            )
-            obs_vel = site_vel * (u.km / u.s)
-            gcrs = coord.transform_to(
-                GCRS(
-                    obstime=t_obs,
-                    obsgeoloc=site_pos * u.km,
-                    obsgeovel=obs_vel,
-                )
-            )
-            ra_out[i] = gcrs.ra.deg
-            dec_out[i] = gcrs.dec.deg
-        else:
-            obs_loc = EarthLocation.from_geocentric(
-                site_pos[0] * u.km, site_pos[1] * u.km, site_pos[2] * u.km
-            )
-            dut1 = float(getattr(t_obs, "delta_ut1_utc", 0.0) or 0.0)
-            astrom, _ = erfa.apco13(
-                t_obs.utc.jd1,
-                t_obs.utc.jd2,
-                dut1,
-                obs_loc.lon.to_value(u.rad),
-                obs_loc.lat.to_value(u.rad),
-                obs_loc.height.to_value(u.m),
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.55,
-            )
-            ri, di = erfa.atciqz(ra_icrs, dec_icrs, astrom)
-            _, _, _, dob, rob = erfa.atioq(ri, di, astrom)
-            ra_out[i] = np.degrees(rob)
-            dec_out[i] = np.degrees(dob)
+    topovec = obj_bary_lt - obs_bary
+    xy = np.hypot(topovec[:, 0], topovec[:, 1])
+    ra_out = (np.degrees(np.arctan2(topovec[:, 1], topovec[:, 0])) + 360.0) % 360.0
+    dec_out = np.degrees(np.arctan2(topovec[:, 2], xy))
     return ra_out, dec_out
 
 

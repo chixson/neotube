@@ -14,12 +14,20 @@ import requests
 from astropy import units as u
 from astropy.constants import R_earth
 from astropy.coordinates import EarthLocation
+from astropy.time import Time
+from astroquery.jplhorizons import Horizons
 
 OBS_CODES_URL = "https://minorplanetcenter.net/iau/lists/ObsCodes.html"
 CACHE_PATH = Path.home() / ".cache" / "neotube" / "observatories.csv"
 OVERRIDES_PATH = Path(__file__).resolve().parents[2] / "data" / "site_overrides.json"
 _OBS_CACHE: Mapping[str, "ObservatoryEntry"] | None = None
 EARTH_RADIUS_KM = float(R_earth.to(u.km).value)
+_SPACECRAFT_ALIAS = {
+    "WISE": "-163",
+    "NEOWISE": "-163",
+    "NEO-WISE": "-163",
+    "WISE/NEOWISE": "-163",
+}
 
 
 @dataclass(frozen=True)
@@ -219,6 +227,32 @@ def _apply_site_overrides(entries: Mapping[str, ObservatoryEntry]) -> Mapping[st
     return updated
 
 
+def _normalize_spacecraft_name(description: str | None) -> list[str]:
+    if not description:
+        return []
+    text = description.strip()
+    # Keep full description and a few simplified tokens.
+    tokens = [text]
+    for part in re.split(r"[(),;/]", text):
+        part = part.strip()
+        if part:
+            tokens.append(part)
+    # Uppercased aliases for lookup.
+    tokens.extend([t.upper() for t in tokens])
+    return list(dict.fromkeys(tokens))
+
+
+def _resolve_horizons_id(candidate: str) -> str | None:
+    """Return candidate if Horizons accepts it as an id at @ssb, else None."""
+    try:
+        t = Time.now()
+        obj = Horizons(id=candidate, location="@ssb", epochs=t.jd)
+        _ = obj.vectors()
+    except Exception:
+        return None
+    return candidate
+
+
 def _write_cache(entries: Iterable[ObservatoryEntry]) -> None:
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CACHE_PATH.open("w", newline="") as fh:
@@ -312,7 +346,29 @@ def get_site_ephemeris(code: str | None) -> dict | None:
         return None
     catalog = load_observatories()
     entry = catalog.get(key)
-    if entry is None or not entry.ephemeris_id:
+    if entry is None:
+        return None
+    if not entry.ephemeris_id:
+        # Best-effort automatic lookup for spacecraft sites based on description.
+        if classify_site(key, entry) == SiteKind.SPACECRAFT:
+            candidates = _normalize_spacecraft_name(entry.description)
+            for cand in candidates:
+                alias = _SPACECRAFT_ALIAS.get(cand.upper())
+                if alias:
+                    return {
+                        "ephemeris_id": alias,
+                        "ephemeris_id_type": "id",
+                        "ephemeris_location": "@ssb",
+                        "ephemeris_frame": "icrs",
+                    }
+                resolved = _resolve_horizons_id(cand)
+                if resolved:
+                    return {
+                        "ephemeris_id": resolved,
+                        "ephemeris_id_type": "id",
+                        "ephemeris_location": "@ssb",
+                        "ephemeris_frame": "icrs",
+                    }
         return None
     return {
         "ephemeris_id": entry.ephemeris_id,

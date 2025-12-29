@@ -85,9 +85,11 @@ pred_ra_jpl, pred_dec_jpl = _predict_batch(
 
 # JPL per-observation vectors (no propagation) -> our apparent transform
 jpl_states_by_obs = []
+jpl_states_by_obs_fk5 = []
+jpl_states_by_obs_tete = []
 try:
     from astroquery.jplhorizons import Horizons
-    from astropy.coordinates import FK5
+    from astropy.coordinates import FK5, TETE
     epochs = Time([o.time.isot for o in obs]).jd
     vec_obj = Horizons(id="1", location="@sun", epochs=epochs, id_type="smallbody")
     vec = vec_obj.vectors(refplane="earth")
@@ -111,10 +113,16 @@ try:
         pos_fk = coord_fk5_to_icrs.cartesian.xyz.to(u.km).value
         vel_fk = coord_fk5_to_icrs.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
         jpl_states_by_obs_fk5.append(np.hstack([pos_fk, vel_fk]))
+        coord_tete = SkyCoord(rep.with_differentials(diff), frame=TETE(obstime=t_row))
+        coord_tete_to_icrs = coord_tete.transform_to(ICRS())
+        pos_tete = coord_tete_to_icrs.cartesian.xyz.to(u.km).value
+        vel_tete = coord_tete_to_icrs.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
+        jpl_states_by_obs_tete.append(np.hstack([pos_tete, vel_tete]))
 except Exception as exc:
     print("Horizons per-obs vector fetch failed:", exc)
     jpl_states_by_obs = []
     jpl_states_by_obs_fk5 = []
+    jpl_states_by_obs_tete = []
 
 
 def signed_deltas(ra1_deg, dec1_deg, ra2_deg, dec2_deg):
@@ -357,6 +365,79 @@ if dx_hz is not None:
         print("\nJPL per-obs vectors (no LT) vs Horizons apparent (arcsec):")
         print("mean dx,dy,sep:", float(np.mean(dx_none_hz)), float(np.mean(dy_none_hz)), float(np.mean(sep_none_hz)))
         print("median dx,dy,sep:", float(np.median(dx_none_hz)), float(np.median(dy_none_hz)), float(np.median(sep_none_hz)))
+
+        # test: add Earth's barycentric velocity to observer velocity
+        try:
+            from neotube.propagate import _body_posvel, _site_states
+
+            time_obs = Time(epochs_t)
+            time_tdb = time_obs.tdb
+            _, earth_vel = _body_posvel("earth", time_tdb)
+            earth_bary_vel = earth_vel.xyz.to(u.km / u.s).value.T
+            obs_pos_km, obs_vel_km_s = _site_states(
+                time_obs,
+                site_codes,
+                observer_positions_km=None,
+                observer_velocities_km_s=None,
+                allow_unknown_site=True,
+            )
+            obs_vel_plus = obs_vel_km_s + earth_bary_vel
+            ra_plus, dec_plus = predict_radec_batch(
+                states,
+                epochs_t,
+                observer_positions_km=obs_pos_km,
+                observer_velocities_km_s=obs_vel_plus,
+                allow_unknown_site=True,
+                light_time_mode="linear",
+                light_time_iters=2,
+            )
+            dx_plus, dy_plus = signed_deltas(ra_plus, dec_plus, hz_ra, hz_dec)
+            sep_plus = np.sqrt(dx_plus * dx_plus + dy_plus * dy_plus)
+            print("\nJPL per-obs vectors (observer vel += earth bary vel) vs Horizons apparent (arcsec):")
+            print("mean dx,dy,sep:", float(np.mean(dx_plus)), float(np.mean(dy_plus)), float(np.mean(sep_plus)))
+            print("median dx,dy,sep:", float(np.median(dx_plus)), float(np.median(dy_plus)), float(np.median(sep_plus)))
+        except Exception as exc:
+            print("observer-vel-plus-earth test failed:", exc)
+
+    if jpl_states_by_obs_fk5:
+        states_fk5 = np.array(jpl_states_by_obs_fk5, dtype=float)
+        epochs_t = [o.time for o in obs]
+        site_codes = [o.site for o in obs]
+        observer_positions = [o.observer_pos_km for o in obs]
+        ra_fk5, dec_fk5 = predict_radec_batch(
+            states_fk5,
+            epochs_t,
+            site_codes=site_codes,
+            observer_positions_km=observer_positions,
+            allow_unknown_site=True,
+            light_time_mode="linear",
+            light_time_iters=2,
+        )
+        dx_fk5, dy_fk5 = signed_deltas(ra_fk5, dec_fk5, hz_ra, hz_dec)
+        sep_fk5 = np.sqrt(dx_fk5 * dx_fk5 + dy_fk5 * dy_fk5)
+        print("\nJPL per-obs vectors (FK5 eqx-of-date -> ICRS) vs Horizons apparent (arcsec):")
+        print("mean dx,dy,sep:", float(np.mean(dx_fk5)), float(np.mean(dy_fk5)), float(np.mean(sep_fk5)))
+        print("median dx,dy,sep:", float(np.median(dx_fk5)), float(np.median(dy_fk5)), float(np.median(sep_fk5)))
+
+    if jpl_states_by_obs_tete:
+        states_tete = np.array(jpl_states_by_obs_tete, dtype=float)
+        epochs_t = [o.time for o in obs]
+        site_codes = [o.site for o in obs]
+        observer_positions = [o.observer_pos_km for o in obs]
+        ra_tete, dec_tete = predict_radec_batch(
+            states_tete,
+            epochs_t,
+            site_codes=site_codes,
+            observer_positions_km=observer_positions,
+            allow_unknown_site=True,
+            light_time_mode="linear",
+            light_time_iters=2,
+        )
+        dx_tete, dy_tete = signed_deltas(ra_tete, dec_tete, hz_ra, hz_dec)
+        sep_tete = np.sqrt(dx_tete * dx_tete + dy_tete * dy_tete)
+        print("\nJPL per-obs vectors (TETE eqx-of-date -> ICRS) vs Horizons apparent (arcsec):")
+        print("mean dx,dy,sep:", float(np.mean(dx_tete)), float(np.mean(dy_tete)), float(np.mean(sep_tete)))
+        print("median dx,dy,sep:", float(np.median(dx_tete)), float(np.median(dy_tete)), float(np.median(sep_tete)))
 
         # atco13 test using ICRS pv -> apparent with parallax
         try:

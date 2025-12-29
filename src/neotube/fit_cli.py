@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from astropy.time import Time
 
-from .fit import fit_orbit, predict_orbit
+from .fit import _resolve_spacecraft_offset, fit_orbit, predict_orbit
 from .models import Observation
 
 
@@ -37,16 +37,22 @@ def load_observations(path: Path, sigma: float | None) -> list[Observation]:
                             "expected obs_x_km, obs_y_km, obs_z_km."
                         )
                     observer_pos_km = np.array([float(val) for val in raw_vals], dtype=float)
-            observations.append(
-                Observation(
-                    time=obs_time,
-                    ra_deg=float(row["ra_deg"]),
-                    dec_deg=float(row["dec_deg"]),
-                    sigma_arcsec=obs_sigma,
-                    site=row.get("site"),
-                    observer_pos_km=observer_pos_km,
-                )
+            obs = Observation(
+                time=obs_time,
+                ra_deg=float(row["ra_deg"]),
+                dec_deg=float(row["dec_deg"]),
+                sigma_arcsec=obs_sigma,
+                site=row.get("site"),
+                observer_pos_km=observer_pos_km,
             )
+            if obs.observer_pos_km is None and obs.site:
+                try:
+                    sc_offset = _resolve_spacecraft_offset(obs)
+                except Exception:
+                    sc_offset = None
+                if sc_offset is not None:
+                    obs.observer_pos_km = sc_offset
+            observations.append(obs)
     if not observations:
         raise ValueError("No valid observations loaded from CSV.")
     observations.sort(key=lambda ob: ob.time)
