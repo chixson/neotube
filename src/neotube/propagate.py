@@ -79,7 +79,9 @@ class ObsCache:
     times_obs: Time
     times_tdb: Time
     site_pos_km: np.ndarray
+    site_vel_km_s: np.ndarray
     earth_bary_km: np.ndarray
+    earth_bary_vel_km_s: np.ndarray
 
 
 def _prepare_obs_cache(
@@ -95,23 +97,84 @@ def _prepare_obs_cache(
     time_tdb = time_obs.tdb
     site_codes = [o.site for o in obs]
     observer_positions = [o.observer_pos_km for o in obs]
-    site_pos_km, _ = _site_states(
+    site_pos_km, site_vel_km_s = _site_states(
         time_obs,
         site_codes,
         observer_positions_km=observer_positions,
         observer_velocities_km_s=None,
         allow_unknown_site=allow_unknown_site,
     )
-    earth_pos, _ = _body_posvel("earth", time_tdb)
+    earth_pos, earth_vel = _body_posvel("earth", time_tdb)
     earth_bary = earth_pos.xyz.to(u.km).value
+    earth_bary_vel = earth_vel.xyz.to(u.km / u.s).value
     if earth_bary.shape[1] != len(obs):
         earth_bary = earth_bary[:, : len(obs)]
+        earth_bary_vel = earth_bary_vel[:, : len(obs)]
     return ObsCache(
         times_obs=time_obs,
         times_tdb=time_tdb,
         site_pos_km=site_pos_km,
+        site_vel_km_s=site_vel_km_s,
         earth_bary_km=earth_bary.T,
+        earth_bary_vel_km_s=earth_bary_vel.T,
     )
+
+
+def shapiro_delay_sun(
+    obj_pos_bary_km: np.ndarray,
+    obs_pos_bary_km: np.ndarray,
+    sun_pos_bary_km: np.ndarray,
+) -> float:
+    """Compute the Shapiro delay for the Sun (seconds) for a single emitter/observer pair."""
+    c_km_s = 299792.458
+    r_e = float(np.linalg.norm(obj_pos_bary_km - sun_pos_bary_km))
+    r_o = float(np.linalg.norm(obs_pos_bary_km - sun_pos_bary_km))
+    R = float(np.linalg.norm(obj_pos_bary_km - obs_pos_bary_km))
+    denom = max(r_e + r_o - R, 1e-12)
+    arg = (r_e + r_o + R) / denom
+    return float(2.0 * GM_SUN / (c_km_s**3) * np.log(arg))
+
+
+def aberrate_direction_first_order(topovec: np.ndarray, obs_vel_km_s: np.ndarray) -> np.ndarray:
+    """Apply first-order special-relativistic aberration to a topocentric direction."""
+    c_km_s = 299792.458
+    n = topovec / (np.linalg.norm(topovec) + 1e-30)
+    beta = obs_vel_km_s / c_km_s
+    nb_dot = float(np.dot(n, beta))
+    s = n + beta - nb_dot * n
+    return s / (np.linalg.norm(s) + 1e-30)
+
+
+def bennett_refraction(zenith_rad: float) -> float:
+    """Bennett refraction approximation (radians)."""
+    z_deg = np.degrees(zenith_rad)
+    if z_deg >= 89.999:
+        return 0.0
+    r_arcmin = 1.02 / np.tan(np.radians(z_deg + 10.3 / (z_deg + 5.11)))
+    return float(np.radians(r_arcmin / 60.0))
+
+
+def _apply_bennett_refraction(topounit: np.ndarray, site_pos_km: np.ndarray) -> np.ndarray:
+    site_norm = float(np.linalg.norm(site_pos_km))
+    if site_norm <= 0.0:
+        return topounit
+    if site_norm < 5000.0 or site_norm > 7000.0:
+        return topounit
+    z_hat = site_pos_km / site_norm
+    cos_z = float(np.clip(np.dot(topounit, z_hat), -1.0, 1.0))
+    z = float(np.arccos(cos_z))
+    if not np.isfinite(z) or z <= 0.0:
+        return topounit
+    delta = bennett_refraction(z)
+    if delta <= 0.0 or delta >= z:
+        return topounit
+    perp = topounit - cos_z * z_hat
+    perp_norm = float(np.linalg.norm(perp))
+    if perp_norm <= 0.0:
+        return topounit
+    e_perp = perp / perp_norm
+    z_prime = z - delta
+    return e_perp * np.sin(z_prime) + z_hat * np.cos(z_prime)
 
 # Cache for repeated ephemeris lookups (per process).
 _BULK_EPHEM_CACHE: dict[tuple, np.ndarray] = {}
@@ -686,6 +749,8 @@ def predict_radec_from_epoch(
     *,
     allow_unknown_site: bool = True,
     light_time_iters: int = 2,
+    full_physics: bool = False,
+    include_refraction: bool = False,
     obs_cache: ObsCache | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute astrometric topocentric RA/Dec (ICRS) from a heliocentric state with light-time."""
@@ -707,10 +772,15 @@ def predict_radec_from_epoch(
     for idx, ob in enumerate(obs):
         t_obs_tdb = obs_cache.times_tdb[idx]
         site_pos = obs_cache.site_pos_km[idx]
+        site_vel = obs_cache.site_vel_km_s[idx]
         earth_bary = obs_cache.earth_bary_km[idx]
+        earth_bary_vel = obs_cache.earth_bary_vel_km_s[idx]
+        obs_bary = earth_bary + site_pos
+        obs_bary_vel = earth_bary_vel + site_vel
 
         t_emit = t_obs_tdb
         obj_bary = None
+        sun_bary = None
         for _ in range(max(1, light_time_iters)):
             if use_kepler:
                 try:
@@ -726,18 +796,33 @@ def predict_radec_from_epoch(
             sun_pos, _ = _body_posvel("sun", t_emit)
             sun_bary = sun_pos.xyz.to(u.km).value.flatten()
             obj_bary = emit_state[:3] + sun_bary
-            obs_bary = earth_bary + site_pos
             rho = float(np.linalg.norm(obj_bary - obs_bary))
-            t_emit = t_obs_tdb - TimeDelta(rho / c_km_s, format="sec")
+            dt_geom = rho / c_km_s
+            if full_physics:
+                dt_shapiro = shapiro_delay_sun(obj_bary, obs_bary, sun_bary)
+            else:
+                dt_shapiro = 0.0
+            t_emit = t_obs_tdb - TimeDelta(dt_geom + dt_shapiro, format="sec")
 
         if obj_bary is None:
             obj_bary = state[:3] + earth_bary * 0.0
 
-        obs_bary = earth_bary + site_pos
         topovec = obj_bary - obs_bary
-        xy = np.hypot(topovec[0], topovec[1])
-        ra_vals[idx] = (np.degrees(np.arctan2(topovec[1], topovec[0])) + 360.0) % 360.0
-        dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
+        if full_physics:
+            topounit = aberrate_direction_first_order(topovec, obs_bary_vel)
+            if include_refraction:
+                topounit = _apply_bennett_refraction(topounit, site_pos)
+            xy = np.hypot(topounit[0], topounit[1])
+            ra_vals[idx] = (
+                np.degrees(np.arctan2(topounit[1], topounit[0])) + 360.0
+            ) % 360.0
+            dec_vals[idx] = np.degrees(np.arctan2(topounit[2], xy))
+        else:
+            xy = np.hypot(topovec[0], topovec[1])
+            ra_vals[idx] = (
+                np.degrees(np.arctan2(topovec[1], topovec[0])) + 360.0
+            ) % 360.0
+            dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
 
     return ra_vals, dec_vals
 
@@ -752,6 +837,8 @@ def predict_radec_with_geometry(
     *,
     allow_unknown_site: bool = True,
     light_time_iters: int = 2,
+    full_physics: bool = False,
+    include_refraction: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute RA/Dec plus heliocentric r, topocentric delta, and phase angle (rad)."""
     if not obs:
@@ -783,9 +870,11 @@ def predict_radec_with_geometry(
             allow_unknown_site=allow_unknown_site,
         )
         site_pos = obs_pos_km[0]
+        site_vel = obs_vel_km_s[0]
 
-        earth_pos, _ = _body_posvel("earth", t_obs_tdb)
+        earth_pos, earth_vel = _body_posvel("earth", t_obs_tdb)
         earth_bary = earth_pos.xyz.to(u.km).value.flatten()
+        earth_bary_vel = earth_vel.xyz.to(u.km / u.s).value.flatten()
 
         t_emit = t_obs_tdb
         obj_bary = None
@@ -807,7 +896,12 @@ def predict_radec_with_geometry(
             obj_bary = emit_state[:3] + sun_bary
             obs_bary = earth_bary + site_pos
             rho = float(np.linalg.norm(obj_bary - obs_bary))
-            t_emit = t_obs_tdb - TimeDelta(rho / c_km_s, format="sec")
+            dt_geom = rho / c_km_s
+            if full_physics:
+                dt_shapiro = shapiro_delay_sun(obj_bary, obs_bary, sun_bary)
+            else:
+                dt_shapiro = 0.0
+            t_emit = t_obs_tdb - TimeDelta(dt_geom + dt_shapiro, format="sec")
 
         if obj_bary is None or sun_bary is None:
             obj_bary = state[:3] + earth_bary * 0.0
@@ -815,10 +909,23 @@ def predict_radec_with_geometry(
             sun_bary = sun_pos.xyz.to(u.km).value.flatten()
 
         obs_bary = earth_bary + site_pos
+        obs_bary_vel = earth_bary_vel + site_vel
         topovec = obj_bary - obs_bary
-        xy = np.hypot(topovec[0], topovec[1])
-        ra_vals[idx] = (np.degrees(np.arctan2(topovec[1], topovec[0])) + 360.0) % 360.0
-        dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
+        if full_physics:
+            topounit = aberrate_direction_first_order(topovec, obs_bary_vel)
+            if include_refraction:
+                topounit = _apply_bennett_refraction(topounit, site_pos)
+            xy = np.hypot(topounit[0], topounit[1])
+            ra_vals[idx] = (
+                np.degrees(np.arctan2(topounit[1], topounit[0])) + 360.0
+            ) % 360.0
+            dec_vals[idx] = np.degrees(np.arctan2(topounit[2], xy))
+        else:
+            xy = np.hypot(topovec[0], topovec[1])
+            ra_vals[idx] = (
+                np.degrees(np.arctan2(topovec[1], topovec[0])) + 360.0
+            ) % 360.0
+            dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
 
         r_vec = obj_bary - sun_bary
         r_norm = float(np.linalg.norm(r_vec))
@@ -993,6 +1100,8 @@ def predict_radec_batch(
     allow_unknown_site: bool = True,
     light_time_mode: str = "auto",
     light_time_iters: int = 2,
+    full_physics: bool = False,
+    include_refraction: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Vectorized astrometric topocentric RA/Dec (ICRS) for many heliocentric states/times."""
     if len(epochs) == 0:
@@ -1072,6 +1181,40 @@ def predict_radec_batch(
             rho = np.linalg.norm(vec, axis=1)
             dt = rho / c_km_s
             obj_bary_lt = obj_bary - obj_bary_vel * dt[:, None]
+
+    if full_physics:
+        ra_vals = np.empty(len(epochs), dtype=float)
+        dec_vals = np.empty(len(epochs), dtype=float)
+        for idx in range(len(epochs)):
+            t_obs_tdb = time_tdb[idx]
+            obs_b = obs_bary[idx]
+            obs_b_vel = obs_bary_vel[idx]
+            t_emit = t_obs_tdb
+            obj_bary_exact = None
+            for _ in range(max(1, light_time_iters)):
+                try:
+                    emit_state = propagate_state_kepler(states_arr[idx], time_tdb[idx], (t_emit,))[
+                        0
+                    ]
+                except Exception:
+                    emit_state = states_arr[idx]
+                sun_pos_emit, _ = _body_posvel("sun", t_emit)
+                sun_bary_emit = sun_pos_emit.xyz.to(u.km).value.flatten()
+                obj_bary_exact = emit_state[:3] + sun_bary_emit
+                rho = float(np.linalg.norm(obj_bary_exact - obs_b))
+                dt_geom = rho / c_km_s
+                dt_sh = shapiro_delay_sun(obj_bary_exact, obs_b, sun_bary_emit)
+                t_emit = t_obs_tdb - TimeDelta(dt_geom + dt_sh, format="sec")
+            if obj_bary_exact is None:
+                obj_bary_exact = obj_bary_lt[idx]
+            topovec = obj_bary_exact - obs_b
+            topounit = aberrate_direction_first_order(topovec, obs_b_vel)
+            if include_refraction:
+                topounit = _apply_bennett_refraction(topounit, obs_pos_km[idx])
+            xy = np.hypot(topounit[0], topounit[1])
+            ra_vals[idx] = (np.degrees(np.arctan2(topounit[1], topounit[0])) + 360.0) % 360.0
+            dec_vals[idx] = np.degrees(np.arctan2(topounit[2], xy))
+        return ra_vals, dec_vals
 
     topovec = obj_bary_lt - obs_bary
     xy = np.hypot(topovec[:, 0], topovec[:, 1])
