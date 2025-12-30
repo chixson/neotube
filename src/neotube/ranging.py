@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 import time
 from concurrent.futures import ProcessPoolExecutor
+import os
 from dataclasses import dataclass
 from multiprocessing import Pool
 from typing import Any, Iterable, Sequence
@@ -523,7 +524,7 @@ def add_local_spread_parallel(
     site_kappas: dict[str, float] | None = None,
     vel_scale_factor: float = 1.0,
     df: float = 4.0,
-    n_workers: int = 8,
+    n_workers: int | None = None,
     chunk_size: int | None = None,
     seed: int | None = None,
 ) -> np.ndarray:
@@ -542,6 +543,8 @@ def add_local_spread_parallel(
     if n_states == 0:
         return np.empty((0, 6), dtype=float)
 
+    if n_workers is None:
+        n_workers = max(1, min(32, os.cpu_count() or 1))
     if chunk_size is None:
         chunk_size = min(max(128, n_states // (max(1, n_workers) * 4 + 1)), 4096)
 

@@ -4,6 +4,7 @@ import copy
 import json
 import warnings
 from concurrent.futures import ProcessPoolExecutor
+import os
 import multiprocessing as mp
 from functools import lru_cache
 from pathlib import Path
@@ -906,7 +907,7 @@ def residuals_parallel(
     observations: list[Observation],
     perturbers: Sequence[str],
     max_step: float,
-    n_workers: int = 4,
+    n_workers: int | None = None,
     chunk_size: int | None = None,
     use_kepler: bool = False,
     allow_unknown_site: bool = True,
@@ -915,6 +916,8 @@ def residuals_parallel(
     states = np.asarray(states, dtype=float)
     if states.ndim != 2 or states.shape[1] != 6:
         raise ValueError("states must have shape (K,6)")
+    if n_workers is None:
+        n_workers = max(1, min(32, os.cpu_count() or 1))
     if chunk_size is None:
         chunk_size = max(64, min(4096, max(1, states.shape[0] // (n_workers * 4))))
 
