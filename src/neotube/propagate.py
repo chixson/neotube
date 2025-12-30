@@ -73,6 +73,46 @@ PLANET_GMS = {
     "moon": 4.9048695e3,
 }
 
+
+@dataclass(frozen=True)
+class ObsCache:
+    times_obs: Time
+    times_tdb: Time
+    site_pos_km: np.ndarray
+    earth_bary_km: np.ndarray
+
+
+def _prepare_obs_cache(
+    obs: Sequence["Observation"], *, allow_unknown_site: bool = True
+) -> ObsCache:
+    from .models import Observation  # local import to avoid cycles
+
+    if not obs:
+        raise ValueError("obs must be non-empty")
+    if not isinstance(obs[0], Observation):
+        raise ValueError("obs must be a sequence of Observation objects")
+    time_obs = Time([o.time for o in obs])
+    time_tdb = time_obs.tdb
+    site_codes = [o.site for o in obs]
+    observer_positions = [o.observer_pos_km for o in obs]
+    site_pos_km, _ = _site_states(
+        time_obs,
+        site_codes,
+        observer_positions_km=observer_positions,
+        observer_velocities_km_s=None,
+        allow_unknown_site=allow_unknown_site,
+    )
+    earth_pos, _ = _body_posvel("earth", time_tdb)
+    earth_bary = earth_pos.xyz.to(u.km).value
+    if earth_bary.shape[1] != len(obs):
+        earth_bary = earth_bary[:, : len(obs)]
+    return ObsCache(
+        times_obs=time_obs,
+        times_tdb=time_tdb,
+        site_pos_km=site_pos_km,
+        earth_bary_km=earth_bary.T,
+    )
+
 # Cache for repeated ephemeris lookups (per process).
 _BULK_EPHEM_CACHE: dict[tuple, np.ndarray] = {}
 
@@ -646,6 +686,7 @@ def predict_radec_from_epoch(
     *,
     allow_unknown_site: bool = True,
     light_time_iters: int = 2,
+    obs_cache: ObsCache | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute astrometric topocentric RA/Dec (ICRS) from a heliocentric state with light-time."""
     if not obs:
@@ -660,23 +701,13 @@ def predict_radec_from_epoch(
     dec_vals = np.empty(len(obs), dtype=float)
     c_km_s = 299792.458
 
-    for idx, ob in enumerate(obs):
-        t_obs = ob.time
-        t_obs_tdb = ob.time.tdb
-        site_codes = [ob.site]
-        observer_positions = [ob.observer_pos_km]
-        obs_pos_km, obs_vel_km_s = _site_states(
-            [t_obs],
-            site_codes,
-            observer_positions_km=observer_positions,
-            observer_velocities_km_s=None,
-            allow_unknown_site=allow_unknown_site,
-        )
-        site_pos = obs_pos_km[0]
-        site_vel = obs_vel_km_s[0]
+    if obs_cache is None:
+        obs_cache = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
 
-        earth_pos, _ = _body_posvel("earth", t_obs_tdb)
-        earth_bary = earth_pos.xyz.to(u.km).value.flatten()
+    for idx, ob in enumerate(obs):
+        t_obs_tdb = obs_cache.times_tdb[idx]
+        site_pos = obs_cache.site_pos_km[idx]
+        earth_bary = obs_cache.earth_bary_km[idx]
 
         t_emit = t_obs_tdb
         obj_bary = None

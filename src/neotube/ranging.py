@@ -15,7 +15,7 @@ from astropy.coordinates import SkyCoord, get_body_barycentric_posvel
 from astropy.time import Time
 
 from .fit import _predict_batch, _site_offset, _site_offset_cached
-from .propagate import _site_states, GM_SUN
+from .propagate import _site_states, GM_SUN, _prepare_obs_cache
 from .sites import get_site_ephemeris, get_site_kind
 from .models import Observation
 
@@ -807,9 +807,16 @@ def _state_residuals(
     perturbers: Sequence[str],
     max_step: float,
     use_kepler: bool,
+    obs_cache=None,
 ) -> np.ndarray:
     pred_ra, pred_dec = _predict_batch(
-        state, epoch, list(observations), perturbers, max_step, use_kepler=use_kepler
+        state,
+        epoch,
+        list(observations),
+        perturbers,
+        max_step,
+        use_kepler=use_kepler,
+        obs_cache=obs_cache,
     )
     residuals = []
     for idx, (ra, dec, ob) in enumerate(zip(pred_ra, pred_dec, observations)):
@@ -837,17 +844,24 @@ def build_state_from_ranging_multiobs(
     obs_list = list(observations)
     if not obs_list:
         return build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
+    obs_cache = _prepare_obs_cache(obs_list, allow_unknown_site=True)
     for _ in range(max_iter):
         state = build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
-        res = _state_residuals(state, epoch, obs_list, perturbers, max_step, use_kepler)
+        res = _state_residuals(
+            state, epoch, obs_list, perturbers, max_step, use_kepler, obs_cache=obs_cache
+        )
         if not np.all(np.isfinite(res)):
             break
         eps_rho = max(1e-6 * abs(rho), 1e3)
         eps_rhodot = max(1e-6 * abs(rhodot), 1e-3)
         st_rho = build_state_from_ranging(obs_ref, epoch, attrib, rho + eps_rho, rhodot)
         st_rhodot = build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot + eps_rhodot)
-        res_rho = _state_residuals(st_rho, epoch, obs_list, perturbers, max_step, use_kepler)
-        res_rhodot = _state_residuals(st_rhodot, epoch, obs_list, perturbers, max_step, use_kepler)
+        res_rho = _state_residuals(
+            st_rho, epoch, obs_list, perturbers, max_step, use_kepler, obs_cache=obs_cache
+        )
+        res_rhodot = _state_residuals(
+            st_rhodot, epoch, obs_list, perturbers, max_step, use_kepler, obs_cache=obs_cache
+        )
         if not (np.all(np.isfinite(res_rho)) and np.all(np.isfinite(res_rhodot))):
             break
         j_rho = (res_rho - res) / eps_rho

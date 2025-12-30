@@ -696,6 +696,7 @@ def _predict_batch(
     max_step: float,
     use_kepler: bool,
     allow_unknown_site: bool = True,
+    obs_cache=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     return predict_radec_from_epoch(
         state,
@@ -706,6 +707,7 @@ def _predict_batch(
         use_kepler=use_kepler,
         allow_unknown_site=allow_unknown_site,
         light_time_iters=2,
+        obs_cache=obs_cache,
     )
 
 
