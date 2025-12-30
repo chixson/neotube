@@ -13,6 +13,7 @@ from .fit_adapt import AdaptiveConfig, adaptively_grow_cloud
 from .propagate import (
     _body_posvel,
     _prepare_obs_cache,
+    default_propagation_ladder,
     predict_radec_from_epoch,
     predict_radec_with_contract,
 )
@@ -220,6 +221,9 @@ def sequential_fit_replicas(
     obs3 = obs[:3]
     epoch = obs3[1].time
     rng = np.random.default_rng(seed)
+    ladder = default_propagation_ladder(max_step=max_step)
+    if not use_kepler:
+        ladder = [cfg for cfg in ladder if cfg.model != "kepler"]
 
     attrib = build_attributable_vector_fit(obs3, epoch)
     sigma_arcsec = float(np.median([o.sigma_arcsec for o in obs3]))
@@ -295,6 +299,7 @@ def sequential_fit_replicas(
         obs3,
         epsilon_ast_arcsec=eps_seed,
         allow_unknown_site=allow_unknown_site,
+        configs=ladder,
     )
     loglikes = np.zeros(len(states), dtype=float)
     for idx, ob in enumerate(obs3):
@@ -329,6 +334,7 @@ def sequential_fit_replicas(
             [ob],
             epsilon_ast_arcsec=eps_ob,
             allow_unknown_site=allow_unknown_site,
+            configs=ladder,
         )
         for i in range(len(states)):
             loglikes[i] = _gaussian_loglike(float(ra_pred[i, 0]), float(dec_pred[i, 0]), ob, sigma)
@@ -376,6 +382,7 @@ def sequential_fit_replicas(
                 obs,
                 epsilon_ast_arcsec=eps_final,
                 allow_unknown_site=allow_unknown_site,
+                configs=ladder,
             )
             loglikes_local = np.zeros(len(pool_states), dtype=float)
             for idx, ob in enumerate(obs):
@@ -491,6 +498,7 @@ def sequential_fit_replicas(
             obs,
             epsilon_ast_arcsec=eps_final,
             allow_unknown_site=allow_unknown_site,
+            configs=ladder,
         )
         loglikes = np.zeros(len(states), dtype=float)
         for idx, ob in enumerate(obs):
