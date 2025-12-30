@@ -558,6 +558,18 @@ def main() -> int:
         help="Minimum particles per log-rho decade.",
     )
     parser.add_argument(
+        "--fit-smc-workers",
+        type=int,
+        default=1,
+        help="Worker processes for fit-SMC scoring.",
+    )
+    parser.add_argument(
+        "--fit-smc-chunk-size",
+        type=int,
+        default=512,
+        help="Chunk size for fit-SMC parallel scoring.",
+    )
+    parser.add_argument(
         "--mix-posterior-frac",
         type=float,
         default=0.0,
@@ -908,6 +920,8 @@ def main() -> int:
             auto_psis_khat=float(args.fit_smc_psis_khat),
             auto_logrho_bins=int(args.fit_smc_logrho_bins),
             auto_min_per_decade=int(args.fit_smc_min_per_decade),
+            workers=int(args.fit_smc_workers),
+            chunk_size=int(args.fit_smc_chunk_size),
             seed=int(args.seed),
             admissible_bound=args.admissible_bound,
             admissible_q_min_au=args.admissible_q_min_au,
@@ -1481,6 +1495,8 @@ def main() -> int:
                 "fit_smc_psis_khat": args.fit_smc_psis_khat,
                 "fit_smc_logrho_bins": args.fit_smc_logrho_bins,
                 "fit_smc_min_per_decade": args.fit_smc_min_per_decade,
+                "fit_smc_workers": args.fit_smc_workers,
+                "fit_smc_chunk_size": args.fit_smc_chunk_size,
             },
             fh,
             indent=2,

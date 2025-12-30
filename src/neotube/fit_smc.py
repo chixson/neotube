@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -28,6 +29,29 @@ from .ranging import (
 
 AU_KM = 149597870.7
 DAY_S = 86400.0
+
+_SCORE_CONTEXT: dict[str, object] = {}
+
+
+def _score_states_contract_chunk(states: np.ndarray) -> np.ndarray:
+    ctx = _SCORE_CONTEXT
+    obs_chunk = ctx["obs_chunk"]
+    ra_pred, dec_pred, _, _ = predict_radec_with_contract(
+        states,
+        ctx["epoch"],
+        obs_chunk,
+        epsilon_ast_arcsec=ctx["eps_arcsec"],
+        allow_unknown_site=ctx["allow_unknown_site"],
+        configs=ctx["ladder"],
+    )
+    loglikes_local = np.zeros(len(states), dtype=float)
+    for idx, ob in enumerate(obs_chunk):
+        sigma = _sigma_arcsec(ob, ctx["site_kappas"])
+        for i in range(len(states)):
+            loglikes_local[i] += _gaussian_loglike(
+                float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma
+            )
+    return loglikes_local
 
 
 @dataclass
@@ -207,6 +231,8 @@ def sequential_fit_replicas(
     auto_min_per_decade: int = 20,
     auto_w_min_mode: float = 0.001,
     auto_min_per_mode: int = 20,
+    workers: int | None = None,
+    chunk_size: int = 512,
     site_kappas: dict[str, float] | None = None,
     seed: int | None = None,
     admissible_bound: bool = True,
@@ -224,6 +250,46 @@ def sequential_fit_replicas(
     ladder = default_propagation_ladder(max_step=max_step)
     if not use_kepler:
         ladder = [cfg for cfg in ladder if cfg.model != "kepler"]
+    worker_count = max(1, int(workers or 1))
+    chunk_size = max(64, int(chunk_size))
+
+    def _score_chunks(
+        pool_states: np.ndarray,
+        obs_chunk: Sequence[Observation],
+        eps_arcsec: float,
+    ) -> np.ndarray:
+        _SCORE_CONTEXT["epoch"] = epoch
+        _SCORE_CONTEXT["obs_chunk"] = obs_chunk
+        _SCORE_CONTEXT["eps_arcsec"] = eps_arcsec
+        _SCORE_CONTEXT["allow_unknown_site"] = allow_unknown_site
+        _SCORE_CONTEXT["ladder"] = ladder
+        _SCORE_CONTEXT["site_kappas"] = site_kappas
+        return _score_states_contract_chunk(pool_states)
+
+    def _score_parallel(
+        pool_states: np.ndarray,
+        obs_chunk: Sequence[Observation],
+        eps_arcsec: float,
+    ) -> np.ndarray:
+        _SCORE_CONTEXT["epoch"] = epoch
+        _SCORE_CONTEXT["obs_chunk"] = obs_chunk
+        _SCORE_CONTEXT["eps_arcsec"] = eps_arcsec
+        _SCORE_CONTEXT["allow_unknown_site"] = allow_unknown_site
+        _SCORE_CONTEXT["ladder"] = ladder
+        _SCORE_CONTEXT["site_kappas"] = site_kappas
+        if worker_count <= 1 or len(pool_states) <= chunk_size:
+            return _score_states_contract_chunk(pool_states)
+        tasks = []
+        for start in range(0, len(pool_states), chunk_size):
+            tasks.append(pool_states[start : start + chunk_size])
+        out = np.empty(len(pool_states), dtype=float)
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            for offset, result in zip(
+                range(0, len(pool_states), chunk_size),
+                executor.map(_score_states_contract_chunk, tasks),
+            ):
+                out[offset : offset + len(result)] = result
+        return out
 
     attrib = build_attributable_vector_fit(obs3, epoch)
     sigma_arcsec = float(np.median([o.sigma_arcsec for o in obs3]))
@@ -376,22 +442,7 @@ def sequential_fit_replicas(
                 )
                 for ob in obs
             )
-            ra_pred, dec_pred, _, _ = predict_radec_with_contract(
-                pool_states,
-                epoch,
-                obs,
-                epsilon_ast_arcsec=eps_final,
-                allow_unknown_site=allow_unknown_site,
-                configs=ladder,
-            )
-            loglikes_local = np.zeros(len(pool_states), dtype=float)
-            for idx, ob in enumerate(obs):
-                sigma = _sigma_arcsec(ob, site_kappas)
-                for i in range(len(pool_states)):
-                    loglikes_local[i] += _gaussian_loglike(
-                        float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma
-                    )
-            return loglikes_local
+            return _score_parallel(pool_states, obs, eps_final)
 
         obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
 
