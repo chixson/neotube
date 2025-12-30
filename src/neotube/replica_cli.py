@@ -10,7 +10,13 @@ from pathlib import Path
 import numpy as np
 from astropy.time import Time
 
-from .fit import load_posterior, residuals_parallel, sample_replicas, ResidualsPool
+from .fit import (
+    load_posterior,
+    residuals_batch,
+    residuals_parallel,
+    sample_replicas,
+    ResidualsPool,
+)
 from .propagate import predict_radec_batch
 from .fit_cli import load_observations
 from .sites import get_site_ephemeris
@@ -659,22 +665,47 @@ def main() -> int:
                 return _studentt_loglike_numba(residuals, sigma_vec, nu_like)
             return -0.5 * np.sum((nu_like + 1.0) * np.log1p(t / nu_like), axis=1)
 
-        resid_pool = ResidualsPool(
-            epoch=posterior.epoch,
-            observations=observations,
-            perturbers=tuple(args.perturbers),
-            max_step=args.max_step,
-            n_workers=int(args.n_workers),
-            use_kepler=not args.no_kepler,
-            allow_unknown_site=True,
-        )
+        resid_pool = None
+        try:
+            resid_pool = ResidualsPool(
+                epoch=posterior.epoch,
+                observations=observations,
+                perturbers=tuple(args.perturbers),
+                max_step=args.max_step,
+                n_workers=int(args.n_workers),
+                use_kepler=not args.no_kepler,
+                allow_unknown_site=True,
+            )
+        except PermissionError as exc:
+            print(
+                "[replica_cli] ResidualsPool unavailable (PermissionError); "
+                "falling back to serial residual scoring.",
+                exc,
+            )
+        except OSError as exc:
+            print(
+                "[replica_cli] ResidualsPool unavailable (OSError); "
+                "falling back to serial residual scoring.",
+                exc,
+            )
 
         def score_states(states: np.ndarray) -> np.ndarray:
             # Use smaller chunks by default to keep workers busy.
             auto_chunk = int(args.chunk_size) if args.chunk_size is not None else max(
                 32, int(len(states) // max(1, int(args.n_workers) * 4))
             )
-            res = resid_pool.map(states, chunk_size=auto_chunk)
+            if resid_pool is not None:
+                res = resid_pool.map(states, chunk_size=auto_chunk)
+            else:
+                res = residuals_batch(
+                    states,
+                    posterior.epoch,
+                    observations,
+                    tuple(args.perturbers),
+                    args.max_step,
+                    use_kepler=not args.no_kepler,
+                    allow_unknown_site=True,
+                )
             return _loglikes_from_residuals(res)
 
         def systematic_resample(weights: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -833,7 +864,8 @@ def main() -> int:
             replicas = smc_cartesian().T
         else:
             replicas = smc_attributable().T
-        resid_pool.close()
+        if resid_pool is not None:
+            resid_pool.close()
     else:
         if args.ranged:
             if args.obs is None:
