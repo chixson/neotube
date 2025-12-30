@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import multiprocessing as mp
+import os
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
@@ -215,6 +216,15 @@ def _radec_chunk_worker(payload):
     epochs = [epoch] * chunk_states.shape[0]
     ra, dec = predict_radec_batch(chunk_states, epochs)
     return ra, dec
+
+
+def _default_workers() -> int:
+    count = os.cpu_count() or 1
+    return max(1, min(32, count))
+
+
+def _auto_chunk(total: int, n_workers: int) -> int:
+    return max(32, int(total // max(1, n_workers * 4)))
 
 
 _SMC_CTX: dict[str, object] = {}
@@ -649,7 +659,12 @@ def main() -> int:
         default=2000,
         help="Top-K proposals to rescore with n-body after Kepler prefilter.",
     )
-    parser.add_argument("--n-workers", type=int, default=8, help="Workers for ranged scoring.")
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=_default_workers(),
+        help="Workers for ranged/SMC scoring (default: CPU count capped at 32).",
+    )
     parser.add_argument(
         "--emit-debug",
         action="store_true",
@@ -857,8 +872,8 @@ def main() -> int:
             rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n)) * 149597870.7
             rhodots = rng.uniform(-float(args.rhodot_max_kms), float(args.rhodot_max_kms), size=n)
             n_workers = max(1, int(args.n_workers))
-            build_chunk = int(args.chunk_size) if args.chunk_size is not None else max(
-                32, int(n // max(1, n_workers * 4))
+            build_chunk = int(args.chunk_size) if args.chunk_size is not None else _auto_chunk(
+                n, n_workers
             )
             resid_chunk = build_chunk
             if n_workers > 1:
