@@ -20,6 +20,14 @@ except Exception:
     genpareto = None
     _HAVE_SCIPY = False
 
+try:
+    from sklearn.cluster import KMeans  # type: ignore
+
+    _HAVE_SKLEARN = True
+except Exception:
+    KMeans = None
+    _HAVE_SKLEARN = False
+
 
 @dataclass(frozen=True)
 class AdaptiveConfig:
@@ -97,6 +105,26 @@ def compute_psis_khat(log_weights: np.ndarray) -> float:
             pass
     ratios = np.clip(tail / max(thresh, 1e-300), 1.0, None)
     return float(np.mean(np.log(ratios)))
+
+
+def _cluster_modes(
+    states: np.ndarray,
+    weights: np.ndarray,
+    n_clusters: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not _HAVE_SKLEARN or n_clusters <= 1 or len(states) < n_clusters:
+        return np.zeros(len(states), dtype=int), np.array([float(weights.sum())])
+    X = states.astype(float)
+    mean = np.mean(X, axis=0)
+    std = np.std(X, axis=0)
+    std[std <= 0] = 1.0
+    Xn = (X - mean) / std
+    km = KMeans(n_clusters=n_clusters, n_init="auto", random_state=int(rng.integers(0, 2**31 - 1)))
+    labels = km.fit_predict(Xn)
+    w = weights / max(1e-12, float(np.sum(weights)))
+    mode_weights = np.array([float(np.sum(w[labels == i])) for i in range(n_clusters)], dtype=float)
+    return labels, mode_weights
 
 
 def _rho_prior_logprob(rho_au: np.ndarray, mode: str, power: float) -> np.ndarray:
@@ -183,6 +211,15 @@ def adaptively_grow_cloud(
             n_bins=cfg.logrho_bins,
             weights=weights,
         )
+        mode_labels, mode_weights = _cluster_modes(
+            total_states,
+            weights,
+            n_clusters=min(6, max(2, cfg.logrho_bins)),
+            rng=rng,
+        )
+        mode_counts = np.array(
+            [int(np.sum(mode_labels == i)) for i in range(len(mode_weights))], dtype=int
+        )
         diagnostics["iterations"].append(
             {
                 "n": int(len(total_states)),
@@ -190,6 +227,8 @@ def adaptively_grow_cloud(
                 "psis_khat": float(khat),
                 "logrho_counts": counts.tolist(),
                 "logrho_mass": mass.tolist(),
+                "mode_weights": mode_weights.tolist(),
+                "mode_counts": mode_counts.tolist(),
             }
         )
 
@@ -201,6 +240,8 @@ def adaptively_grow_cloud(
         if np.any(counts < cfg.min_particles_per_decade):
             passes = False
         if np.any((mass > cfg.w_min_mode) & (counts < cfg.min_particles_per_mode)):
+            passes = False
+        if np.any((mode_weights > cfg.w_min_mode) & (mode_counts < cfg.min_particles_per_mode)):
             passes = False
 
         if passes or len(total_states) >= cfg.n_max:
@@ -222,6 +263,10 @@ def adaptively_grow_cloud(
                 weak_bins.append((edges[i], edges[i + 1]))
             elif mass[i] > cfg.w_min_mode and counts[i] < cfg.min_particles_per_mode:
                 weak_bins.append((edges[i], edges[i + 1]))
+        for i in range(len(mode_weights)):
+            if mode_weights[i] > cfg.w_min_mode and mode_counts[i] < cfg.min_particles_per_mode:
+                if len(counts) > 0:
+                    weak_bins.append((edges[0], edges[-1]))
 
         new_states = augment_particles_stratified(
             attrib_mean,
