@@ -793,6 +793,28 @@ def build_state_from_ranging(
     )
     site_offset = site_pos[0]
     site_vel = site_vel[0]
+    return _build_state_from_ranging_cached(
+        s,
+        sdot,
+        earth_helio,
+        earth_vel_helio,
+        site_offset,
+        site_vel,
+        rho_km,
+        rhodot_km_s,
+    )
+
+
+def _build_state_from_ranging_cached(
+    s: np.ndarray,
+    sdot: np.ndarray,
+    earth_helio: np.ndarray,
+    earth_vel_helio: np.ndarray,
+    site_offset: np.ndarray,
+    site_vel: np.ndarray,
+    rho_km: float,
+    rhodot_km_s: float,
+) -> np.ndarray:
     r_geo = site_offset + rho_km * s
     v_geo = site_vel + rhodot_km_s * s + rho_km * sdot
     r_helio = earth_helio + r_geo
@@ -844,9 +866,32 @@ def build_state_from_ranging_multiobs(
     obs_list = list(observations)
     if not obs_list:
         return build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
+    s, sdot = s_and_sdot(attrib)
+    earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
+    sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
+    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
+    earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+    site_pos, site_vel = _site_states(
+        [epoch],
+        [obs_ref.site],
+        observer_positions_km=[obs_ref.observer_pos_km],
+        observer_velocities_km_s=None,
+        allow_unknown_site=True,
+    )
+    site_offset = site_pos[0]
+    site_vel = site_vel[0]
     obs_cache = _prepare_obs_cache(obs_list, allow_unknown_site=True)
     for _ in range(max_iter):
-        state = build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
+        state = _build_state_from_ranging_cached(
+            s,
+            sdot,
+            earth_helio,
+            earth_vel_helio,
+            site_offset,
+            site_vel,
+            rho,
+            rhodot,
+        )
         res = _state_residuals(
             state, epoch, obs_list, perturbers, max_step, use_kepler, obs_cache=obs_cache
         )
@@ -854,8 +899,26 @@ def build_state_from_ranging_multiobs(
             break
         eps_rho = max(1e-6 * abs(rho), 1e3)
         eps_rhodot = max(1e-6 * abs(rhodot), 1e-3)
-        st_rho = build_state_from_ranging(obs_ref, epoch, attrib, rho + eps_rho, rhodot)
-        st_rhodot = build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot + eps_rhodot)
+        st_rho = _build_state_from_ranging_cached(
+            s,
+            sdot,
+            earth_helio,
+            earth_vel_helio,
+            site_offset,
+            site_vel,
+            rho + eps_rho,
+            rhodot,
+        )
+        st_rhodot = _build_state_from_ranging_cached(
+            s,
+            sdot,
+            earth_helio,
+            earth_vel_helio,
+            site_offset,
+            site_vel,
+            rho,
+            rhodot + eps_rhodot,
+        )
         res_rho = _state_residuals(
             st_rho, epoch, obs_list, perturbers, max_step, use_kepler, obs_cache=obs_cache
         )
@@ -878,7 +941,16 @@ def build_state_from_ranging_multiobs(
             rho = 1e-6
         if np.linalg.norm(delta) < 1e-6:
             break
-    return build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
+    return _build_state_from_ranging_cached(
+        s,
+        sdot,
+        earth_helio,
+        earth_vel_helio,
+        site_offset,
+        site_vel,
+        rho,
+        rhodot,
+    )
 
 
 def _ranging_reference_observation(
