@@ -287,14 +287,15 @@ def _estimate_step_limit(
     t_cross = r_norm / max(v_norm, 1e-30)
     t_close = np.inf
     if perturbers:
-        sun_pos, sun_vel = _body_posvel("sun", epoch)
+        ephem = os.environ.get("NEOTUBE_EPHEMERIS", "de432s")
+        sun_pos, sun_vel = _body_posvel_ephem("sun", epoch, ephem)
         sun_bary = sun_pos.xyz.to(u.km).value.flatten()
         sun_vel_kms = sun_vel.xyz.to(u.km / u.s).value.flatten()
         for body in perturbers:
             gm = PLANET_GMS.get(body.lower())
             if gm is None:
                 continue
-            body_pos, body_vel = _body_posvel(body, epoch)
+            body_pos, body_vel = _body_posvel_ephem(body, epoch, ephem)
             body_bary = body_pos.xyz.to(u.km).value.flatten()
             body_vel_kms = body_vel.xyz.to(u.km / u.s).value.flatten()
             body_helio = body_bary - sun_bary
@@ -443,6 +444,11 @@ _BULK_EPHEM_CACHE: dict[tuple, np.ndarray] = {}
 
 def _body_posvel(body: str, times: Time):
     with solar_system_ephemeris.set("de432s"):
+        return get_body_barycentric_posvel(body, times)
+
+
+def _body_posvel_ephem(body: str, times: Time, ephemeris: str):
+    with solar_system_ephemeris.set(ephemeris):
         return get_body_barycentric_posvel(body, times)
 
 
