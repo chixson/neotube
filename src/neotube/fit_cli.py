@@ -37,6 +37,16 @@ def load_observations(path: Path, sigma: float | None) -> list[Observation]:
                             "expected obs_x_km, obs_y_km, obs_z_km."
                         )
                     observer_pos_km = np.array([float(val) for val in raw_vals], dtype=float)
+            mag_val = None
+            sigma_mag = None
+            for key in ("mag", "mag_app", "v_mag", "V", "Vmag", "v"):
+                if row.get(key) not in (None, ""):
+                    mag_val = float(row[key])
+                    break
+            for key in ("sigma_mag", "mag_sigma", "mag_err"):
+                if row.get(key) not in (None, ""):
+                    sigma_mag = float(row[key])
+                    break
             obs = Observation(
                 time=obs_time,
                 ra_deg=float(row["ra_deg"]),
@@ -44,6 +54,8 @@ def load_observations(path: Path, sigma: float | None) -> list[Observation]:
                 sigma_arcsec=obs_sigma,
                 site=row.get("site"),
                 observer_pos_km=observer_pos_km,
+                mag=mag_val,
+                sigma_mag=sigma_mag,
             )
             if obs.observer_pos_km is None and obs.site:
                 try:

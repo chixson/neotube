@@ -44,6 +44,7 @@ __all__ = [
     "predict_radec",
     "predict_radec_batch",
     "predict_radec_from_epoch",
+    "predict_radec_with_geometry",
     "ReplicaCloud",
     "propagate_replicas",
 ]
@@ -699,6 +700,98 @@ def predict_radec_from_epoch(
         dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
 
     return ra_vals, dec_vals
+
+
+def predict_radec_with_geometry(
+    state: np.ndarray,
+    epoch: Time,
+    obs: Sequence["Observation"],
+    perturbers: Sequence[str],
+    max_step: float,
+    use_kepler: bool = True,
+    *,
+    allow_unknown_site: bool = True,
+    light_time_iters: int = 2,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute RA/Dec plus heliocentric r, topocentric delta, and phase angle (rad)."""
+    if not obs:
+        empty = np.empty(0, dtype=float)
+        return empty, empty, empty, empty, empty
+
+    from .models import Observation  # local import to avoid cycles
+
+    if not isinstance(obs[0], Observation):
+        raise ValueError("obs must be a sequence of Observation objects")
+
+    ra_vals = np.empty(len(obs), dtype=float)
+    dec_vals = np.empty(len(obs), dtype=float)
+    r_au = np.empty(len(obs), dtype=float)
+    delta_au = np.empty(len(obs), dtype=float)
+    phase_rad = np.empty(len(obs), dtype=float)
+    c_km_s = 299792.458
+
+    for idx, ob in enumerate(obs):
+        t_obs = ob.time
+        t_obs_tdb = ob.time.tdb
+        site_codes = [ob.site]
+        observer_positions = [ob.observer_pos_km]
+        obs_pos_km, obs_vel_km_s = _site_states(
+            [t_obs],
+            site_codes,
+            observer_positions_km=observer_positions,
+            observer_velocities_km_s=None,
+            allow_unknown_site=allow_unknown_site,
+        )
+        site_pos = obs_pos_km[0]
+
+        earth_pos, _ = _body_posvel("earth", t_obs_tdb)
+        earth_bary = earth_pos.xyz.to(u.km).value.flatten()
+
+        t_emit = t_obs_tdb
+        obj_bary = None
+        sun_bary = None
+        for _ in range(max(1, light_time_iters)):
+            if use_kepler:
+                try:
+                    emit_state = propagate_state_kepler(state, epoch, (t_emit,))[0]
+                except Exception:
+                    emit_state = propagate_state(
+                        state, epoch, (t_emit,), perturbers=perturbers, max_step=max_step
+                    )[0]
+            else:
+                emit_state = propagate_state(
+                    state, epoch, (t_emit,), perturbers=perturbers, max_step=max_step
+                )[0]
+            sun_pos, _ = _body_posvel("sun", t_emit)
+            sun_bary = sun_pos.xyz.to(u.km).value.flatten()
+            obj_bary = emit_state[:3] + sun_bary
+            obs_bary = earth_bary + site_pos
+            rho = float(np.linalg.norm(obj_bary - obs_bary))
+            t_emit = t_obs_tdb - TimeDelta(rho / c_km_s, format="sec")
+
+        if obj_bary is None or sun_bary is None:
+            obj_bary = state[:3] + earth_bary * 0.0
+            sun_pos, _ = _body_posvel("sun", t_obs_tdb)
+            sun_bary = sun_pos.xyz.to(u.km).value.flatten()
+
+        obs_bary = earth_bary + site_pos
+        topovec = obj_bary - obs_bary
+        xy = np.hypot(topovec[0], topovec[1])
+        ra_vals[idx] = (np.degrees(np.arctan2(topovec[1], topovec[0])) + 360.0) % 360.0
+        dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
+
+        r_vec = obj_bary - sun_bary
+        r_norm = float(np.linalg.norm(r_vec))
+        delta_norm = float(np.linalg.norm(topovec))
+        r_au[idx] = r_norm / float(u.au.to(u.km))
+        delta_au[idx] = delta_norm / float(u.au.to(u.km))
+        # phase angle between r_vec and -topovec
+        denom = max(r_norm * delta_norm, 1e-30)
+        cos_phase = np.dot(r_vec, -topovec) / denom
+        cos_phase = float(np.clip(cos_phase, -1.0, 1.0))
+        phase_rad[idx] = float(np.arccos(cos_phase))
+
+    return ra_vals, dec_vals, r_au, delta_au, phase_rad
 
 
 def _site_error_message(site: str | None, time: Time, message: str) -> str:

@@ -3,15 +3,17 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
 from astropy.time import Time
 
-from .fit import load_posterior, residuals_parallel, sample_replicas
+from .fit import load_posterior, residuals_parallel, sample_replicas, ResidualsPool
 from .propagate import predict_radec_batch
 from .fit_cli import load_observations
+from .sites import get_site_ephemeris
 from .ranging import (
     _ranging_reference_observation,
     add_local_spread_parallel,
@@ -22,6 +24,11 @@ from .ranging import (
     score_candidate,
     build_state_from_ranging_multiobs,
 )
+
+try:
+    from astroquery.jplhorizons import Horizons
+except Exception:
+    Horizons = None
 
 try:
     from numba import njit
@@ -45,12 +52,235 @@ if _HAS_NUMBA:
         return out
 
 
+_BUILD_CTX: dict[str, object] = {}
+
+
+def _init_build_ctx(
+    obs_eval,
+    obs_ref,
+    epoch,
+    attrib,
+    perturbers,
+    max_step,
+    use_kepler,
+    max_iter,
+    multiobs: bool,
+) -> None:
+    global _BUILD_CTX
+    _BUILD_CTX = {
+        "obs_eval": obs_eval,
+        "obs_ref": obs_ref,
+        "epoch": epoch,
+        "attrib": attrib,
+        "perturbers": perturbers,
+        "max_step": max_step,
+        "use_kepler": use_kepler,
+        "max_iter": max_iter,
+        "multiobs": multiobs,
+    }
+
+
+def _build_states_chunk(chunk: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    ctx = _BUILD_CTX
+    rhos, rhodots = chunk
+    out = []
+    if ctx["multiobs"]:
+        for r, rd in zip(rhos, rhodots):
+            out.append(
+                build_state_from_ranging_multiobs(
+                    ctx["obs_eval"],
+                    ctx["obs_ref"],
+                    ctx["epoch"],
+                    ctx["attrib"],
+                    float(r),
+                    float(rd),
+                    ctx["perturbers"],
+                    ctx["max_step"],
+                    use_kepler=bool(ctx["use_kepler"]),
+                    max_iter=int(ctx["max_iter"]),
+                )
+            )
+    else:
+        for r, rd in zip(rhos, rhodots):
+            out.append(
+                build_state_from_ranging(
+                    ctx["obs_ref"],
+                    ctx["epoch"],
+                    ctx["attrib"],
+                    float(r),
+                    float(rd),
+                )
+            )
+    return np.array(out, dtype=float)
+
+
+def _build_states_serial(
+    rhos: np.ndarray,
+    rhodots: np.ndarray,
+    obs_eval,
+    obs_ref,
+    epoch,
+    attrib,
+    perturbers,
+    max_step: float,
+    use_kepler: bool,
+    max_iter: int,
+    multiobs: bool,
+) -> np.ndarray:
+    out = []
+    if multiobs:
+        for r, rd in zip(rhos, rhodots):
+            out.append(
+                build_state_from_ranging_multiobs(
+                    obs_eval,
+                    obs_ref,
+                    epoch,
+                    attrib,
+                    float(r),
+                    float(rd),
+                    perturbers,
+                    max_step,
+                    use_kepler=bool(use_kepler),
+                    max_iter=int(max_iter),
+                )
+            )
+    else:
+        for r, rd in zip(rhos, rhodots):
+            out.append(build_state_from_ranging(obs_ref, epoch, attrib, float(r), float(rd)))
+    return np.array(out, dtype=float)
+
+
+def _build_states_parallel(
+    rhos: np.ndarray,
+    rhodots: np.ndarray,
+    obs_eval,
+    obs_ref,
+    epoch,
+    attrib,
+    perturbers,
+    max_step: float,
+    use_kepler: bool,
+    max_iter: int,
+    n_workers: int,
+    chunk_size: int | None,
+    multiobs: bool,
+) -> np.ndarray:
+    if n_workers <= 1 or len(rhos) <= 1:
+        return _build_states_serial(
+            rhos,
+            rhodots,
+            obs_eval,
+            obs_ref,
+            epoch,
+            attrib,
+            perturbers,
+            max_step,
+            use_kepler,
+            max_iter,
+            multiobs,
+        )
+    if chunk_size is None or chunk_size <= 0:
+        chunk_size = max(32, int(len(rhos) // max(1, n_workers * 4)))
+    chunks = []
+    for start in range(0, len(rhos), chunk_size):
+        chunks.append((rhos[start : start + chunk_size], rhodots[start : start + chunk_size]))
+    ctx = mp.get_context("spawn")
+    results = []
+    with ProcessPoolExecutor(
+        max_workers=max(1, int(n_workers)),
+        mp_context=ctx,
+        initializer=_init_build_ctx,
+        initargs=(
+            obs_eval,
+            obs_ref,
+            epoch,
+            attrib,
+            perturbers,
+            max_step,
+            use_kepler,
+            max_iter,
+            multiobs,
+        ),
+    ) as executor:
+        for arr in executor.map(_build_states_chunk, chunks):
+            results.append(arr)
+    if not results:
+        return np.empty((0, 6), dtype=float)
+    return np.vstack(results)
+
+
 def _radec_chunk_worker(payload):
     chunk_states, epoch_str = payload
     epoch = Time(epoch_str, scale="utc")
     epochs = [epoch] * chunk_states.shape[0]
     ra, dec = predict_radec_batch(chunk_states, epochs)
     return ra, dec
+
+
+def _jpl_location_from_site(site: str | None) -> str | None:
+    if not site:
+        return None
+    config = get_site_ephemeris(site)
+    if not config:
+        return None
+    ephem_id = str(config.get("ephemeris_id"))
+    if not ephem_id:
+        return None
+    if "@" in ephem_id:
+        return ephem_id
+    return f"500@{ephem_id}"
+
+
+def _attach_photometry(
+    observations,
+    *,
+    source: str,
+    target: str | None,
+    location: str | None,
+    sigma_mag_default: float,
+    h0_override: float | None,
+    h_sigma: float,
+    g_override: float | None,
+):
+    if source == "none":
+        return None
+    if source == "obs":
+        if h0_override is None:
+            raise SystemExit("--photometry-h is required when using --photometry-source obs")
+        for ob in observations:
+            if ob.sigma_mag is None and ob.mag is not None:
+                ob.sigma_mag = sigma_mag_default
+        return {
+            "h0": float(h0_override),
+            "h_sigma": float(h_sigma),
+            "g": float(g_override) if g_override is not None else 0.15,
+            "sigma_mag_default": float(sigma_mag_default),
+        }
+    if source != "jpl":
+        raise SystemExit(f"Unsupported photometry source: {source}")
+    if Horizons is None:
+        raise SystemExit("astroquery not available; cannot use --photometry-source jpl")
+    if target is None:
+        raise SystemExit("--photometry-target is required when using --photometry-source jpl")
+    epochs = [ob.time.jd for ob in observations]
+    if location is None:
+        location = _jpl_location_from_site(observations[0].site)
+    if location is None:
+        location = "@399"
+    obj = Horizons(id=target, location=location, epochs=epochs, id_type="smallbody")
+    eph = obj.ephemerides()
+    h0 = h0_override if h0_override is not None else float(eph["H"][0])
+    g = g_override if g_override is not None else float(eph["G"][0])
+    for ob, row in zip(observations, eph):
+        ob.mag = float(row["V"])
+        if ob.sigma_mag is None:
+            ob.sigma_mag = sigma_mag_default
+    return {
+        "h0": float(h0),
+        "h_sigma": float(h_sigma),
+        "g": float(g),
+        "sigma_mag_default": float(sigma_mag_default),
+    }
 
 
 def main() -> int:
@@ -229,6 +459,69 @@ def main() -> int:
         help="Max Gauss-Newton iterations for multi-obs ranging construction.",
     )
     parser.add_argument(
+        "--ranging-attrib-mode",
+        choices=("vector", "linear"),
+        default="vector",
+        help="Attributable fit for ranged proposals: vector (fit unit vectors) or linear RA/Dec.",
+    )
+    parser.add_argument(
+        "--photometry-source",
+        choices=("none", "jpl", "obs"),
+        default="none",
+        help="Photometry source: none, obs (mag columns), or jpl (Horizons V mag).",
+    )
+    parser.add_argument(
+        "--photometry-target",
+        default=None,
+        help="Horizons target for photometry (required for --photometry-source jpl).",
+    )
+    parser.add_argument(
+        "--photometry-location",
+        default=None,
+        help="Horizons observer location override (e.g., 500@-163).",
+    )
+    parser.add_argument(
+        "--photometry-sigma-mag",
+        type=float,
+        default=0.3,
+        help="Default mag uncertainty if none provided in obs.",
+    )
+    parser.add_argument(
+        "--photometry-h",
+        type=float,
+        default=None,
+        help="Absolute magnitude H prior mean (defaults to Horizons H if available).",
+    )
+    parser.add_argument(
+        "--photometry-h-sigma",
+        type=float,
+        default=0.3,
+        help="Absolute magnitude H prior sigma.",
+    )
+    parser.add_argument(
+        "--photometry-g",
+        type=float,
+        default=None,
+        help="HG phase parameter G (defaults to Horizons G if available).",
+    )
+    parser.add_argument(
+        "--admissible-bound",
+        action="store_true",
+        help="Reject ranged proposals with unbound heliocentric energy.",
+    )
+    parser.add_argument(
+        "--admissible-q-min-au",
+        type=float,
+        default=None,
+        help="Reject ranged proposals with perihelion below this AU.",
+    )
+    parser.add_argument(
+        "--admissible-q-max-au",
+        type=float,
+        default=None,
+        help="Reject ranged proposals with perihelion above this AU.",
+    )
+    parser.add_argument(
         "--scoring-mode",
         choices=["kepler", "nbody"],
         default="kepler",
@@ -366,18 +659,22 @@ def main() -> int:
                 return _studentt_loglike_numba(residuals, sigma_vec, nu_like)
             return -0.5 * np.sum((nu_like + 1.0) * np.log1p(t / nu_like), axis=1)
 
+        resid_pool = ResidualsPool(
+            epoch=posterior.epoch,
+            observations=observations,
+            perturbers=tuple(args.perturbers),
+            max_step=args.max_step,
+            n_workers=int(args.n_workers),
+            use_kepler=not args.no_kepler,
+            allow_unknown_site=True,
+        )
+
         def score_states(states: np.ndarray) -> np.ndarray:
-            res = residuals_parallel(
-                states,
-                posterior.epoch,
-                observations,
-                tuple(args.perturbers),
-                args.max_step,
-                n_workers=int(args.n_workers),
-                chunk_size=int(args.chunk_size) if args.chunk_size is not None else None,
-                use_kepler=not args.no_kepler,
-                allow_unknown_site=True,
+            # Use smaller chunks by default to keep workers busy.
+            auto_chunk = int(args.chunk_size) if args.chunk_size is not None else max(
+                32, int(len(states) // max(1, int(args.n_workers) * 4))
             )
+            res = resid_pool.map(states, chunk_size=auto_chunk)
             return _loglikes_from_residuals(res)
 
         def systematic_resample(weights: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -461,33 +758,21 @@ def main() -> int:
             log_rho_max = np.log(max(float(args.rho_min_au), float(args.rho_max_au)))
             rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n)) * 149597870.7
             rhodots = rng.uniform(-float(args.rhodot_max_kms), float(args.rhodot_max_kms), size=n)
-            if args.ranging_multiobs:
-                parts = np.array(
-                    [
-                        build_state_from_ranging_multiobs(
-                            obs_eval,
-                            obs_ref,
-                            posterior.epoch,
-                            attrib,
-                            r,
-                            rd,
-                            tuple(args.perturbers),
-                            args.max_step,
-                            use_kepler=not args.no_kepler,
-                            max_iter=int(args.ranging_multiobs_max_iter),
-                        )
-                        for r, rd in zip(rhos, rhodots)
-                    ],
-                    dtype=float,
-                )
-            else:
-                parts = np.array(
-                    [
-                        build_state_from_ranging(obs_ref, posterior.epoch, attrib, r, rd)
-                        for r, rd in zip(rhos, rhodots)
-                    ],
-                    dtype=float,
-                )
+            parts = _build_states_parallel(
+                rhos,
+                rhodots,
+                obs_eval,
+                obs_ref,
+                posterior.epoch,
+                attrib,
+                tuple(args.perturbers),
+                args.max_step,
+                not args.no_kepler,
+                int(args.ranging_multiobs_max_iter),
+                int(args.n_workers),
+                int(args.chunk_size) if args.chunk_size is not None else None,
+                bool(args.ranging_multiobs),
+            )
             loglikes = score_states(parts)
             betas = np.linspace(0.0, 1.0, max(2, int(args.smc_steps)))
             weights = np.ones(n, dtype=float) / n
@@ -519,33 +804,21 @@ def main() -> int:
                     rhodot_prop = np.clip(
                         rhodot_prop, -float(args.rhodot_max_kms), float(args.rhodot_max_kms)
                     )
-                    if args.ranging_multiobs:
-                        props = np.array(
-                            [
-                                build_state_from_ranging_multiobs(
-                                    obs_eval,
-                                    obs_ref,
-                                    posterior.epoch,
-                                    attrib,
-                                    r,
-                                    rd,
-                                    tuple(args.perturbers),
-                                    args.max_step,
-                                    use_kepler=not args.no_kepler,
-                                    max_iter=int(args.ranging_multiobs_max_iter),
-                                )
-                                for r, rd in zip(rho_prop, rhodot_prop)
-                            ],
-                            dtype=float,
-                        )
-                    else:
-                        props = np.array(
-                            [
-                                build_state_from_ranging(obs_ref, posterior.epoch, attrib, r, rd)
-                                for r, rd in zip(rho_prop, rhodot_prop)
-                            ],
-                            dtype=float,
-                        )
+                    props = _build_states_parallel(
+                        rho_prop,
+                        rhodot_prop,
+                        obs_eval,
+                        obs_ref,
+                        posterior.epoch,
+                        attrib,
+                        tuple(args.perturbers),
+                        args.max_step,
+                        not args.no_kepler,
+                        int(args.ranging_multiobs_max_iter),
+                        int(args.n_workers),
+                        int(args.chunk_size) if args.chunk_size is not None else None,
+                        bool(args.ranging_multiobs),
+                    )
                     ll_props = score_states(props)
                     logp_cur = b1 * loglikes
                     logp_prop = b1 * ll_props
@@ -560,11 +833,24 @@ def main() -> int:
             replicas = smc_cartesian().T
         else:
             replicas = smc_attributable().T
+        resid_pool.close()
     else:
         if args.ranged:
             if args.obs is None:
                 raise SystemExit("--ranged requires --obs (observation CSV).")
             observations = load_observations(args.obs, None)
+            photometry = None
+            if args.photometry_source != "none":
+                photometry = _attach_photometry(
+                    observations,
+                    source=args.photometry_source,
+                    target=args.photometry_target,
+                    location=args.photometry_location,
+                    sigma_mag_default=float(args.photometry_sigma_mag),
+                    h0_override=args.photometry_h,
+                    h_sigma=float(args.photometry_h_sigma),
+                    g_override=args.photometry_g,
+                )
             scoring_mode = "nbody" if args.no_kepler else args.scoring_mode
             ranged = sample_ranged_replicas(
                 observations=observations,
@@ -589,6 +875,11 @@ def main() -> int:
                 multiobs=args.ranging_multiobs,
                 multiobs_indices=args.ranging_multiobs_indices,
                 multiobs_max_iter=args.ranging_multiobs_max_iter,
+                attrib_mode=args.ranging_attrib_mode,
+                photometry=photometry,
+                admissible_bound=args.admissible_bound,
+                admissible_q_min_au=args.admissible_q_min_au,
+                admissible_q_max_au=args.admissible_q_max_au,
             )
             weights = ranged["weights"]
             states = ranged["states"]

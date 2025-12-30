@@ -14,7 +14,7 @@ from astropy.coordinates import SkyCoord, get_body_barycentric_posvel
 from astropy.time import Time
 
 from .fit import _predict_batch, _site_offset, _site_offset_cached
-from .propagate import _site_states
+from .propagate import _site_states, GM_SUN
 from .sites import get_site_ephemeris, get_site_kind
 from .models import Observation
 
@@ -698,6 +698,55 @@ def build_attributable(observations: Sequence[Observation], epoch: Time) -> Attr
     return Attributable(ra_deg=ra0, dec_deg=dec0, ra_dot_deg_per_day=ra_dot, dec_dot_deg_per_day=dec_dot)
 
 
+def _attrib_from_s_sdot(s: np.ndarray, sdot: np.ndarray) -> Attributable:
+    x, y, z = s
+    xd, yd, zd = sdot
+    rxy2 = max(x * x + y * y, 1e-12)
+    ra = math.atan2(y, x)
+    dec = math.asin(np.clip(z, -1.0, 1.0))
+    ra_dot = (x * yd - y * xd) / rxy2
+    cosdec = max(math.sqrt(rxy2), 1e-12)
+    dec_dot = (zd - z * (x * xd + y * yd) / rxy2) / cosdec
+    return Attributable(
+        ra_deg=float(np.degrees(ra) % 360.0),
+        dec_deg=float(np.degrees(dec)),
+        ra_dot_deg_per_day=float(np.degrees(ra_dot) * DAY_S),
+        dec_dot_deg_per_day=float(np.degrees(dec_dot) * DAY_S),
+    )
+
+
+def build_attributable_vector_fit(observations: Sequence[Observation], epoch: Time) -> Attributable:
+    """Fit a linear model to topocentric direction unit vectors in ICRS.
+
+    This avoids RA/Dec wrapping and reduces frame/geometry bias when observers move.
+    """
+    times = np.array([(ob.time - epoch).to(u.s).value for ob in observations], dtype=float)
+    ra_deg = np.array([ob.ra_deg for ob in observations], dtype=float)
+    dec_deg = np.array([ob.dec_deg for ob in observations], dtype=float)
+
+    ra_rad = np.deg2rad(ra_deg)
+    dec_rad = np.deg2rad(dec_deg)
+    s = np.stack(
+        [np.cos(dec_rad) * np.cos(ra_rad), np.cos(dec_rad) * np.sin(ra_rad), np.sin(dec_rad)],
+        axis=1,
+    )
+
+    A = np.vstack([np.ones_like(times), times]).T
+    coef_x, *_ = np.linalg.lstsq(A, s[:, 0], rcond=None)
+    coef_y, *_ = np.linalg.lstsq(A, s[:, 1], rcond=None)
+    coef_z, *_ = np.linalg.lstsq(A, s[:, 2], rcond=None)
+
+    s0 = np.array([coef_x[0], coef_y[0], coef_z[0]], dtype=float)
+    sdot = np.array([coef_x[1], coef_y[1], coef_z[1]], dtype=float)
+
+    s0_norm = np.linalg.norm(s0)
+    if s0_norm <= 0:
+        return build_attributable(observations, epoch)
+    s0 = s0 / s0_norm
+    # Remove radial component from sdot for a tangent-plane rate.
+    sdot = sdot - np.dot(s0, sdot) * s0
+    return _attrib_from_s_sdot(s0, sdot)
+
 def s_and_sdot(attrib: Attributable) -> tuple[np.ndarray, np.ndarray]:
     ra = math.radians(attrib.ra_deg)
     dec = math.radians(attrib.dec_deg)
@@ -760,7 +809,7 @@ def _state_residuals(
         state, epoch, list(observations), perturbers, max_step, use_kepler=use_kepler
     )
     residuals = []
-    for ra, dec, ob in zip(pred_ra, pred_dec, observations):
+    for idx, (ra, dec, ob) in enumerate(zip(pred_ra, pred_dec, observations)):
         d_ra = ((ob.ra_deg - ra + 180.0) % 360.0) - 180.0
         ra_arcsec = d_ra * math.cos(math.radians(dec)) * 3600.0
         dec_arcsec = (ob.dec_deg - dec) * 3600.0
@@ -857,6 +906,74 @@ def studentt_loglike(residuals: np.ndarray, sigma_vec: np.ndarray, nu: float) ->
     return float(-0.5 * np.sum((nu + 1.0) * np.log1p(t / nu)))
 
 
+def _phase_func_hg(alpha_rad: float, g: float) -> float:
+    # Bowell HG phase function (approx).
+    tan_half = math.tan(0.5 * alpha_rad)
+    phi1 = math.exp(-3.33 * tan_half**0.63)
+    phi2 = math.exp(-1.87 * tan_half**1.22)
+    return (1.0 - g) * phi1 + g * phi2
+
+
+def photometric_loglike(
+    m_obs: float,
+    r_au: float,
+    delta_au: float,
+    phase_rad: float,
+    h0: float,
+    h_sigma: float,
+    g: float,
+    sigma_mag: float,
+) -> float:
+    # Apparent magnitude model: m = H + 5 log10(r*delta) - 2.5 log10(phi)
+    phi = max(_phase_func_hg(phase_rad, g), 1e-12)
+    A = 5.0 * math.log10(max(r_au * delta_au, 1e-12)) - 2.5 * math.log10(phi)
+    h_hat = m_obs - A
+    sigma = max(1e-6, math.hypot(h_sigma, sigma_mag))
+    return float(-0.5 * ((h_hat - h0) / sigma) ** 2 - math.log(sigma))
+
+
+def _admissible_ok(
+    state: np.ndarray,
+    *,
+    q_min_au: float | None,
+    q_max_au: float | None,
+    bound_only: bool,
+    mu_km3_s2: float = GM_SUN,
+) -> bool:
+    r = state[:3].astype(float)
+    v = state[3:].astype(float)
+    r_norm = float(np.linalg.norm(r))
+    if not np.isfinite(r_norm) or r_norm <= 0:
+        return False
+    v2 = float(np.dot(v, v))
+    eps = 0.5 * v2 - mu_km3_s2 / r_norm
+    if bound_only and not (eps < 0.0):
+        return False
+    if q_min_au is None and q_max_au is None:
+        return True
+    h = np.cross(r, v)
+    h_norm = float(np.linalg.norm(h))
+    if not np.isfinite(h_norm) or h_norm <= 0:
+        return False
+    e_vec = (np.cross(v, h) / mu_km3_s2) - (r / r_norm)
+    e = float(np.linalg.norm(e_vec))
+    if not np.isfinite(e):
+        return False
+    if eps < 0.0:
+        a = -mu_km3_s2 / (2.0 * eps)
+    else:
+        a = None
+    if a is None or not np.isfinite(a):
+        return not bound_only
+    q = a * (1.0 - e)
+    q_au = q / AU_KM
+    if q_min_au is not None and q_au < q_min_au:
+        return False
+    if q_max_au is not None and q_au > q_max_au:
+        return False
+    return True
+
+
 def score_candidate(
     state: np.ndarray,
     epoch: Time,
@@ -866,13 +983,28 @@ def score_candidate(
     nu: float,
     site_kappas: dict[str, float],
     use_kepler: bool,
+    photometry: dict[str, float] | None = None,
 ) -> tuple[float, np.ndarray]:
-    pred_ra, pred_dec = _predict_batch(
-        state, epoch, list(observations), perturbers, max_step, use_kepler=use_kepler
-    )
+    if photometry:
+        from .propagate import predict_radec_with_geometry
+
+        pred_ra, pred_dec, r_au, delta_au, phase_rad = predict_radec_with_geometry(
+            state,
+            epoch,
+            list(observations),
+            perturbers,
+            max_step,
+            use_kepler=use_kepler,
+        )
+    else:
+        pred_ra, pred_dec = _predict_batch(
+            state, epoch, list(observations), perturbers, max_step, use_kepler=use_kepler
+        )
     residuals = []
     sigma_vec = []
-    for ra, dec, ob in zip(pred_ra, pred_dec, observations):
+    photo_ll = 0.0
+    have_photo = False
+    for idx, (ra, dec, ob) in enumerate(zip(pred_ra, pred_dec, observations)):
         d_ra = ((ob.ra_deg - ra + 180.0) % 360.0) - 180.0
         ra_arcsec = d_ra * math.cos(math.radians(dec)) * 3600.0
         dec_arcsec = (ob.dec_deg - dec) * 3600.0
@@ -880,9 +1012,25 @@ def score_candidate(
         kappa = site_kappas.get(ob.site or "UNK", 1.0)
         sigma = max(1e-6, float(ob.sigma_arcsec) * float(kappa))
         sigma_vec.extend([sigma, sigma])
+        if photometry and ob.mag is not None:
+            sigma_mag = ob.sigma_mag if ob.sigma_mag is not None else photometry["sigma_mag_default"]
+            photo_ll += photometric_loglike(
+                float(ob.mag),
+                float(r_au[idx]),
+                float(delta_au[idx]),
+                float(phase_rad[idx]),
+                float(photometry["h0"]),
+                float(photometry["h_sigma"]),
+                float(photometry["g"]),
+                float(sigma_mag),
+            )
+            have_photo = True
     res = np.array(residuals, dtype=float)
     sig = np.array(sigma_vec, dtype=float)
-    return studentt_loglike(res, sig, nu), res
+    ll = studentt_loglike(res, sig, nu)
+    if have_photo:
+        ll += photo_ll
+    return ll, res
 
 
 _RANGE_CTX: dict[str, object] = {}
@@ -901,6 +1049,10 @@ def _init_worker(
     multiobs: bool,
     multiobs_max_iter: int,
     obs_eval: Sequence[Observation] | None,
+    photometry: dict[str, float] | None,
+    admissible_bound: bool,
+    admissible_q_min_au: float | None,
+    admissible_q_max_au: float | None,
 ) -> None:
     global _RANGE_CTX
     _RANGE_CTX = {
@@ -916,6 +1068,10 @@ def _init_worker(
         "multiobs": multiobs,
         "multiobs_max_iter": multiobs_max_iter,
         "obs_eval": obs_eval,
+        "photometry": photometry,
+        "admissible_bound": admissible_bound,
+        "admissible_q_min_au": admissible_q_min_au,
+        "admissible_q_max_au": admissible_q_max_au,
     }
 
 
@@ -945,6 +1101,13 @@ def _score_chunk(chunk: Sequence[tuple[float, float]]) -> list[tuple[float, floa
                 rhodot_km_s,
             )
         try:
+            if not _admissible_ok(
+                state,
+                q_min_au=ctx.get("admissible_q_min_au"),
+                q_max_au=ctx.get("admissible_q_max_au"),
+                bound_only=bool(ctx.get("admissible_bound")),
+            ):
+                continue
             ll, _ = score_candidate(
                 state,
                 ctx["epoch"],
@@ -954,6 +1117,7 @@ def _score_chunk(chunk: Sequence[tuple[float, float]]) -> list[tuple[float, floa
                 ctx["nu"],
                 ctx["site_kappas"],
                 ctx["use_kepler"],
+                ctx.get("photometry"),
             )
         except Exception:
             continue
@@ -969,6 +1133,7 @@ def _init_worker_state(
     nu: float,
     site_kappas: dict[str, float],
     use_kepler: bool,
+    photometry: dict[str, float] | None,
 ) -> None:
     global _RANGE_CTX
     _RANGE_CTX = {
@@ -979,6 +1144,7 @@ def _init_worker_state(
         "nu": nu,
         "site_kappas": site_kappas,
         "use_kepler": use_kepler,
+        "photometry": photometry,
     }
 
 
@@ -996,6 +1162,7 @@ def _score_state_chunk(states: np.ndarray) -> list[tuple[float, np.ndarray]]:
                 ctx["nu"],
                 ctx["site_kappas"],
                 ctx["use_kepler"],
+                ctx.get("photometry"),
             )
         except Exception:
             ll = -np.inf
@@ -1026,6 +1193,11 @@ def sample_ranged_replicas(
     multiobs: bool = False,
     multiobs_indices: Sequence[int] | None = None,
     multiobs_max_iter: int = 2,
+    attrib_mode: str = "vector",
+    photometry: dict[str, float] | None = None,
+    admissible_bound: bool = False,
+    admissible_q_min_au: float | None = None,
+    admissible_q_max_au: float | None = None,
 ) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(int(seed))
     obs_ref = _ranging_reference_observation(observations, epoch)
@@ -1033,7 +1205,10 @@ def sample_ranged_replicas(
         obs_eval = [observations[i] for i in multiobs_indices]
     else:
         obs_eval = list(observations)
-    attrib = build_attributable(observations, epoch)
+    if attrib_mode == "linear":
+        attrib = build_attributable(observations, epoch)
+    else:
+        attrib = build_attributable_vector_fit(observations, epoch)
     log_rho_min = math.log(max(1e-12, rho_min_au))
     log_rho_max = math.log(max(rho_min_au, rho_max_au))
 
@@ -1077,6 +1252,16 @@ def sample_ranged_replicas(
             else:
                 state = build_state_from_ranging(obs_ref, epoch, attrib, rho_km, rhodot_km_s)
             try:
+                if not _admissible_ok(
+                    state,
+                    q_min_au=admissible_q_min_au,
+                    q_max_au=admissible_q_max_au,
+                    bound_only=admissible_bound,
+                ):
+                    ll = -np.inf
+                    n_fail += 1
+                    results.append((rho_km, rhodot_km_s, ll, state))
+                    continue
                 ll, _ = score_candidate(
                     state,
                     epoch,
@@ -1086,6 +1271,7 @@ def sample_ranged_replicas(
                     nu,
                     site_kappas,
                     use_kepler,
+                    photometry,
                 )
             except Exception:
                 ll = -np.inf
@@ -1121,6 +1307,10 @@ def sample_ranged_replicas(
                 multiobs,
                 multiobs_max_iter,
                 obs_eval,
+                photometry,
+                admissible_bound,
+                admissible_q_min_au,
+                admissible_q_max_au,
             ),
         ) as pool:
             chunk_results = pool.map(_score_chunk, chunks)
@@ -1171,6 +1361,7 @@ def sample_ranged_replicas(
                     nu,
                     site_kappas,
                     False,
+                    photometry,
                 ),
             ) as pool:
                 chunk_results = pool.map(_score_state_chunk, state_chunks)
@@ -1187,6 +1378,7 @@ def sample_ranged_replicas(
                     nu,
                     site_kappas,
                     False,
+                    photometry,
                 )
                 scored.append((ll, st))
         lls = np.array([r[0] for r in scored], dtype=float)

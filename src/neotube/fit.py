@@ -4,6 +4,7 @@ import copy
 import json
 import warnings
 from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as mp
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Sequence
@@ -822,6 +823,51 @@ def residuals_batch(
 _RESID_CTX: dict[str, object] = {}
 
 
+class ResidualsPool:
+    """Persistent process pool for residual evaluation to avoid per-call spin-up."""
+
+    def __init__(
+        self,
+        epoch: Time,
+        observations: list[Observation],
+        perturbers: Sequence[str],
+        max_step: float,
+        n_workers: int,
+        use_kepler: bool,
+        allow_unknown_site: bool,
+    ) -> None:
+        self._epoch = epoch
+        self._observations = observations
+        self._perturbers = tuple(perturbers)
+        self._max_step = float(max_step)
+        self._use_kepler = bool(use_kepler)
+        self._allow_unknown_site = bool(allow_unknown_site)
+        self._ctx = mp.get_context("spawn")
+        self._executor = ProcessPoolExecutor(
+            max_workers=max(1, int(n_workers)),
+            mp_context=self._ctx,
+            initializer=_init_resid_worker,
+            initargs=(
+                self._epoch,
+                self._observations,
+                self._perturbers,
+                self._max_step,
+                self._use_kepler,
+                self._allow_unknown_site,
+            ),
+        )
+
+    def map(self, states: np.ndarray, chunk_size: int) -> np.ndarray:
+        chunks = [states[i : i + chunk_size] for i in range(0, len(states), chunk_size)]
+        results = []
+        for res in self._executor.map(_resid_chunk_worker, chunks):
+            results.append(res)
+        return np.vstack(results) if results else np.empty((0, len(self._observations) * 2), dtype=float)
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=False)
+
+
 def _init_resid_worker(
     epoch: Time,
     observations: list[Observation],
@@ -874,8 +920,11 @@ def residuals_parallel(
 
     chunks = [states[i : i + chunk_size] for i in range(0, states.shape[0], chunk_size)]
     results = []
+    # Use spawn context to avoid jplephem fork-safety issues.
+    ctx = mp.get_context("spawn")
     with ProcessPoolExecutor(
         max_workers=max(1, int(n_workers)),
+        mp_context=ctx,
         initializer=_init_resid_worker,
         initargs=(epoch, observations, tuple(perturbers), max_step, use_kepler, allow_unknown_site),
     ) as executor:

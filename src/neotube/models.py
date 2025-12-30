@@ -14,6 +14,8 @@ class Observation:
     sigma_arcsec: float
     site: str | None = None
     observer_pos_km: np.ndarray | None = None
+    mag: float | None = None
+    sigma_mag: float | None = None
 
 
 @dataclass
