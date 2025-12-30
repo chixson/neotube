@@ -14,6 +14,7 @@ from .fit_adapt import AdaptiveConfig, adaptively_grow_cloud
 from .propagate import (
     _body_posvel,
     _prepare_obs_cache,
+    ObsCache,
     default_propagation_ladder,
     predict_radec_from_epoch,
     predict_radec_with_contract,
@@ -31,6 +32,7 @@ AU_KM = 149597870.7
 DAY_S = 86400.0
 
 _SCORE_CONTEXT: dict[str, object] = {}
+_SCORE_FULL_CONTEXT: dict[str, object] = {}
 
 
 def _score_states_contract_chunk(states: np.ndarray) -> np.ndarray:
@@ -51,6 +53,30 @@ def _score_states_contract_chunk(states: np.ndarray) -> np.ndarray:
             loglikes_local[i] += _gaussian_loglike(
                 float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma
             )
+    return loglikes_local
+
+
+def _score_states_full_chunk(states: np.ndarray) -> np.ndarray:
+    ctx = _SCORE_FULL_CONTEXT
+    obs = ctx["obs"]
+    loglikes_local = np.zeros(len(states), dtype=float)
+    for i, state in enumerate(states):
+        ra_pred, dec_pred = predict_radec_from_epoch(
+            state,
+            ctx["epoch"],
+            obs,
+            ctx["perturbers"],
+            ctx["max_step"],
+            use_kepler=ctx["use_kepler"],
+            allow_unknown_site=ctx["allow_unknown_site"],
+            light_time_iters=ctx["light_time_iters"],
+            full_physics=True,
+            obs_cache=ctx["obs_cache"],
+        )
+        ll = 0.0
+        for ra, dec, ob in zip(ra_pred, dec_pred, obs):
+            ll += _gaussian_loglike(float(ra), float(dec), ob, _sigma_arcsec(ob, ctx["site_kappas"]))
+        loglikes_local[i] = ll
     return loglikes_local
 
 
@@ -291,6 +317,30 @@ def sequential_fit_replicas(
                 out[offset : offset + len(result)] = result
         return out
 
+    def _score_full_parallel(pool_states: np.ndarray, obs_cache_all: ObsCache) -> np.ndarray:
+        _SCORE_FULL_CONTEXT["epoch"] = epoch
+        _SCORE_FULL_CONTEXT["obs"] = obs
+        _SCORE_FULL_CONTEXT["perturbers"] = perturbers
+        _SCORE_FULL_CONTEXT["max_step"] = max_step
+        _SCORE_FULL_CONTEXT["use_kepler"] = use_kepler
+        _SCORE_FULL_CONTEXT["allow_unknown_site"] = allow_unknown_site
+        _SCORE_FULL_CONTEXT["light_time_iters"] = light_time_iters
+        _SCORE_FULL_CONTEXT["site_kappas"] = site_kappas
+        _SCORE_FULL_CONTEXT["obs_cache"] = obs_cache_all
+        if worker_count <= 1 or len(pool_states) <= chunk_size:
+            return _score_states_full_chunk(pool_states)
+        tasks = []
+        for start in range(0, len(pool_states), chunk_size):
+            tasks.append(pool_states[start : start + chunk_size])
+        out = np.empty(len(pool_states), dtype=float)
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            for offset, result in zip(
+                range(0, len(pool_states), chunk_size),
+                executor.map(_score_states_full_chunk, tasks),
+            ):
+                out[offset : offset + len(result)] = result
+        return out
+
     attrib = build_attributable_vector_fit(obs3, epoch)
     sigma_arcsec = float(np.median([o.sigma_arcsec for o in obs3]))
     sigma_deg = sigma_arcsec / 3600.0
@@ -447,25 +497,7 @@ def sequential_fit_replicas(
         obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
 
         def _score_full(pool_states: np.ndarray) -> np.ndarray:
-            loglikes_local = np.zeros(len(pool_states), dtype=float)
-            for i, state in enumerate(pool_states):
-                ra_pred, dec_pred = predict_radec_from_epoch(
-                    state,
-                    epoch,
-                    obs,
-                    perturbers,
-                    max_step,
-                    use_kepler=use_kepler,
-                    allow_unknown_site=allow_unknown_site,
-                    light_time_iters=light_time_iters,
-                    full_physics=True,
-                    obs_cache=obs_cache_all,
-                )
-                ll = 0.0
-                for ra, dec, ob in zip(ra_pred, dec_pred, obs):
-                    ll += _gaussian_loglike(float(ra), float(dec), ob, _sigma_arcsec(ob, site_kappas))
-                loglikes_local[i] = ll
-
+            loglikes_local = _score_full_parallel(pool_states, obs_cache_all)
             sum_inv_var = np.zeros(len(pool_states), dtype=float)
             sum_y_inv_var = np.zeros(len(pool_states), dtype=float)
             sum_y2_inv_var = np.zeros(len(pool_states), dtype=float)
@@ -551,11 +583,8 @@ def sequential_fit_replicas(
             allow_unknown_site=allow_unknown_site,
             configs=ladder,
         )
-        loglikes = np.zeros(len(states), dtype=float)
-        for idx, ob in enumerate(obs):
-            sigma = _sigma_arcsec(ob, site_kappas)
-            for i in range(len(states)):
-                loglikes[i] += _gaussian_loglike(float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma)
+        obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
+        loglikes = _score_full_parallel(states, obs_cache_all)
         if shadow_diagnostics:
             diag_used_levels.append(used_level.copy())
             diag_max_delta.append(max_delta.copy())
