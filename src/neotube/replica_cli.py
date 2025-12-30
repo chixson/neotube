@@ -4,7 +4,7 @@ import argparse
 import csv
 import json
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -424,6 +424,12 @@ def main() -> int:
         type=float,
         default=0.5,
         help="Proposal scale for SMC rejuvenation (fraction of std for cartesian; rho-scale for attributable).",
+    )
+    parser.add_argument(
+        "--smc-pool",
+        choices=("threads", "process"),
+        default="threads",
+        help="Parallel pool type for SMC (threads avoids semaphore/permission issues).",
     )
     parser.add_argument(
         "--smc-prior-scale",
@@ -856,12 +862,9 @@ def main() -> int:
             )
             resid_chunk = build_chunk
             if n_workers > 1:
-                ctx = _get_smc_context()
-                with ProcessPoolExecutor(
-                    max_workers=n_workers,
-                    mp_context=ctx,
-                    initializer=_init_smc_ctx,
-                    initargs=(
+                use_threads = str(args.smc_pool).lower() == "threads"
+                if use_threads:
+                    _init_smc_ctx(
                         obs_eval,
                         obs_ref,
                         posterior.epoch,
@@ -873,8 +876,29 @@ def main() -> int:
                         bool(args.ranging_multiobs),
                         observations,
                         True,
-                    ),
-                ) as executor:
+                    )
+                    executor_ctx = ThreadPoolExecutor(max_workers=n_workers)
+                else:
+                    ctx = _get_smc_context()
+                    executor_ctx = ProcessPoolExecutor(
+                        max_workers=n_workers,
+                        mp_context=ctx,
+                        initializer=_init_smc_ctx,
+                        initargs=(
+                            obs_eval,
+                            obs_ref,
+                            posterior.epoch,
+                            attrib,
+                            tuple(args.perturbers),
+                            args.max_step,
+                            not args.no_kepler,
+                            int(args.ranging_multiobs_max_iter),
+                            bool(args.ranging_multiobs),
+                            observations,
+                            True,
+                        ),
+                    )
+                with executor_ctx as executor:
                     build_chunks = _chunk_pairs(rhos, rhodots, build_chunk)
                     parts = np.vstack(list(executor.map(_smc_build_chunk, build_chunks)))
                     res_chunks = _chunk_states(parts, resid_chunk)
