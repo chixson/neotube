@@ -33,6 +33,7 @@ DAY_S = 86400.0
 
 _SCORE_CONTEXT: dict[str, object] = {}
 _SCORE_FULL_CONTEXT: dict[str, object] = {}
+_PREDICT_CONTEXT: dict[str, object] = {}
 
 
 def _score_states_contract_chunk(states: np.ndarray) -> np.ndarray:
@@ -78,6 +79,20 @@ def _score_states_full_chunk(states: np.ndarray) -> np.ndarray:
             ll += _gaussian_loglike(float(ra), float(dec), ob, _sigma_arcsec(ob, ctx["site_kappas"]))
         loglikes_local[i] = ll
     return loglikes_local
+
+
+def _predict_contract_chunk(
+    states: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ctx = _PREDICT_CONTEXT
+    return predict_radec_with_contract(
+        states,
+        ctx["epoch"],
+        ctx["obs_chunk"],
+        epsilon_ast_arcsec=ctx["eps_arcsec"],
+        allow_unknown_site=ctx["allow_unknown_site"],
+        configs=ctx["ladder"],
+    )
 
 
 @dataclass
@@ -341,6 +356,39 @@ def sequential_fit_replicas(
                 out[offset : offset + len(result)] = result
         return out
 
+    def _predict_contract_parallel(
+        pool_states: np.ndarray,
+        obs_chunk: Sequence[Observation],
+        eps_arcsec: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        _PREDICT_CONTEXT["epoch"] = epoch
+        _PREDICT_CONTEXT["obs_chunk"] = obs_chunk
+        _PREDICT_CONTEXT["eps_arcsec"] = eps_arcsec
+        _PREDICT_CONTEXT["allow_unknown_site"] = allow_unknown_site
+        _PREDICT_CONTEXT["ladder"] = ladder
+        if worker_count <= 1 or len(pool_states) <= chunk_size:
+            return _predict_contract_chunk(pool_states)
+        tasks = []
+        for start in range(0, len(pool_states), chunk_size):
+            tasks.append(pool_states[start : start + chunk_size])
+        ra_parts = []
+        dec_parts = []
+        lvl_parts = []
+        delta_parts = []
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            for result in executor.map(_predict_contract_chunk, tasks):
+                ra, dec, levels, deltas = result
+                ra_parts.append(ra)
+                dec_parts.append(dec)
+                lvl_parts.append(levels)
+                delta_parts.append(deltas)
+        return (
+            np.vstack(ra_parts),
+            np.vstack(dec_parts),
+            np.concatenate(lvl_parts),
+            np.concatenate(delta_parts),
+        )
+
     attrib = build_attributable_vector_fit(obs3, epoch)
     sigma_arcsec = float(np.median([o.sigma_arcsec for o in obs3]))
     sigma_deg = sigma_arcsec / 3600.0
@@ -409,13 +457,10 @@ def sequential_fit_replicas(
         )
         for ob in obs3
     )
-    ra_pred, dec_pred, used_level, max_delta = predict_radec_with_contract(
+    ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
         states,
-        epoch,
         obs3,
-        epsilon_ast_arcsec=eps_seed,
-        allow_unknown_site=allow_unknown_site,
-        configs=ladder,
+        eps_seed,
     )
     loglikes = np.zeros(len(states), dtype=float)
     for idx, ob in enumerate(obs3):
@@ -444,13 +489,10 @@ def sequential_fit_replicas(
             epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
             epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
         )
-        ra_pred, dec_pred, used_level, max_delta = predict_radec_with_contract(
+        ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
             states,
-            epoch,
             [ob],
-            epsilon_ast_arcsec=eps_ob,
-            allow_unknown_site=allow_unknown_site,
-            configs=ladder,
+            eps_ob,
         )
         for i in range(len(states)):
             loglikes[i] = _gaussian_loglike(float(ra_pred[i, 0]), float(dec_pred[i, 0]), ob, sigma)
@@ -575,13 +617,10 @@ def sequential_fit_replicas(
             )
             for ob in obs
         )
-        ra_pred, dec_pred, used_level, max_delta = predict_radec_with_contract(
+        ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
             states,
-            epoch,
             obs,
-            epsilon_ast_arcsec=eps_final,
-            allow_unknown_site=allow_unknown_site,
-            configs=ladder,
+            eps_final,
         )
         obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
         loglikes = _score_full_parallel(states, obs_cache_all)
