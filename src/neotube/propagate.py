@@ -37,6 +37,15 @@ except Exception:  # pragma: no cover - optional dependency
     nb = None
     _HAS_NUMBA = False
 
+if _HAS_NUMBA:
+    _NUMBA_THREADS = int(os.environ.get("NEOTUBE_NUMBA_THREADS", "0") or "0")
+    if _NUMBA_THREADS <= 0:
+        _NUMBA_THREADS = max(1, min(32, os.cpu_count() or 1))
+    try:
+        nb.set_num_threads(_NUMBA_THREADS)
+    except Exception:
+        pass
+
 __all__ = [
     "propagate_state",
     "propagate_state_kepler",
@@ -212,7 +221,7 @@ if _HAS_NUMBA:
             return (np.sinh(s) - s) / (s * s * s)
         return 1.0 / 6.0
 
-    @nb.njit(cache=True)
+    @nb.njit(cache=True, parallel=True)
     def _propagate_state_kepler_batch_numba(r0, v0, dt_arr, mu_km3_s2, max_iter, tol):
         n = dt_arr.shape[0]
         out = np.empty((n, 6), dtype=np.float64)
@@ -224,7 +233,7 @@ if _HAS_NUMBA:
         alpha = 2.0 / (r0_norm + 1e-30) - v0_sq / mu_km3_s2
         sqrt_mu = np.sqrt(mu_km3_s2)
 
-        for i in range(n):
+        for i in nb.prange(n):
             dt = dt_arr[i]
             if abs(dt) < 1e-9:
                 out[i, :3] = r0
