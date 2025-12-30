@@ -14,6 +14,7 @@ from astropy.time import Time
 from .fit import load_posterior, residuals_batch, residuals_parallel, sample_replicas
 from .propagate import predict_radec_batch
 from .fit_cli import load_observations
+from .fit_smc import sequential_fit_replicas
 from .sites import get_site_ephemeris
 from .ranging import (
     _ranging_reference_observation,
@@ -465,6 +466,57 @@ def main() -> int:
         help="If set, require bound heliocentric orbits (E < 0) in SMC cartesian prior.",
     )
     parser.add_argument(
+        "--fit-smc",
+        action="store_true",
+        help="Use the sequential fit SMC workflow on observations instead of posterior sampling.",
+    )
+    parser.add_argument(
+        "--fit-smc-diag-out",
+        type=Path,
+        default=None,
+        help="Optional path for SMC shadow diagnostics npz.",
+    )
+    parser.add_argument(
+        "--fit-smc-no-shadow",
+        action="store_true",
+        help="Disable SMC shadow diagnostics tracking.",
+    )
+    parser.add_argument(
+        "--fit-smc-eps-arcsec",
+        type=float,
+        default=0.1,
+        help="Astrometric contract tolerance (arcsec) for SMC propagation ladder.",
+    )
+    parser.add_argument(
+        "--fit-smc-eps-scale",
+        type=float,
+        default=0.0,
+        help="If >0, use per-observation eps = max(floor, scale * sigma).",
+    )
+    parser.add_argument(
+        "--fit-smc-eps-floor-arcsec",
+        type=float,
+        default=0.01,
+        help="Minimum per-observation epsilon when using --fit-smc-eps-scale.",
+    )
+    parser.add_argument(
+        "--fit-smc-eps-ceiling-arcsec",
+        type=float,
+        default=None,
+        help="Optional maximum per-observation epsilon.",
+    )
+    parser.add_argument(
+        "--fit-smc-no-full-physics",
+        action="store_true",
+        help="Disable full-physics final scoring for fit-SMC.",
+    )
+    parser.add_argument(
+        "--fit-smc-vmax-kms",
+        type=float,
+        default=None,
+        help="Max |v| (km/s) for fit-SMC proposals (defaults to rhodot max).",
+    )
+    parser.add_argument(
         "--mix-posterior-frac",
         type=float,
         default=0.0,
@@ -757,7 +809,71 @@ def main() -> int:
 
     posterior = load_posterior(args.posterior)
     nu_val = posterior.nu if posterior.nu is not None else args.nu
-    if args.smc:
+    fit_smc_meta: dict | None = None
+    fit_smc_diag: str | None = None
+    output_epoch = posterior.epoch
+    if args.fit_smc:
+        if args.smc or args.ranged:
+            raise SystemExit("--fit-smc cannot be combined with --smc or --ranged.")
+        if args.obs is None:
+            raise SystemExit("--fit-smc requires --obs (observation CSV).")
+        observations = load_observations(args.obs, None)
+        if args.photometry_source != "none":
+            _attach_photometry(
+                observations,
+                source=args.photometry_source,
+                target=args.photometry_target,
+                location=args.photometry_location,
+                sigma_mag_default=float(args.photometry_sigma_mag),
+                h0_override=args.photometry_h,
+                h_sigma=float(args.photometry_h_sigma),
+                g_override=args.photometry_g,
+            )
+        diag_path = args.fit_smc_diag_out
+        if diag_path is not None:
+            diag_path = diag_path.expanduser().resolve()
+        cloud = sequential_fit_replicas(
+            observations,
+            n_particles=int(args.n),
+            rho_min_au=float(args.rho_min_au),
+            rho_max_au=float(args.rho_max_au),
+            rhodot_max_km_s=float(args.rhodot_max_kms),
+            v_max_km_s=float(args.fit_smc_vmax_kms)
+            if args.fit_smc_vmax_kms is not None
+            else float(args.rhodot_max_kms),
+            perturbers=tuple(args.perturbers),
+            max_step=float(args.max_step),
+            use_kepler=not args.no_kepler,
+            light_time_iters=2,
+            allow_unknown_site=True,
+            full_physics_final=not args.fit_smc_no_full_physics,
+            mu_h=float(args.photometry_h) if args.photometry_h is not None else 20.0,
+            sigma_h=float(args.photometry_h_sigma),
+            g=float(args.photometry_g) if args.photometry_g is not None else 0.15,
+            epsilon_ast_arcsec=float(args.fit_smc_eps_arcsec),
+            epsilon_ast_scale=float(args.fit_smc_eps_scale),
+            epsilon_ast_floor_arcsec=float(args.fit_smc_eps_floor_arcsec),
+            epsilon_ast_ceiling_arcsec=(
+                float(args.fit_smc_eps_ceiling_arcsec)
+                if args.fit_smc_eps_ceiling_arcsec is not None
+                else None
+            ),
+            shadow_diagnostics=not args.fit_smc_no_shadow,
+            diagnostics_path=str(diag_path) if diag_path is not None else None,
+            seed=int(args.seed),
+            admissible_bound=args.admissible_bound,
+            admissible_q_min_au=args.admissible_q_min_au,
+            admissible_q_max_au=args.admissible_q_max_au,
+        )
+        weights = cloud.weights
+        weights = weights / np.sum(weights)
+        rng = np.random.default_rng(int(args.seed))
+        idx = rng.choice(len(weights), size=args.n, replace=True, p=weights)
+        replicas = cloud.states[idx].T
+        fit_smc_meta = cloud.metadata
+        fit_smc_diag = str(diag_path) if diag_path is not None else None
+        output_epoch = cloud.epoch
+    elif args.smc:
         if args.obs is None:
             raise SystemExit("--smc requires --obs (observation CSV).")
         observations = load_observations(args.obs, None)
@@ -1277,7 +1393,7 @@ def main() -> int:
     with meta_path.open("w") as fh:
         json.dump(
             {
-                "epoch_utc": posterior.epoch.isot,
+                "epoch_utc": output_epoch.isot,
                 "n": args.n,
                 "seed": args.seed,
                 "posterior": str(args.posterior),
@@ -1307,13 +1423,16 @@ def main() -> int:
                 "range_jitter_rhodot_max_kms": args.range_jitter_rhodot_max_kms,
                 "range_jitter_reweight": args.range_jitter_reweight,
                 "range_jitter_likelihood": args.range_jitter_likelihood,
+                "fit_smc": bool(args.fit_smc),
+                "fit_smc_meta": fit_smc_meta,
+                "fit_smc_diag": fit_smc_diag,
             },
             fh,
             indent=2,
         )
 
     # Compute RA/Dec in parallel batches to avoid a slow serial loop.
-    epoch_isot = posterior.epoch.isot
+    epoch_isot = output_epoch.isot
     states = replicas.T.copy()
     total = states.shape[0]
     radec_chunk = max(1, int(args.radec_chunk_size))
