@@ -10,13 +10,7 @@ from pathlib import Path
 import numpy as np
 from astropy.time import Time
 
-from .fit import (
-    load_posterior,
-    residuals_batch,
-    residuals_parallel,
-    sample_replicas,
-    ResidualsPool,
-)
+from .fit import load_posterior, residuals_batch, residuals_parallel, sample_replicas
 from .propagate import predict_radec_batch
 from .fit_cli import load_observations
 from .sites import get_site_ephemeris
@@ -222,6 +216,104 @@ def _radec_chunk_worker(payload):
     ra, dec = predict_radec_batch(chunk_states, epochs)
     return ra, dec
 
+
+_SMC_CTX: dict[str, object] = {}
+
+
+def _init_smc_ctx(
+    obs_eval,
+    obs_ref,
+    epoch,
+    attrib,
+    perturbers,
+    max_step,
+    use_kepler,
+    max_iter,
+    multiobs: bool,
+    observations,
+    allow_unknown_site: bool,
+) -> None:
+    global _SMC_CTX
+    _SMC_CTX = {
+        "obs_eval": obs_eval,
+        "obs_ref": obs_ref,
+        "epoch": epoch,
+        "attrib": attrib,
+        "perturbers": perturbers,
+        "max_step": max_step,
+        "use_kepler": use_kepler,
+        "max_iter": max_iter,
+        "multiobs": multiobs,
+        "observations": observations,
+        "allow_unknown_site": allow_unknown_site,
+    }
+
+
+def _smc_build_chunk(chunk: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    ctx = _SMC_CTX
+    rhos, rhodots = chunk
+    out = []
+    if ctx["multiobs"]:
+        for r, rd in zip(rhos, rhodots):
+            out.append(
+                build_state_from_ranging_multiobs(
+                    ctx["obs_eval"],
+                    ctx["obs_ref"],
+                    ctx["epoch"],
+                    ctx["attrib"],
+                    float(r),
+                    float(rd),
+                    ctx["perturbers"],
+                    ctx["max_step"],
+                    use_kepler=bool(ctx["use_kepler"]),
+                    max_iter=int(ctx["max_iter"]),
+                )
+            )
+    else:
+        for r, rd in zip(rhos, rhodots):
+            out.append(
+                build_state_from_ranging(
+                    ctx["obs_ref"],
+                    ctx["epoch"],
+                    ctx["attrib"],
+                    float(r),
+                    float(rd),
+                )
+            )
+    return np.array(out, dtype=float)
+
+
+def _smc_resid_chunk(states: np.ndarray) -> np.ndarray:
+    ctx = _SMC_CTX
+    return residuals_batch(
+        states,
+        ctx["epoch"],
+        ctx["observations"],
+        ctx["perturbers"],
+        ctx["max_step"],
+        use_kepler=bool(ctx["use_kepler"]),
+        allow_unknown_site=bool(ctx["allow_unknown_site"]),
+    )
+
+
+def _chunk_pairs(
+    rhos: np.ndarray, rhodots: np.ndarray, chunk_size: int
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    chunks = []
+    for start in range(0, len(rhos), chunk_size):
+        chunks.append((rhos[start : start + chunk_size], rhodots[start : start + chunk_size]))
+    return chunks
+
+
+def _chunk_states(states: np.ndarray, chunk_size: int) -> list[np.ndarray]:
+    return [states[i : i + chunk_size] for i in range(0, states.shape[0], chunk_size)]
+
+
+def _get_smc_context() -> mp.context.BaseContext:
+    try:
+        return mp.get_context("forkserver")
+    except ValueError:
+        return mp.get_context("spawn")
 
 def _jpl_location_from_site(site: str | None) -> str | None:
     if not site:
@@ -665,47 +757,16 @@ def main() -> int:
                 return _studentt_loglike_numba(residuals, sigma_vec, nu_like)
             return -0.5 * np.sum((nu_like + 1.0) * np.log1p(t / nu_like), axis=1)
 
-        resid_pool = None
-        try:
-            resid_pool = ResidualsPool(
-                epoch=posterior.epoch,
-                observations=observations,
-                perturbers=tuple(args.perturbers),
-                max_step=args.max_step,
-                n_workers=int(args.n_workers),
+        def score_states_serial(states: np.ndarray) -> np.ndarray:
+            res = residuals_batch(
+                states,
+                posterior.epoch,
+                observations,
+                tuple(args.perturbers),
+                args.max_step,
                 use_kepler=not args.no_kepler,
                 allow_unknown_site=True,
             )
-        except PermissionError as exc:
-            print(
-                "[replica_cli] ResidualsPool unavailable (PermissionError); "
-                "falling back to serial residual scoring.",
-                exc,
-            )
-        except OSError as exc:
-            print(
-                "[replica_cli] ResidualsPool unavailable (OSError); "
-                "falling back to serial residual scoring.",
-                exc,
-            )
-
-        def score_states(states: np.ndarray) -> np.ndarray:
-            # Use smaller chunks by default to keep workers busy.
-            auto_chunk = int(args.chunk_size) if args.chunk_size is not None else max(
-                32, int(len(states) // max(1, int(args.n_workers) * 4))
-            )
-            if resid_pool is not None:
-                res = resid_pool.map(states, chunk_size=auto_chunk)
-            else:
-                res = residuals_batch(
-                    states,
-                    posterior.epoch,
-                    observations,
-                    tuple(args.perturbers),
-                    args.max_step,
-                    use_kepler=not args.no_kepler,
-                    allow_unknown_site=True,
-                )
             return _loglikes_from_residuals(res)
 
         def systematic_resample(weights: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -723,7 +784,7 @@ def main() -> int:
                 posterior, args.n, seed=int(args.seed), method=args.method, nu=nu_val
             ).T
             parts = np.asarray(parts, dtype=float)
-            loglikes = score_states(parts)
+            loglikes = score_states_serial(parts)
             betas = np.linspace(0.0, 1.0, max(2, int(args.smc_steps)))
             stds = np.sqrt(np.maximum(np.diag(cov), 1e-12))
             prop_scale = float(args.smc_proposal_scale) * stds
@@ -769,7 +830,7 @@ def main() -> int:
                         cur = parts[i]
                         prop = cur + rng.normal(scale=prop_scale, size=cur.shape)
                     props = parts + rng.normal(scale=prop_scale, size=parts.shape)
-                    ll_props = score_states(props)
+                    ll_props = score_states_serial(props)
                     logp_cur = np.array([logprior(p) for p in parts]) + b1 * loglikes
                     logp_prop = np.array([logprior(p) for p in props]) + b1 * ll_props
                     accept = np.log(rng.random(size=len(parts))) < (logp_prop - logp_cur)
@@ -789,7 +850,87 @@ def main() -> int:
             log_rho_max = np.log(max(float(args.rho_min_au), float(args.rho_max_au)))
             rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n)) * 149597870.7
             rhodots = rng.uniform(-float(args.rhodot_max_kms), float(args.rhodot_max_kms), size=n)
-            parts = _build_states_parallel(
+            n_workers = max(1, int(args.n_workers))
+            build_chunk = int(args.chunk_size) if args.chunk_size is not None else max(
+                32, int(n // max(1, n_workers * 4))
+            )
+            resid_chunk = build_chunk
+            if n_workers > 1:
+                ctx = _get_smc_context()
+                with ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    mp_context=ctx,
+                    initializer=_init_smc_ctx,
+                    initargs=(
+                        obs_eval,
+                        obs_ref,
+                        posterior.epoch,
+                        attrib,
+                        tuple(args.perturbers),
+                        args.max_step,
+                        not args.no_kepler,
+                        int(args.ranging_multiobs_max_iter),
+                        bool(args.ranging_multiobs),
+                        observations,
+                        True,
+                    ),
+                ) as executor:
+                    build_chunks = _chunk_pairs(rhos, rhodots, build_chunk)
+                    parts = np.vstack(list(executor.map(_smc_build_chunk, build_chunks)))
+                    res_chunks = _chunk_states(parts, resid_chunk)
+                    res = np.vstack(list(executor.map(_smc_resid_chunk, res_chunks)))
+                    loglikes = _loglikes_from_residuals(res)
+                    betas = np.linspace(0.0, 1.0, max(2, int(args.smc_steps)))
+                    weights = np.ones(n, dtype=float) / n
+                    for b0, b1 in zip(betas[:-1], betas[1:]):
+                        delta = b1 - b0
+                        logw = delta * loglikes
+                        logw -= np.max(logw)
+                        weights = np.exp(logw)
+                        weights /= np.sum(weights)
+                        ess = 1.0 / np.sum(weights**2)
+                        if ess < float(args.smc_ess_frac) * n:
+                            idx = systematic_resample(weights, rng)
+                            rhos = rhos[idx]
+                            rhodots = rhodots[idx]
+                            parts = parts[idx]
+                            loglikes = loglikes[idx]
+                            weights = np.ones(n, dtype=float) / n
+                        for _ in range(int(args.smc_mcmc_steps)):
+                            rho_prop = rhos + rng.normal(
+                                scale=float(args.smc_proposal_scale) * rhos
+                            )
+                            rhodot_prop = rhodots + rng.normal(
+                                scale=float(args.smc_proposal_scale)
+                                * float(args.rhodot_max_kms),
+                                size=n,
+                            )
+                            rho_prop = np.clip(
+                                rho_prop,
+                                float(args.rho_min_au) * 149597870.7,
+                                float(args.rho_max_au) * 149597870.7,
+                            )
+                            rhodot_prop = np.clip(
+                                rhodot_prop,
+                                -float(args.rhodot_max_kms),
+                                float(args.rhodot_max_kms),
+                            )
+                            prop_chunks = _chunk_pairs(rho_prop, rhodot_prop, build_chunk)
+                            props = np.vstack(
+                                list(executor.map(_smc_build_chunk, prop_chunks))
+                            )
+                            res_chunks = _chunk_states(props, resid_chunk)
+                            res = np.vstack(list(executor.map(_smc_resid_chunk, res_chunks)))
+                            ll_props = _loglikes_from_residuals(res)
+                            logp_cur = b1 * loglikes
+                            logp_prop = b1 * ll_props
+                            accept = np.log(rng.random(size=n)) < (logp_prop - logp_cur)
+                            rhos[accept] = rho_prop[accept]
+                            rhodots[accept] = rhodot_prop[accept]
+                            parts[accept] = props[accept]
+                            loglikes[accept] = ll_props[accept]
+                return parts
+            parts = _build_states_serial(
                 rhos,
                 rhodots,
                 obs_eval,
@@ -800,11 +941,9 @@ def main() -> int:
                 args.max_step,
                 not args.no_kepler,
                 int(args.ranging_multiobs_max_iter),
-                int(args.n_workers),
-                int(args.chunk_size) if args.chunk_size is not None else None,
                 bool(args.ranging_multiobs),
             )
-            loglikes = score_states(parts)
+            loglikes = score_states_serial(parts)
             betas = np.linspace(0.0, 1.0, max(2, int(args.smc_steps)))
             weights = np.ones(n, dtype=float) / n
             for b0, b1 in zip(betas[:-1], betas[1:]):
@@ -835,7 +974,7 @@ def main() -> int:
                     rhodot_prop = np.clip(
                         rhodot_prop, -float(args.rhodot_max_kms), float(args.rhodot_max_kms)
                     )
-                    props = _build_states_parallel(
+                    props = _build_states_serial(
                         rho_prop,
                         rhodot_prop,
                         obs_eval,
@@ -846,11 +985,9 @@ def main() -> int:
                         args.max_step,
                         not args.no_kepler,
                         int(args.ranging_multiobs_max_iter),
-                        int(args.n_workers),
-                        int(args.chunk_size) if args.chunk_size is not None else None,
                         bool(args.ranging_multiobs),
                     )
-                    ll_props = score_states(props)
+                    ll_props = score_states_serial(props)
                     logp_cur = b1 * loglikes
                     logp_prop = b1 * ll_props
                     accept = np.log(rng.random(size=n)) < (logp_prop - logp_cur)
@@ -864,8 +1001,6 @@ def main() -> int:
             replicas = smc_cartesian().T
         else:
             replicas = smc_attributable().T
-        if resid_pool is not None:
-            resid_pool.close()
     else:
         if args.ranged:
             if args.obs is None:
