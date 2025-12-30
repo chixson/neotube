@@ -9,6 +9,7 @@ import numpy as np
 from astropy.time import Time
 
 from .models import Observation
+from .fit_adapt import AdaptiveConfig, adaptively_grow_cloud
 from .propagate import (
     _body_posvel,
     _prepare_obs_cache,
@@ -196,6 +197,15 @@ def sequential_fit_replicas(
     epsilon_ast_ceiling_arcsec: float | None = None,
     shadow_diagnostics: bool = True,
     diagnostics_path: str | None = None,
+    auto_grow: bool = False,
+    auto_n_max: int = 50000,
+    auto_n_add: int = 3000,
+    auto_ess_target: float = 500.0,
+    auto_psis_khat: float = 0.7,
+    auto_logrho_bins: int = 8,
+    auto_min_per_decade: int = 20,
+    auto_w_min_mode: float = 0.001,
+    auto_min_per_mode: int = 20,
     site_kappas: dict[str, float] | None = None,
     seed: int | None = None,
     admissible_bound: bool = True,
@@ -342,7 +352,129 @@ def sequential_fit_replicas(
                 jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
                 states = states + jitter
 
-    if full_physics_final:
+    auto_grow_done = False
+    auto_grow_diag: dict | None = None
+    if auto_grow:
+        obs_ref = _ranging_reference_observation(obs, epoch)
+        attrib_mean = attrib_mean
+        attrib_cov = attrib_cov
+
+        def _score_contract(pool_states: np.ndarray) -> np.ndarray:
+            eps_final = min(
+                _epsilon_arcsec_for_obs(
+                    ob,
+                    epsilon_ast_arcsec=epsilon_ast_arcsec,
+                    epsilon_ast_scale=epsilon_ast_scale,
+                    epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
+                    epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+                )
+                for ob in obs
+            )
+            ra_pred, dec_pred, _, _ = predict_radec_with_contract(
+                pool_states,
+                epoch,
+                obs,
+                epsilon_ast_arcsec=eps_final,
+                allow_unknown_site=allow_unknown_site,
+            )
+            loglikes_local = np.zeros(len(pool_states), dtype=float)
+            for idx, ob in enumerate(obs):
+                sigma = _sigma_arcsec(ob, site_kappas)
+                for i in range(len(pool_states)):
+                    loglikes_local[i] += _gaussian_loglike(
+                        float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma
+                    )
+            return loglikes_local
+
+        obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
+
+        def _score_full(pool_states: np.ndarray) -> np.ndarray:
+            loglikes_local = np.zeros(len(pool_states), dtype=float)
+            for i, state in enumerate(pool_states):
+                ra_pred, dec_pred = predict_radec_from_epoch(
+                    state,
+                    epoch,
+                    obs,
+                    perturbers,
+                    max_step,
+                    use_kepler=use_kepler,
+                    allow_unknown_site=allow_unknown_site,
+                    light_time_iters=light_time_iters,
+                    full_physics=True,
+                    obs_cache=obs_cache_all,
+                )
+                ll = 0.0
+                for ra, dec, ob in zip(ra_pred, dec_pred, obs):
+                    ll += _gaussian_loglike(float(ra), float(dec), ob, _sigma_arcsec(ob, site_kappas))
+                loglikes_local[i] = ll
+
+            sum_inv_var = np.zeros(len(pool_states), dtype=float)
+            sum_y_inv_var = np.zeros(len(pool_states), dtype=float)
+            sum_y2_inv_var = np.zeros(len(pool_states), dtype=float)
+            phot_obs = [ob for ob in obs if ob.mag is not None]
+            if phot_obs:
+                for ob in phot_obs:
+                    obs_cache = _prepare_obs_cache([ob], allow_unknown_site=allow_unknown_site)
+                    obs_bary = obs_cache.earth_bary_km[0] + obs_cache.site_pos_km[0]
+                    sun_pos, _ = _body_posvel("sun", ob.time.tdb)
+                    sun_bary = sun_pos.xyz.to_value("km").flatten()
+                    obs_helio = obs_bary - sun_bary
+                    _photometry_accumulate(
+                        pool_states,
+                        ob,
+                        obs_helio,
+                        mu_h,
+                        g,
+                        sum_inv_var,
+                        sum_y_inv_var,
+                        sum_y2_inv_var,
+                    )
+                logdet_v = sum(
+                    math.log(
+                        max(1e-12, float(ob.sigma_mag) if ob.sigma_mag is not None else 0.15) ** 2
+                    )
+                    for ob in phot_obs
+                )
+                loglikes_local += _photometry_loglike_marginal(
+                    sum_inv_var,
+                    sum_y_inv_var,
+                    sum_y2_inv_var,
+                    len(phot_obs),
+                    sigma_h,
+                    logdet_v,
+                )
+            return loglikes_local
+
+        cfg = AdaptiveConfig(
+            n_max=auto_n_max,
+            n_add=auto_n_add,
+            ess_target=auto_ess_target,
+            psis_khat_threshold=auto_psis_khat,
+            logrho_bins=auto_logrho_bins,
+            min_particles_per_decade=auto_min_per_decade,
+            w_min_mode=auto_w_min_mode,
+            min_particles_per_mode=auto_min_per_mode,
+            rho_prior_mode="log",
+            rho_prior_power=2.0,
+            rhodot_max_km_s=float(rhodot_max_km_s),
+            v_max_km_s=float(v_max_km_s),
+        )
+        states, weights, auto_grow_diag = adaptively_grow_cloud(
+            states,
+            obs,
+            obs_ref=obs_ref,
+            attrib_mean=attrib_mean,
+            attrib_cov=attrib_cov,
+            rho_min_au=rho_min_au,
+            rho_max_au=rho_max_au,
+            score_fn=_score_contract,
+            final_score_fn=_score_full,
+            cfg=cfg,
+            rng=rng,
+        )
+        auto_grow_done = True
+
+    if full_physics_final and not auto_grow_done:
         eps_final = min(
             _epsilon_arcsec_for_obs(
                 ob,
@@ -435,6 +567,8 @@ def sequential_fit_replicas(
         "epsilon_ast_ceiling_arcsec": (
             float(epsilon_ast_ceiling_arcsec) if epsilon_ast_ceiling_arcsec is not None else None
         ),
+        "auto_grow": bool(auto_grow),
+        "auto_grow_diag": auto_grow_diag,
     }
     metadata.update(diagnostics)
     return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)

@@ -517,6 +517,47 @@ def main() -> int:
         help="Max |v| (km/s) for fit-SMC proposals (defaults to rhodot max).",
     )
     parser.add_argument(
+        "--fit-smc-auto-grow",
+        action="store_true",
+        help="Adaptively grow the SMC cloud until diagnostics pass.",
+    )
+    parser.add_argument(
+        "--fit-smc-n-max",
+        type=int,
+        default=50000,
+        help="Maximum particles when auto-growing SMC cloud.",
+    )
+    parser.add_argument(
+        "--fit-smc-n-add",
+        type=int,
+        default=3000,
+        help="Incremental particles to add when auto-growing SMC cloud.",
+    )
+    parser.add_argument(
+        "--fit-smc-ess-target",
+        type=float,
+        default=500.0,
+        help="ESS target for auto-grow.",
+    )
+    parser.add_argument(
+        "--fit-smc-psis-khat",
+        type=float,
+        default=0.7,
+        help="PSIS k-hat threshold for auto-grow.",
+    )
+    parser.add_argument(
+        "--fit-smc-logrho-bins",
+        type=int,
+        default=8,
+        help="Log-rho bins used for coverage checks.",
+    )
+    parser.add_argument(
+        "--fit-smc-min-per-decade",
+        type=int,
+        default=20,
+        help="Minimum particles per log-rho decade.",
+    )
+    parser.add_argument(
         "--mix-posterior-frac",
         type=float,
         default=0.0,
@@ -860,6 +901,13 @@ def main() -> int:
             ),
             shadow_diagnostics=not args.fit_smc_no_shadow,
             diagnostics_path=str(diag_path) if diag_path is not None else None,
+            auto_grow=bool(args.fit_smc_auto_grow),
+            auto_n_max=int(args.fit_smc_n_max),
+            auto_n_add=int(args.fit_smc_n_add),
+            auto_ess_target=float(args.fit_smc_ess_target),
+            auto_psis_khat=float(args.fit_smc_psis_khat),
+            auto_logrho_bins=int(args.fit_smc_logrho_bins),
+            auto_min_per_decade=int(args.fit_smc_min_per_decade),
             seed=int(args.seed),
             admissible_bound=args.admissible_bound,
             admissible_q_min_au=args.admissible_q_min_au,
@@ -1426,6 +1474,13 @@ def main() -> int:
                 "fit_smc": bool(args.fit_smc),
                 "fit_smc_meta": fit_smc_meta,
                 "fit_smc_diag": fit_smc_diag,
+                "fit_smc_auto_grow": bool(args.fit_smc_auto_grow),
+                "fit_smc_n_max": args.fit_smc_n_max,
+                "fit_smc_n_add": args.fit_smc_n_add,
+                "fit_smc_ess_target": args.fit_smc_ess_target,
+                "fit_smc_psis_khat": args.fit_smc_psis_khat,
+                "fit_smc_logrho_bins": args.fit_smc_logrho_bins,
+                "fit_smc_min_per_decade": args.fit_smc_min_per_decade,
             },
             fh,
             indent=2,
