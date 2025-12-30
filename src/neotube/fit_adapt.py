@@ -21,6 +21,14 @@ except Exception:
     _HAVE_SCIPY = False
 
 try:
+    import arviz as az  # type: ignore
+
+    _HAVE_ARVIZ = True
+except Exception:
+    az = None
+    _HAVE_ARVIZ = False
+
+try:
     from sklearn.cluster import KMeans  # type: ignore
 
     _HAVE_SKLEARN = True
@@ -89,6 +97,14 @@ def compute_psis_khat(log_weights: np.ndarray) -> float:
     lw = np.asarray(log_weights, dtype=float)
     if lw.size < 20:
         return 1.0
+    if _HAVE_ARVIZ:
+        try:
+            _, khat = az.stats.diagnostics.psislw(lw)
+            if np.ndim(khat) > 0:
+                return float(np.max(khat))
+            return float(khat)
+        except Exception:
+            pass
     lw = lw - np.max(lw)
     w = np.exp(lw)
     n = w.size
