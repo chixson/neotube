@@ -872,10 +872,12 @@ def main() -> int:
             rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n)) * 149597870.7
             rhodots = rng.uniform(-float(args.rhodot_max_kms), float(args.rhodot_max_kms), size=n)
             n_workers = max(1, int(args.n_workers))
-            build_chunk = int(args.chunk_size) if args.chunk_size is not None else _auto_chunk(
-                n, n_workers
-            )
-            resid_chunk = build_chunk
+            if args.chunk_size is not None:
+                block_size = int(args.chunk_size)
+            else:
+                block_size = max(1, int(np.ceil(n / n_workers)))
+            build_chunk = block_size
+            resid_chunk = block_size
             if n_workers > 1:
                 use_threads = str(args.smc_pool).lower() == "threads"
                 if use_threads:
