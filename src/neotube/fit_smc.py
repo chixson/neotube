@@ -195,6 +195,7 @@ def sequential_fit_replicas(
     epsilon_ast_floor_arcsec: float = 0.01,
     epsilon_ast_ceiling_arcsec: float | None = None,
     shadow_diagnostics: bool = True,
+    diagnostics_path: str | None = None,
     site_kappas: dict[str, float] | None = None,
     seed: int | None = None,
     admissible_bound: bool = True,
@@ -296,9 +297,11 @@ def sequential_fit_replicas(
 
     diag_used_levels = []
     diag_max_delta = []
+    diag_step_labels: list[str] = []
     if shadow_diagnostics:
         diag_used_levels.append(used_level.copy())
         diag_max_delta.append(max_delta.copy())
+        diag_step_labels.append("seed")
 
     for ob_idx, ob in enumerate(obs[3:], start=3):
         loglikes = np.empty(len(states), dtype=float)
@@ -327,6 +330,7 @@ def sequential_fit_replicas(
         if shadow_diagnostics:
             diag_used_levels.append(used_level.copy())
             diag_max_delta.append(max_delta.copy())
+            diag_step_labels.append(f"obs_{ob_idx}")
 
         ess = 1.0 / np.sum(weights**2)
         if ess < ess_threshold * len(weights):
@@ -364,6 +368,7 @@ def sequential_fit_replicas(
         if shadow_diagnostics:
             diag_used_levels.append(used_level.copy())
             diag_max_delta.append(max_delta.copy())
+            diag_step_labels.append("final")
 
         sum_inv_var = np.zeros(len(states), dtype=float)
         sum_y_inv_var = np.zeros(len(states), dtype=float)
@@ -401,6 +406,16 @@ def sequential_fit_replicas(
             "shadow_p95_arcsec": float(np.percentile(deltas, 95.0)),
             "shadow_mean_arcsec": float(np.mean(deltas)),
         }
+        if diagnostics_path:
+            levels = np.stack(diag_used_levels, axis=0)
+            deltas_steps = np.stack(diag_max_delta, axis=0)
+            step_labels = np.array(diag_step_labels, dtype=str)
+            np.savez_compressed(
+                diagnostics_path,
+                used_levels=levels,
+                max_delta_arcsec=deltas_steps,
+                step_labels=step_labels,
+            )
 
     metadata = {
         "n_particles": int(len(states)),
