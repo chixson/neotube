@@ -43,4 +43,5 @@ PYTHONPATH=neotube/src python scripts/fit_diagnostics.py \
 
 - `pyproject.toml` declares the CLI entry points.
 - Install dev dependencies with `pip install -e .[dev]`. Tests rely on `pytest`, formatting on `black`, linting on `ruff`.
+- `src/neotube/fit_smc.py` contains the sequential Monte Carlo (SMC) replica fitter; attributable rates are treated as `deg/day`, and the final weights can be recomputed with full-physics astrometry.
 *** End Patch***  

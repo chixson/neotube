@@ -50,9 +50,12 @@ __all__ = [
     "propagate_state",
     "propagate_state_kepler",
     "propagate_state_sun",
+    "PropagationConfig",
+    "default_propagation_ladder",
     "predict_radec",
     "predict_radec_batch",
     "predict_radec_from_epoch",
+    "predict_radec_with_contract",
     "predict_radec_with_geometry",
     "ReplicaCloud",
     "propagate_replicas",
@@ -82,6 +85,18 @@ class ObsCache:
     site_vel_km_s: np.ndarray
     earth_bary_km: np.ndarray
     earth_bary_vel_km_s: np.ndarray
+
+
+@dataclass(frozen=True)
+class PropagationConfig:
+    model: str = "kepler"
+    perturbers: Sequence[str] = ("earth", "mars", "jupiter")
+    max_step: float = 3600.0
+    light_time_iters: int = 2
+    full_physics: bool = False
+    include_refraction: bool = False
+    adaptive_step: bool = True
+    step_scale: float = 0.05
 
 
 def _prepare_obs_cache(
@@ -175,6 +190,251 @@ def _apply_bennett_refraction(topounit: np.ndarray, site_pos_km: np.ndarray) -> 
     e_perp = perp / perp_norm
     z_prime = z - delta
     return e_perp * np.sin(z_prime) + z_hat * np.cos(z_prime)
+
+
+def default_propagation_ladder(max_step: float = 3600.0) -> list[PropagationConfig]:
+    """Default escalation ladder for contract-based propagation."""
+    return [
+        PropagationConfig(
+            model="kepler",
+            perturbers=(),
+            max_step=max_step,
+            full_physics=False,
+            adaptive_step=False,
+        ),
+        PropagationConfig(
+            model="kepler",
+            perturbers=(),
+            max_step=max_step,
+            full_physics=True,
+            adaptive_step=False,
+        ),
+        PropagationConfig(
+            model="nbody",
+            perturbers=("earth", "mars", "jupiter"),
+            max_step=max_step,
+            full_physics=False,
+            adaptive_step=True,
+        ),
+        PropagationConfig(
+            model="nbody",
+            perturbers=("earth", "mars", "jupiter"),
+            max_step=max_step,
+            full_physics=True,
+            adaptive_step=True,
+        ),
+        PropagationConfig(
+            model="nbody",
+            perturbers=("mercury", "venus", "earth", "mars", "jupiter", "saturn", "uranus", "neptune"),
+            max_step=max_step / 6.0,
+            full_physics=True,
+            adaptive_step=True,
+            step_scale=0.02,
+        ),
+    ]
+
+
+def _epsilon_ast_from_observations(
+    obs: Sequence["Observation"],
+    *,
+    scale: float = 0.1,
+    floor_arcsec: float = 0.01,
+    ceiling_arcsec: float | None = None,
+) -> float:
+    sigmas = np.array([float(o.sigma_arcsec) for o in obs], dtype=float)
+    if sigmas.size == 0:
+        return floor_arcsec
+    eps = float(np.median(sigmas) * scale)
+    eps = max(floor_arcsec, eps)
+    if ceiling_arcsec is not None:
+        eps = min(eps, ceiling_arcsec)
+    return eps
+
+
+def _angular_sep_arcsec(
+    ra_a: np.ndarray,
+    dec_a: np.ndarray,
+    ra_b: np.ndarray,
+    dec_b: np.ndarray,
+) -> np.ndarray:
+    ra1 = np.deg2rad(ra_a)
+    dec1 = np.deg2rad(dec_a)
+    ra2 = np.deg2rad(ra_b)
+    dec2 = np.deg2rad(dec_b)
+    cos_ang = np.sin(dec1) * np.sin(dec2) + np.cos(dec1) * np.cos(dec2) * np.cos(ra1 - ra2)
+    cos_ang = np.clip(cos_ang, -1.0, 1.0)
+    ang = np.arccos(cos_ang)
+    return np.rad2deg(ang) * 3600.0
+
+
+def _estimate_step_limit(
+    state: np.ndarray,
+    epoch: Time,
+    perturbers: Sequence[str],
+    step_scale: float,
+    *,
+    min_step: float = 1.0,
+) -> float:
+    r = state[:3].astype(float)
+    v = state[3:].astype(float)
+    r_norm = float(np.linalg.norm(r))
+    v_norm = float(np.linalg.norm(v))
+    if r_norm <= 0.0:
+        return min_step
+    a_sun = GM_SUN / max(r_norm * r_norm, 1e-30)
+    t_curve = math.sqrt(r_norm / max(a_sun, 1e-30))
+    t_cross = r_norm / max(v_norm, 1e-30)
+    t_close = np.inf
+    if perturbers:
+        sun_pos, sun_vel = _body_posvel("sun", epoch)
+        sun_bary = sun_pos.xyz.to(u.km).value.flatten()
+        sun_vel_kms = sun_vel.xyz.to(u.km / u.s).value.flatten()
+        for body in perturbers:
+            gm = PLANET_GMS.get(body.lower())
+            if gm is None:
+                continue
+            body_pos, body_vel = _body_posvel(body, epoch)
+            body_bary = body_pos.xyz.to(u.km).value.flatten()
+            body_vel_kms = body_vel.xyz.to(u.km / u.s).value.flatten()
+            body_helio = body_bary - sun_bary
+            body_vel_helio = body_vel_kms - sun_vel_kms
+            rel = r - body_helio
+            d = float(np.linalg.norm(rel))
+            v_rel = float(np.linalg.norm(v - body_vel_helio))
+            if d > 0.0 and v_rel > 0.0:
+                t_close = min(t_close, d / v_rel)
+    t_local = min(t_curve, t_cross, t_close)
+    if not np.isfinite(t_local):
+        t_local = t_cross
+    return max(min_step, step_scale * t_local)
+
+
+def _predict_with_config(
+    state: np.ndarray,
+    epoch: Time,
+    obs: Sequence["Observation"],
+    config: PropagationConfig,
+    *,
+    allow_unknown_site: bool,
+    obs_cache: ObsCache | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    use_kepler = config.model.lower() == "kepler"
+    max_step = float(config.max_step)
+    if config.adaptive_step:
+        max_step = min(
+            max_step,
+            _estimate_step_limit(
+                state,
+                epoch,
+                config.perturbers,
+                config.step_scale,
+            ),
+        )
+    return predict_radec_from_epoch(
+        state,
+        epoch,
+        obs,
+        config.perturbers,
+        max_step,
+        use_kepler=use_kepler,
+        allow_unknown_site=allow_unknown_site,
+        light_time_iters=config.light_time_iters,
+        full_physics=config.full_physics,
+        include_refraction=config.include_refraction,
+        obs_cache=obs_cache,
+    )
+
+
+def predict_radec_with_contract(
+    states: np.ndarray | Sequence[np.ndarray],
+    epoch: Time,
+    obs: Sequence["Observation"],
+    *,
+    configs: Sequence[PropagationConfig] | None = None,
+    epsilon_ast_arcsec: float | None = 0.1,
+    epsilon_ast_scale: float = 0.1,
+    epsilon_ast_floor_arcsec: float = 0.01,
+    epsilon_ast_ceiling_arcsec: float | None = None,
+    allow_unknown_site: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Predict RA/Dec with a physics escalation ladder until angular error is below contract."""
+    if not obs:
+        return np.empty((0, 0), dtype=float), np.empty((0, 0), dtype=float), np.empty(0), np.empty(0)
+
+    states_arr = np.asarray(states, dtype=float)
+    if states_arr.ndim == 1:
+        states_arr = states_arr[np.newaxis, :]
+    if states_arr.shape[1] != 6:
+        raise ValueError("states must have shape (N,6)")
+
+    if configs is None:
+        configs = default_propagation_ladder()
+    if not configs:
+        raise ValueError("configs must be non-empty")
+
+    if epsilon_ast_arcsec is None:
+        epsilon_ast_arcsec = _epsilon_ast_from_observations(
+            obs,
+            scale=epsilon_ast_scale,
+            floor_arcsec=epsilon_ast_floor_arcsec,
+            ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+        )
+
+    n_states = states_arr.shape[0]
+    n_obs = len(obs)
+    ra_out = np.empty((n_states, n_obs), dtype=float)
+    dec_out = np.empty((n_states, n_obs), dtype=float)
+    used_level = np.zeros(n_states, dtype=int)
+    max_delta = np.zeros(n_states, dtype=float)
+
+    obs_cache = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
+
+    current_ra = np.empty((n_states, n_obs), dtype=float)
+    current_dec = np.empty((n_states, n_obs), dtype=float)
+    for i, state in enumerate(states_arr):
+        ra_pred, dec_pred = _predict_with_config(
+            state,
+            epoch,
+            obs,
+            configs[0],
+            allow_unknown_site=allow_unknown_site,
+            obs_cache=obs_cache,
+        )
+        current_ra[i] = ra_pred
+        current_dec[i] = dec_pred
+    ra_out[:] = current_ra
+    dec_out[:] = current_dec
+
+    active = np.ones(n_states, dtype=bool)
+    for level in range(1, len(configs)):
+        if not np.any(active):
+            break
+        for i in np.where(active)[0]:
+            ra_new, dec_new = _predict_with_config(
+                states_arr[i],
+                epoch,
+                obs,
+                configs[level],
+                allow_unknown_site=allow_unknown_site,
+                obs_cache=obs_cache,
+            )
+            delta = _angular_sep_arcsec(current_ra[i], current_dec[i], ra_new, dec_new)
+            delta_max = float(np.max(delta))
+            if delta_max <= epsilon_ast_arcsec:
+                max_delta[i] = max(max_delta[i], delta_max)
+                active[i] = False
+            else:
+                current_ra[i] = ra_new
+                current_dec[i] = dec_new
+                ra_out[i] = ra_new
+                dec_out[i] = dec_new
+                used_level[i] = level
+                max_delta[i] = delta_max
+        # accept all remaining if this is the last level
+        if level == len(configs) - 1:
+            active[:] = False
+
+    return ra_out, dec_out, used_level, max_delta
 
 # Cache for repeated ephemeris lookups (per process).
 _BULK_EPHEM_CACHE: dict[tuple, np.ndarray] = {}
