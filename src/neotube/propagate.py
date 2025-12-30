@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
+import math
 from typing import Iterable, Sequence, Optional
 from functools import lru_cache
 
