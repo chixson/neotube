@@ -255,9 +255,13 @@ def _fetch_horizons(
 def _fetch_horizons_any(
     target: str, site: str, times: Time, id_type: str | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
+    target_stripped = target.strip()
+    numeric_id = target_stripped.isdigit()
+    use_smallbody = not numeric_id
     attempts: list[tuple[str, str | None]] = []
     attempts.append((target, id_type))
-    attempts.append((target, "smallbody"))
+    if use_smallbody:
+        attempts.append((target, "smallbody"))
     attempts.append((target, "majorbody"))
     parts = target.strip().split()
     if len(parts) > 1:
@@ -282,9 +286,13 @@ def _fetch_horizons_vector_any(
 ) -> tuple[float, float, float]:
     if not _HAS_HORIZONS:
         raise RuntimeError("astroquery.jplhorizons is not available")
+    target_stripped = target.strip()
+    numeric_id = target_stripped.isdigit()
+    use_smallbody = not numeric_id
     attempts: list[tuple[str, str | None]] = []
     attempts.append((target, id_type))
-    attempts.append((target, "smallbody"))
+    if use_smallbody:
+        attempts.append((target, "smallbody"))
     attempts.append((target, "majorbody"))
     parts = target.strip().split()
     if len(parts) > 1:
