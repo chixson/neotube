@@ -949,25 +949,38 @@ def sequential_fit_replicas(
             states_list.append(state)
             valid_mask.append(True)
 
-        states = np.array(states_list, dtype=float)
-        valid = np.array(valid_mask, dtype=bool)
-        states = states[valid]
-        if states.size == 0:
-            raise RuntimeError("No valid initial particles; widen rho/rhodot bounds.")
-        if len(states) < n_particles:
-            idx = rng.choice(len(states), size=n_particles, replace=True)
-            states = states[idx]
-        energy_mask = _finite_energy_mask(states)
-        if not np.all(energy_mask):
-            _log(
-                "dropping {} states with non-finite energy before seed scoring".format(
-                    int(np.sum(~energy_mask))
+        try:
+            states = np.array(states_list, dtype=float)
+            valid = np.array(valid_mask, dtype=bool)
+            states = states[valid]
+            if states.size == 0:
+                raise RuntimeError("No valid initial particles; widen rho/rhodot bounds.")
+            if len(states) < n_particles:
+                idx = rng.choice(len(states), size=n_particles, replace=True)
+                states = states[idx]
+            energy_mask = _finite_energy_mask(states)
+            if not np.all(energy_mask):
+                _log(
+                    "dropping {} states with non-finite energy before seed scoring".format(
+                        int(np.sum(~energy_mask))
+                    )
                 )
+                states = states[energy_mask]
+            if states.size == 0:
+                raise RuntimeError("No valid initial particles after energy filter.")
+            _log("seeded {} states (valid={})".format(len(states), int(np.sum(valid))))
+        except Exception as exc:
+            _log("seed generation failed: {}".format(exc))
+            _log(traceback.format_exc())
+            _save_checkpoint(
+                states=np.array(states_list, dtype=float) if states_list else np.empty((0, 6)),
+                weights=np.ones(max(1, len(states_list)), dtype=float)
+                / max(1, len(states_list)),
+                next_obs_index=0,
+                stage="seed_gen_error",
+                error=str(exc),
             )
-            states = states[energy_mask]
-        if states.size == 0:
-            raise RuntimeError("No valid initial particles after energy filter.")
-        _log("seeded {} states (valid={})".format(len(states), int(np.sum(valid))))
+            raise
         if halt_before_seed_score:
             weights = np.full(len(states), 1.0 / len(states), dtype=float)
             _save_checkpoint(
