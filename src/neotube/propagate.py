@@ -408,6 +408,7 @@ def _predict_with_config(
             obs_cache,
             obs_times_jd,
             sun_bary_km,
+            max_step=max_step,
             light_time_iters=config.light_time_iters,
             full_physics=config.full_physics,
             include_refraction=config.include_refraction,
@@ -1299,6 +1300,7 @@ def predict_radec_from_epoch_cached(
     obs_times_jd: np.ndarray,
     sun_bary_km: np.ndarray,
     *,
+    max_step: float = 3600.0,
     light_time_iters: int = 2,
     full_physics: bool = False,
     include_refraction: bool = False,
@@ -1315,6 +1317,7 @@ def predict_radec_from_epoch_cached(
     c_km_s = 299792.458
     epoch_jd = float(epoch_jd)
 
+    epoch_time: Time | None = None
     for idx in range(len(obs_times_jd)):
         t_obs_jd = float(obs_times_jd[idx])
         site_pos = obs_cache.site_pos_km[idx]
@@ -1329,7 +1332,18 @@ def predict_radec_from_epoch_cached(
         sun_bary = None
         for _ in range(max(1, light_time_iters)):
             dt_sec = (t_emit_jd - epoch_jd) * 86400.0
-            emit_state = propagate_state_kepler_dt(state, [dt_sec])[0]
+            try:
+                emit_state = propagate_state_kepler_dt(state, [dt_sec])[0]
+            except Exception:
+                if epoch_time is None:
+                    epoch_time = Time(epoch_jd, format="jd", scale="tdb")
+                emit_time = Time(t_emit_jd, format="jd", scale="tdb")
+                emit_state = propagate_state_sun(
+                    state,
+                    epoch_time,
+                    (emit_time,),
+                    max_step=max_step,
+                )[0]
             sun_bary = _interp_vec_linear(obs_times_jd, sun_bary_km, t_emit_jd)
             obj_bary = emit_state[:3] + sun_bary
             rho = float(np.linalg.norm(obj_bary - obs_bary))
