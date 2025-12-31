@@ -6,7 +6,13 @@ import math
 import os
 import time
 from pathlib import Path
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import (
+    Executor,
+    ThreadPoolExecutor,
+    ProcessPoolExecutor,
+    as_completed,
+    TimeoutError,
+)
 import faulthandler
 import multiprocessing as mp
 import sys
@@ -22,6 +28,7 @@ from .propagate import (
     _body_posvel_km,
     _body_posvel_km_single,
     _prepare_obs_cache,
+    GM_SUN,
     ObsCache,
     PropagationConfig,
     default_propagation_ladder,
@@ -56,8 +63,31 @@ _HAS_SOBOL = False
 
 
 def _smc_worker_init(enable_faulthandler: bool) -> None:
-    if enable_faulthandler:
-        faulthandler.enable(all_threads=True, file=sys.stderr)
+    """
+    Initializer for worker processes/threads.
+
+    - Enables faulthandler in the worker if requested.
+    - Limits native-library parallelism to avoid oversubscription.
+    """
+    try:
+        if enable_faulthandler:
+            faulthandler.enable(all_threads=True, file=sys.stderr)
+    except Exception:
+        pass
+
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+    try:
+        import numba as _nb
+
+        try:
+            _nb.set_num_threads(1)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _score_states_contract_chunk_args(args: tuple[np.ndarray, dict[str, object]]) -> np.ndarray:
@@ -167,6 +197,15 @@ def _sigma_arcsec(ob: Observation, site_kappas: dict[str, float] | None) -> floa
     if site_kappas:
         kappa = site_kappas.get(ob.site or "UNK", 1.0)
     return max(1e-6, float(ob.sigma_arcsec) * float(kappa))
+
+
+def _finite_energy_mask(states: np.ndarray, mu_km3_s2: float = GM_SUN) -> np.ndarray:
+    r = states[:, :3]
+    v = states[:, 3:]
+    r_norm = np.linalg.norm(r, axis=1)
+    v2 = np.sum(v * v, axis=1)
+    energy = 0.5 * v2 - mu_km3_s2 / np.maximum(r_norm, 1e-12)
+    return np.isfinite(energy) & np.isfinite(r_norm) & (r_norm > 0.0)
 
 
 def _epsilon_arcsec_for_obs(
@@ -516,9 +555,34 @@ def sequential_fit_replicas(
 
     executor: Executor | None = None
     if worker_count > 1:
-        if mp_start_method or worker_faulthandler:
-            _log("fit-smc uses ThreadPoolExecutor; mp_start/worker_faulthandler ignored.")
-        executor = ThreadPoolExecutor(max_workers=worker_count)
+        try:
+            mp_ctx = None
+            if mp_start_method:
+                mp_ctx = mp.get_context(mp_start_method)
+                _log(f"creating ProcessPoolExecutor mp_start_method={mp_start_method}")
+            else:
+                _log("creating ProcessPoolExecutor (using default mp start method)")
+
+            if mp_ctx is not None:
+                executor = ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    mp_context=mp_ctx,
+                    initializer=_smc_worker_init,
+                    initargs=(worker_faulthandler,),
+                )
+            else:
+                executor = ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    initializer=_smc_worker_init,
+                    initargs=(worker_faulthandler,),
+                )
+        except Exception as exc:
+            _log(
+                "ProcessPoolExecutor creation failed ({}); falling back to ThreadPoolExecutor".format(
+                    exc
+                )
+            )
+            executor = ThreadPoolExecutor(max_workers=worker_count)
 
     def _shutdown_executor() -> None:
         if executor is not None:
@@ -895,6 +959,16 @@ def sequential_fit_replicas(
         if len(states) < n_particles:
             idx = rng.choice(len(states), size=n_particles, replace=True)
             states = states[idx]
+        energy_mask = _finite_energy_mask(states)
+        if not np.all(energy_mask):
+            _log(
+                "dropping {} states with non-finite energy before seed scoring".format(
+                    int(np.sum(~energy_mask))
+                )
+            )
+            states = states[energy_mask]
+        if states.size == 0:
+            raise RuntimeError("No valid initial particles after energy filter.")
         _log("seeded {} states (valid={})".format(len(states), int(np.sum(valid))))
         if halt_before_seed_score:
             weights = np.full(len(states), 1.0 / len(states), dtype=float)
@@ -943,6 +1017,18 @@ def sequential_fit_replicas(
         try:
             if ob_idx == next_obs_index or ob_idx % log_every_obs == 0:
                 _log("obs {} start (n={})".format(ob_idx, len(states)))
+            energy_mask = _finite_energy_mask(states)
+            if not np.all(energy_mask):
+                _log(
+                    "obs {} dropping {} states with non-finite energy".format(
+                        ob_idx, int(np.sum(~energy_mask))
+                    )
+                )
+                states = states[energy_mask]
+                weights = weights[energy_mask]
+                if len(states) == 0:
+                    raise RuntimeError("All states invalid after energy filter.")
+                weights = weights / np.sum(weights)
             loglikes = np.empty(len(states), dtype=float)
             sigma = _sigma_arcsec(ob, site_kappas)
             eps_ob = _epsilon_arcsec_for_obs(
