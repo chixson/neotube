@@ -385,6 +385,7 @@ def sequential_fit_replicas(
     checkpoint_path: str | None = None,
     resume: bool = False,
     checkpoint_every_obs: int = 1,
+    halt_before_seed_score: bool = False,
 ) -> ReplicaCloud:
     """Fit an SMC replica cloud from observations and return the final weighted states."""
     if len(observations) < 3:
@@ -490,6 +491,10 @@ def sequential_fit_replicas(
             metadata["checkpoint_stage"] = stage
             _shutdown_executor()
             return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)
+        if stage == "pre_seed_score":
+            _log("resuming seed scoring from checkpoint")
+            weights, used_level, max_delta = _score_seed(states)
+            next_obs_index = 3
     else:
         next_obs_index = 3
 
@@ -602,6 +607,49 @@ def sequential_fit_replicas(
             np.concatenate(delta_parts),
         )
 
+    def _score_seed(states: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        eps_seed = min(
+            _epsilon_arcsec_for_obs(
+                ob,
+                epsilon_ast_arcsec=epsilon_ast_arcsec,
+                epsilon_ast_scale=epsilon_ast_scale,
+                epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
+                epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+            )
+            for ob in obs3
+        )
+        ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+            states,
+            obs3,
+            eps_seed,
+            executor,
+        )
+        loglikes = np.zeros(len(states), dtype=float)
+        for idx, ob in enumerate(obs3):
+            sigma = _sigma_arcsec(ob, site_kappas)
+            for i in range(len(states)):
+                loglikes[i] += _gaussian_loglike(
+                    float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma
+                )
+        loglikes -= float(np.max(loglikes))
+        weights = np.exp(loglikes)
+        weights = weights / np.sum(weights)
+        ess = 1.0 / np.sum(weights**2)
+        _log(
+            "seed scoring done ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f}".format(
+                ess,
+                int(np.max(used_level)) if len(used_level) else 0,
+                float(np.max(max_delta)) if len(max_delta) else 0.0,
+            )
+        )
+        _save_checkpoint(
+            states=states,
+            weights=weights,
+            next_obs_index=3,
+            stage="seeded",
+        )
+        return weights, used_level, max_delta
+
     # Use the legacy vector fit to keep geometry consistent with the original pipeline.
     attrib, attrib_cov, s_seed, sdot_seed = build_attributable_vector_fit(
         obs3,
@@ -628,6 +676,9 @@ def sequential_fit_replicas(
                 sigma_rate_deg_per_day**2,
             ]
         )
+
+    used_level = np.array([], dtype=int)
+    max_delta = np.array([], dtype=float)
 
     if not resume:
         obs_ref = _ranging_reference_observation(obs3, epoch)
@@ -718,45 +769,21 @@ def sequential_fit_replicas(
             idx = rng.choice(len(states), size=n_particles, replace=True)
             states = states[idx]
         _log("seeded {} states (valid={})".format(len(states), int(np.sum(valid))))
+        if halt_before_seed_score:
+            weights = np.full(len(states), 1.0 / len(states), dtype=float)
+            _save_checkpoint(
+                states=states,
+                weights=weights,
+                next_obs_index=0,
+                stage="pre_seed_score",
+                metadata={"halted_before_seed_score": True},
+            )
+            _shutdown_executor()
+            raise SystemExit(
+                "Halted before seed scoring; checkpoint saved to {}".format(checkpoint_path)
+            )
 
-        eps_seed = min(
-            _epsilon_arcsec_for_obs(
-                ob,
-                epsilon_ast_arcsec=epsilon_ast_arcsec,
-                epsilon_ast_scale=epsilon_ast_scale,
-                epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
-                epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
-            )
-            for ob in obs3
-        )
-        ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
-            states,
-            obs3,
-            eps_seed,
-            executor,
-        )
-        loglikes = np.zeros(len(states), dtype=float)
-        for idx, ob in enumerate(obs3):
-            sigma = _sigma_arcsec(ob, site_kappas)
-            for i in range(len(states)):
-                loglikes[i] += _gaussian_loglike(float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma)
-        loglikes -= float(np.max(loglikes))
-        weights = np.exp(loglikes)
-        weights = weights / np.sum(weights)
-        ess = 1.0 / np.sum(weights**2)
-        _log(
-            "seed scoring done ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f}".format(
-                ess,
-                int(np.max(used_level)) if len(used_level) else 0,
-                float(np.max(max_delta)) if len(max_delta) else 0.0,
-            )
-        )
-        _save_checkpoint(
-            states=states,
-            weights=weights,
-            next_obs_index=3,
-            stage="seeded",
-        )
+        weights, used_level, max_delta = _score_seed(states)
 
     diag_used_levels = []
     diag_max_delta = []

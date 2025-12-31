@@ -603,6 +603,11 @@ def main() -> int:
         help="Checkpoint every N observations during fit-SMC.",
     )
     parser.add_argument(
+        "--fit-smc-halt-before-seed-score",
+        action="store_true",
+        help="Stop after seeding and write a checkpoint before seed scoring.",
+    )
+    parser.add_argument(
         "--mix-posterior-frac",
         type=float,
         default=0.0,
@@ -968,6 +973,7 @@ def main() -> int:
             ),
             resume=bool(args.fit_smc_resume),
             checkpoint_every_obs=int(args.fit_smc_checkpoint_every),
+            halt_before_seed_score=bool(args.fit_smc_halt_before_seed_score),
             seed=int(args.seed),
             admissible_bound=args.admissible_bound,
             admissible_q_min_au=args.admissible_q_min_au,
