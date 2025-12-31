@@ -1053,8 +1053,8 @@ def sequential_fit_replicas(
         )
 
     diagnostics: dict[str, float] = {}
-    if shadow_diagnostics and diag_max_delta:
-        deltas = np.concatenate(diag_max_delta)
+    if shadow_diagnostics and diag_max_delta and any(arr.size > 0 for arr in diag_max_delta):
+        deltas = np.concatenate([arr for arr in diag_max_delta if arr.size > 0])
         diagnostics = {
             "shadow_max_arcsec": float(np.max(deltas)),
             "shadow_p95_arcsec": float(np.percentile(deltas, 95.0)),
@@ -1096,6 +1096,8 @@ def sequential_fit_replicas(
                 max_delta_arcsec=deltas_steps,
                 step_labels=step_labels,
             )
+    elif shadow_diagnostics:
+        _log("shadow diagnostics empty; skipping save")
 
     metadata = {
         "n_particles": int(len(states)),
