@@ -22,4 +22,7 @@ runs/
 !runs/
 !runs/ceres/
 !runs/ceres/**
+!runs/ceres-ground-test/
+!runs/ceres-ground-test/**
+!runs/ceres-ground-test/*.csv
 !replicas.csv
