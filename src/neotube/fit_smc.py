@@ -941,11 +941,35 @@ def sequential_fit_replicas(
             epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
             epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
         )
+        obs_cache_single = _prepare_obs_cache([ob], allow_unknown_site=allow_unknown_site)
+        obs_times_single = np.asarray(obs_cache_single.times_tdb.jd, dtype=float)
+        sun_bary_single, _ = _body_posvel_km("sun", obs_cache_single.times_tdb)
+        use_cached_single = worker_count > 1
+        ob_configs = ladder
+        if use_cached_single:
+            ob_configs = [
+                cfg
+                for cfg in default_propagation_ladder(max_step=max_step)
+                if cfg.model == "kepler"
+            ]
+            if not ob_configs:
+                use_cached_single = False
+            elif not use_kepler:
+                _log(
+                    "obs {} uses cached Kepler config for stability (override --no-kepler).".format(
+                        ob_idx
+                    )
+                )
         ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
             states,
             [ob],
             eps_ob,
             executor,
+            obs_cache=obs_cache_single,
+            obs_times_jd=obs_times_single,
+            sun_bary_km=sun_bary_single,
+            use_cached_ephem=use_cached_single,
+            seed_configs=ob_configs,
         )
         for i in range(len(states)):
             loglikes[i] = _gaussian_loglike(float(ra_pred[i, 0]), float(dec_pred[i, 0]), ob, sigma)
