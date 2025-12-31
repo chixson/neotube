@@ -275,7 +275,7 @@ def adaptively_grow_cloud(
             passes = False
         if khat >= cfg.psis_khat_threshold:
             passes = False
-        if np.any(counts < cfg.min_particles_per_decade):
+        if np.any((counts < cfg.min_particles_per_decade) & (mass > cfg.w_min_mode)):
             passes = False
         if np.any((mass > cfg.w_min_mode) & (counts < cfg.min_particles_per_mode)):
             passes = False
@@ -303,9 +303,11 @@ def adaptively_grow_cloud(
 
         weak_bins = []
         for i in range(len(counts)):
+            if mass[i] <= cfg.w_min_mode:
+                continue
             if counts[i] < cfg.min_particles_per_decade:
                 weak_bins.append((edges[i], edges[i + 1]))
-            elif mass[i] > cfg.w_min_mode and counts[i] < cfg.min_particles_per_mode:
+            elif counts[i] < cfg.min_particles_per_mode:
                 weak_bins.append((edges[i], edges[i + 1]))
         for i in range(len(mode_weights)):
             if mode_weights[i] > cfg.w_min_mode and mode_counts[i] < cfg.min_particles_per_mode:
