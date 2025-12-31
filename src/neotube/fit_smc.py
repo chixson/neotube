@@ -6,13 +6,7 @@ import math
 import os
 import time
 from pathlib import Path
-from concurrent.futures import (
-    Executor,
-    ThreadPoolExecutor,
-    ProcessPoolExecutor,
-    as_completed,
-    TimeoutError,
-)
+from concurrent.futures import Executor, ThreadPoolExecutor, ProcessPoolExecutor
 import faulthandler
 import multiprocessing as mp
 import sys
@@ -1126,6 +1120,18 @@ def sequential_fit_replicas(
     auto_grow_done = False
     auto_grow_diag: dict | None = None
     if auto_grow:
+        energy_mask = _finite_energy_mask(states)
+        if not np.all(energy_mask):
+            _log(
+                "auto-grow dropping {} states with non-finite energy".format(
+                    int(np.sum(~energy_mask))
+                )
+            )
+            states = states[energy_mask]
+            weights = weights[energy_mask]
+            if len(states) == 0:
+                raise RuntimeError("All states invalid after energy filter.")
+            weights = weights / np.sum(weights)
         obs_ref = _ranging_reference_observation(obs, epoch)
         attrib_mean = attrib_mean
         attrib_cov = attrib_cov
@@ -1240,6 +1246,18 @@ def sequential_fit_replicas(
             next_obs_index=len(obs),
             stage="pre_final",
         )
+        energy_mask = _finite_energy_mask(states)
+        if not np.all(energy_mask):
+            _log(
+                "final scoring dropping {} states with non-finite energy".format(
+                    int(np.sum(~energy_mask))
+                )
+            )
+            states = states[energy_mask]
+            weights = weights[energy_mask]
+            if len(states) == 0:
+                raise RuntimeError("All states invalid after energy filter.")
+            weights = weights / np.sum(weights)
         eps_final = min(
             _epsilon_arcsec_for_obs(
                 ob,
@@ -1251,16 +1269,59 @@ def sequential_fit_replicas(
             for ob in obs
         )
         obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
-        thread_workers = max(1, worker_count)
-        _log("full-physics final scoring uses ThreadPoolExecutor workers={}".format(thread_workers))
-        with ThreadPoolExecutor(max_workers=thread_workers) as thread_exec:
+        final_exec = executor
+        if final_exec is None and worker_count > 1:
+            try:
+                mp_ctx = None
+                if mp_start_method:
+                    mp_ctx = mp.get_context(mp_start_method)
+                    _log(f"creating ProcessPoolExecutor mp_start_method={mp_start_method}")
+                else:
+                    _log("creating ProcessPoolExecutor (using default mp start method)")
+                if mp_ctx is not None:
+                    final_exec = ProcessPoolExecutor(
+                        max_workers=worker_count,
+                        mp_context=mp_ctx,
+                        initializer=_smc_worker_init,
+                        initargs=(worker_faulthandler,),
+                    )
+                else:
+                    final_exec = ProcessPoolExecutor(
+                        max_workers=worker_count,
+                        initializer=_smc_worker_init,
+                        initargs=(worker_faulthandler,),
+                    )
+            except Exception as exc:
+                _log(
+                    "ProcessPoolExecutor creation failed ({}); falling back to ThreadPoolExecutor".format(
+                        exc
+                    )
+                )
+                final_exec = ThreadPoolExecutor(max_workers=worker_count)
+        _log(
+            "full-physics final scoring uses {} workers={}".format(
+                type(final_exec).__name__ if final_exec is not None else "serial",
+                worker_count,
+            )
+        )
+        if final_exec is None:
             ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
                 states,
                 obs,
                 eps_final,
-                thread_exec,
+                None,
             )
-            loglikes = _score_full_parallel(states, obs_cache_all, thread_exec)
+            loglikes = _score_full_parallel(states, obs_cache_all, None)
+        else:
+            ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+                states,
+                obs,
+                eps_final,
+                final_exec,
+            )
+            loglikes = _score_full_parallel(states, obs_cache_all, final_exec)
+            if final_exec is not executor:
+                final_exec.shutdown(wait=True)
         if shadow_diagnostics:
             diag_used_levels.append(used_level.copy())
             diag_max_delta.append(max_delta.copy())
