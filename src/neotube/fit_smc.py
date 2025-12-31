@@ -6,7 +6,7 @@ import math
 import os
 import time
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 import faulthandler
 import multiprocessing as mp
 import sys
@@ -546,7 +546,7 @@ def sequential_fit_replicas(
         pool_states: np.ndarray,
         obs_chunk: Sequence[Observation],
         eps_arcsec: float,
-        executor: ProcessPoolExecutor | None,
+        executor: Executor | None,
     ) -> np.ndarray:
         ctx = {
             "epoch": epoch,
@@ -574,14 +574,14 @@ def sequential_fit_replicas(
         pool_states: np.ndarray,
         obs_chunk: Sequence[Observation],
         eps_arcsec: float,
-        executor: ProcessPoolExecutor | None,
+        executor: Executor | None,
     ) -> np.ndarray:
         return _score_chunks(pool_states, obs_chunk, eps_arcsec, executor)
 
     def _score_full_parallel(
         pool_states: np.ndarray,
         obs_cache_all: ObsCache,
-        executor: ProcessPoolExecutor | None,
+        executor: Executor | None,
     ) -> np.ndarray:
         ctx = {
             "epoch": epoch,
@@ -612,7 +612,7 @@ def sequential_fit_replicas(
         pool_states: np.ndarray,
         obs_chunk: Sequence[Observation],
         eps_arcsec: float,
-        executor: ProcessPoolExecutor | None,
+        executor: Executor | None,
         *,
         log_progress: bool = False,
         log_every: int = 10,
@@ -1138,14 +1138,17 @@ def sequential_fit_replicas(
             )
             for ob in obs
         )
-        ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
-            states,
-            obs,
-            eps_final,
-            executor,
-        )
         obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
-        loglikes = _score_full_parallel(states, obs_cache_all, executor)
+        thread_workers = max(1, worker_count)
+        _log("full-physics final scoring uses ThreadPoolExecutor workers={}".format(thread_workers))
+        with ThreadPoolExecutor(max_workers=thread_workers) as thread_exec:
+            ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+                states,
+                obs,
+                eps_final,
+                thread_exec,
+            )
+            loglikes = _score_full_parallel(states, obs_cache_all, thread_exec)
         if shadow_diagnostics:
             diag_used_levels.append(used_level.copy())
             diag_max_delta.append(max_delta.copy())
