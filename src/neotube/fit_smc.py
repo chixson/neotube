@@ -46,8 +46,8 @@ except Exception:
     _HAS_SOBOL = False
 
 
-def _score_states_contract_chunk(states: np.ndarray) -> np.ndarray:
-    ctx = _SCORE_CONTEXT
+def _score_states_contract_chunk_args(args: tuple[np.ndarray, dict[str, object]]) -> np.ndarray:
+    states, ctx = args
     obs_chunk = ctx["obs_chunk"]
     ra_pred, dec_pred, _, _ = predict_radec_with_contract(
         states,
@@ -67,8 +67,8 @@ def _score_states_contract_chunk(states: np.ndarray) -> np.ndarray:
     return loglikes_local
 
 
-def _score_states_full_chunk(states: np.ndarray) -> np.ndarray:
-    ctx = _SCORE_FULL_CONTEXT
+def _score_states_full_chunk_args(args: tuple[np.ndarray, dict[str, object]]) -> np.ndarray:
+    states, ctx = args
     obs = ctx["obs"]
     loglikes_local = np.zeros(len(states), dtype=float)
     for i, state in enumerate(states):
@@ -91,10 +91,10 @@ def _score_states_full_chunk(states: np.ndarray) -> np.ndarray:
     return loglikes_local
 
 
-def _predict_contract_chunk(
-    states: np.ndarray,
+def _predict_contract_chunk_args(
+    args: tuple[np.ndarray, dict[str, object]]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    ctx = _PREDICT_CONTEXT
+    states, ctx = args
     return predict_radec_with_contract(
         states,
         ctx["epoch"],
@@ -453,6 +453,14 @@ def sequential_fit_replicas(
         )
     )
 
+    executor: ProcessPoolExecutor | None = None
+    if worker_count > 1:
+        executor = ProcessPoolExecutor(max_workers=worker_count)
+
+    def _shutdown_executor() -> None:
+        if executor is not None:
+            executor.shutdown(wait=True)
+
     checkpoint_every_obs = max(1, int(checkpoint_every_obs))
     if resume:
         states, weights, next_obs_index, stage, ckpt_meta, epoch_isot = _load_checkpoint()
@@ -467,98 +475,113 @@ def sequential_fit_replicas(
             metadata = ckpt_meta if ckpt_meta is not None else {}
             metadata["resumed_from_checkpoint"] = str(checkpoint_path)
             metadata["checkpoint_stage"] = stage
+            _shutdown_executor()
             return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)
     else:
         next_obs_index = 3
+
+    def _choose_chunk_size(n: int, base_chunk: int, target_chunks: int = 1000) -> int:
+        if n <= 0:
+            return max(1, base_chunk)
+        desired = int(math.ceil(n / max(1, target_chunks)))
+        desired = max(1, desired)
+        return min(base_chunk, desired) if base_chunk > 0 else desired
 
     def _score_chunks(
         pool_states: np.ndarray,
         obs_chunk: Sequence[Observation],
         eps_arcsec: float,
+        executor: ProcessPoolExecutor | None,
     ) -> np.ndarray:
-        _SCORE_CONTEXT["epoch"] = epoch
-        _SCORE_CONTEXT["obs_chunk"] = obs_chunk
-        _SCORE_CONTEXT["eps_arcsec"] = eps_arcsec
-        _SCORE_CONTEXT["allow_unknown_site"] = allow_unknown_site
-        _SCORE_CONTEXT["ladder"] = ladder
-        _SCORE_CONTEXT["site_kappas"] = site_kappas
-        return _score_states_contract_chunk(pool_states)
+        ctx = {
+            "epoch": epoch,
+            "obs_chunk": obs_chunk,
+            "eps_arcsec": eps_arcsec,
+            "allow_unknown_site": allow_unknown_site,
+            "ladder": ladder,
+            "site_kappas": site_kappas,
+        }
+        if executor is None or len(pool_states) <= chunk_size:
+            return _score_states_contract_chunk_args((pool_states, ctx))
+        use_chunk = _choose_chunk_size(len(pool_states), chunk_size)
+        tasks = []
+        for start in range(0, len(pool_states), use_chunk):
+            tasks.append((pool_states[start : start + use_chunk], ctx))
+        out = np.empty(len(pool_states), dtype=float)
+        for offset, result in zip(
+            range(0, len(pool_states), use_chunk),
+            executor.map(_score_states_contract_chunk_args, tasks),
+        ):
+            out[offset : offset + len(result)] = result
+        return out
 
     def _score_parallel(
         pool_states: np.ndarray,
         obs_chunk: Sequence[Observation],
         eps_arcsec: float,
+        executor: ProcessPoolExecutor | None,
     ) -> np.ndarray:
-        _SCORE_CONTEXT["epoch"] = epoch
-        _SCORE_CONTEXT["obs_chunk"] = obs_chunk
-        _SCORE_CONTEXT["eps_arcsec"] = eps_arcsec
-        _SCORE_CONTEXT["allow_unknown_site"] = allow_unknown_site
-        _SCORE_CONTEXT["ladder"] = ladder
-        _SCORE_CONTEXT["site_kappas"] = site_kappas
-        if worker_count <= 1 or len(pool_states) <= chunk_size:
-            return _score_states_contract_chunk(pool_states)
-        tasks = []
-        for start in range(0, len(pool_states), chunk_size):
-            tasks.append(pool_states[start : start + chunk_size])
-        out = np.empty(len(pool_states), dtype=float)
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            for offset, result in zip(
-                range(0, len(pool_states), chunk_size),
-                executor.map(_score_states_contract_chunk, tasks),
-            ):
-                out[offset : offset + len(result)] = result
-        return out
+        return _score_chunks(pool_states, obs_chunk, eps_arcsec, executor)
 
-    def _score_full_parallel(pool_states: np.ndarray, obs_cache_all: ObsCache) -> np.ndarray:
-        _SCORE_FULL_CONTEXT["epoch"] = epoch
-        _SCORE_FULL_CONTEXT["obs"] = obs
-        _SCORE_FULL_CONTEXT["perturbers"] = perturbers
-        _SCORE_FULL_CONTEXT["max_step"] = max_step
-        _SCORE_FULL_CONTEXT["use_kepler"] = use_kepler
-        _SCORE_FULL_CONTEXT["allow_unknown_site"] = allow_unknown_site
-        _SCORE_FULL_CONTEXT["light_time_iters"] = light_time_iters
-        _SCORE_FULL_CONTEXT["site_kappas"] = site_kappas
-        _SCORE_FULL_CONTEXT["obs_cache"] = obs_cache_all
-        if worker_count <= 1 or len(pool_states) <= chunk_size:
-            return _score_states_full_chunk(pool_states)
+    def _score_full_parallel(
+        pool_states: np.ndarray,
+        obs_cache_all: ObsCache,
+        executor: ProcessPoolExecutor | None,
+    ) -> np.ndarray:
+        ctx = {
+            "epoch": epoch,
+            "obs": obs,
+            "perturbers": perturbers,
+            "max_step": max_step,
+            "use_kepler": use_kepler,
+            "allow_unknown_site": allow_unknown_site,
+            "light_time_iters": light_time_iters,
+            "site_kappas": site_kappas,
+            "obs_cache": obs_cache_all,
+        }
+        if executor is None or len(pool_states) <= chunk_size:
+            return _score_states_full_chunk_args((pool_states, ctx))
+        use_chunk = _choose_chunk_size(len(pool_states), chunk_size)
         tasks = []
-        for start in range(0, len(pool_states), chunk_size):
-            tasks.append(pool_states[start : start + chunk_size])
+        for start in range(0, len(pool_states), use_chunk):
+            tasks.append((pool_states[start : start + use_chunk], ctx))
         out = np.empty(len(pool_states), dtype=float)
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            for offset, result in zip(
-                range(0, len(pool_states), chunk_size),
-                executor.map(_score_states_full_chunk, tasks),
-            ):
-                out[offset : offset + len(result)] = result
+        for offset, result in zip(
+            range(0, len(pool_states), use_chunk),
+            executor.map(_score_states_full_chunk_args, tasks),
+        ):
+            out[offset : offset + len(result)] = result
         return out
 
     def _predict_contract_parallel(
         pool_states: np.ndarray,
         obs_chunk: Sequence[Observation],
         eps_arcsec: float,
+        executor: ProcessPoolExecutor | None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        _PREDICT_CONTEXT["epoch"] = epoch
-        _PREDICT_CONTEXT["obs_chunk"] = obs_chunk
-        _PREDICT_CONTEXT["eps_arcsec"] = eps_arcsec
-        _PREDICT_CONTEXT["allow_unknown_site"] = allow_unknown_site
-        _PREDICT_CONTEXT["ladder"] = ladder
-        if worker_count <= 1 or len(pool_states) <= chunk_size:
-            return _predict_contract_chunk(pool_states)
+        ctx = {
+            "epoch": epoch,
+            "obs_chunk": obs_chunk,
+            "eps_arcsec": eps_arcsec,
+            "allow_unknown_site": allow_unknown_site,
+            "ladder": ladder,
+        }
+        if executor is None or len(pool_states) <= chunk_size:
+            return _predict_contract_chunk_args((pool_states, ctx))
+        use_chunk = _choose_chunk_size(len(pool_states), chunk_size)
         tasks = []
-        for start in range(0, len(pool_states), chunk_size):
-            tasks.append(pool_states[start : start + chunk_size])
+        for start in range(0, len(pool_states), use_chunk):
+            tasks.append((pool_states[start : start + use_chunk], ctx))
         ra_parts = []
         dec_parts = []
         lvl_parts = []
         delta_parts = []
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            for result in executor.map(_predict_contract_chunk, tasks):
-                ra, dec, levels, deltas = result
-                ra_parts.append(ra)
-                dec_parts.append(dec)
-                lvl_parts.append(levels)
-                delta_parts.append(deltas)
+        for result in executor.map(_predict_contract_chunk_args, tasks):
+            ra, dec, levels, deltas = result
+            ra_parts.append(ra)
+            dec_parts.append(dec)
+            lvl_parts.append(levels)
+            delta_parts.append(deltas)
         return (
             np.vstack(ra_parts),
             np.vstack(dec_parts),
@@ -700,6 +723,7 @@ def sequential_fit_replicas(
             states,
             obs3,
             eps_seed,
+            executor,
         )
         loglikes = np.zeros(len(states), dtype=float)
         for idx, ob in enumerate(obs3):
@@ -746,6 +770,7 @@ def sequential_fit_replicas(
             states,
             [ob],
             eps_ob,
+            executor,
         )
         for i in range(len(states)):
             loglikes[i] = _gaussian_loglike(float(ra_pred[i, 0]), float(dec_pred[i, 0]), ob, sigma)
@@ -810,12 +835,12 @@ def sequential_fit_replicas(
                 )
                 for ob in obs
             )
-            return _score_parallel(pool_states, obs, eps_final)
+            return _score_parallel(pool_states, obs, eps_final, executor)
 
         obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
 
         def _score_full(pool_states: np.ndarray) -> np.ndarray:
-            loglikes_local = _score_full_parallel(pool_states, obs_cache_all)
+            loglikes_local = _score_full_parallel(pool_states, obs_cache_all, executor)
             sum_inv_var = np.zeros(len(pool_states), dtype=float)
             sum_y_inv_var = np.zeros(len(pool_states), dtype=float)
             sum_y2_inv_var = np.zeros(len(pool_states), dtype=float)
@@ -919,9 +944,10 @@ def sequential_fit_replicas(
             states,
             obs,
             eps_final,
+            executor,
         )
         obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
-        loglikes = _score_full_parallel(states, obs_cache_all)
+        loglikes = _score_full_parallel(states, obs_cache_all, executor)
         if shadow_diagnostics:
             diag_used_levels.append(used_level.copy())
             diag_max_delta.append(max_delta.copy())
@@ -1004,4 +1030,5 @@ def sequential_fit_replicas(
     }
     metadata.update(diagnostics)
     _log("done n={} ess={:.1f}".format(len(states), float(1.0 / np.sum(weights**2))))
+    _shutdown_executor()
     return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)
