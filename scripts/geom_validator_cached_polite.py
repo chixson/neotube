@@ -144,8 +144,10 @@ except Exception:
 try:
     from astropy.time import Time, TimeDelta  # type: ignore
     from astropy.coordinates import (  # type: ignore
+        AltAz,
         EarthLocation,
         GCRS,
+        ICRS,
         SkyCoord,
         CartesianDifferential,
         CartesianRepresentation,
@@ -578,6 +580,7 @@ def predict_apparent_radec_for_obs(
     site_vel_bary_km_s: np.ndarray,
     earth_bary_km: Optional[np.ndarray] = None,
     earth_vel_km_s: Optional[np.ndarray] = None,
+    site_ecef_km: Optional[np.ndarray] = None,
     limiter: Optional[GlobalRateLimiter] = None,
     max_iters: int = 6,
     tol_s: float = 1e-4,
@@ -592,39 +595,14 @@ def predict_apparent_radec_for_obs(
     if _HAVE_ASTROPY:
         t_obs = Time(obs_time_iso, scale="utc")
         t_obs_tdb = t_obs.tdb
-        if earth_bary_km is not None and earth_vel_km_s is not None:
-            obj_vec = horizons_vectors_cached(jpl_cmd, t_obs_tdb.iso, center="@ssb", refplane="frame", limiter=limiter)
-            obj_bary = obj_vec.copy()
-            r_topo = obj_bary[:3] - site_bary_km
-            obs_geoloc_km = site_bary_km - earth_bary_km
-            obs_geovel_km_s = site_vel_bary_km_s - earth_vel_km_s
-            obs_geoloc = obs_geoloc_km * u.km
-            obs_geovel = obs_geovel_km_s * u.km / u.s
-            rep = CartesianRepresentation(
-                obj_bary[:3] * u.km,
-                differentials=CartesianDifferential(obj_bary[3:] * u.km / u.s),
-            )
-            coord = SkyCoord(rep, frame="icrs")
-            gcrs_frame = GCRS(obstime=t_obs_tdb, obsgeoloc=obs_geoloc, obsgeovel=obs_geovel)
-            coord_gcrs = coord.transform_to(gcrs_frame)
-            ra_deg = float(coord_gcrs.ra.deg)
-            dec_deg = float(coord_gcrs.dec.deg)
-            s_ab = radec_to_unit(ra_deg, dec_deg)
-            tau = float(np.linalg.norm(r_topo) / C_KM_S)
-            debug = PredictDebug(
-                iterations=1,
-                tau_s=tau,
-                obj_bary_km=list(obj_bary[:3]),
-                r_topo_km=list(r_topo),
-                unit_topovec=list(s_ab),
-            )
-            return ra_deg, dec_deg, debug
         t_guess = t_obs_tdb
         last_tau = None
         obj_bary = None
+        obj_vel = None
         for it in range(max_iters):
             obj_vec = horizons_vectors_cached(jpl_cmd, t_guess.iso, center="@ssb", refplane="frame", limiter=limiter)
             obj_bary = obj_vec.copy()
+            obj_vel = obj_vec[3:].copy()
             r_topo = obj_bary[:3] - site_bary_km
             R = float(np.linalg.norm(r_topo))
             tau = R / C_KM_S
@@ -634,16 +612,20 @@ def predict_apparent_radec_for_obs(
             last_tau = tau
             t_guess = t_new
         r_topo = obj_bary[:3] - site_bary_km
-        if earth_bary_km is not None and earth_vel_km_s is not None:
-            obs_geoloc_km = site_bary_km - earth_bary_km
-            obs_geovel_km_s = site_vel_bary_km_s - earth_vel_km_s
-            obs_geoloc = obs_geoloc_km * u.km
-            obs_geovel = obs_geovel_km_s * u.km / u.s
-            coord = SkyCoord(CartesianRepresentation(obj_bary[:3] * u.km), frame="icrs")
-            gcrs_frame = GCRS(obstime=t_obs_tdb, obsgeoloc=obs_geoloc, obsgeovel=obs_geovel)
-            coord_gcrs = coord.transform_to(gcrs_frame)
-            ra_deg = float(coord_gcrs.ra.deg)
-            dec_deg = float(coord_gcrs.dec.deg)
+        if site_ecef_km is not None and obj_vel is not None:
+            rep = CartesianRepresentation(obj_bary[:3] * u.km)
+            rep = rep.with_differentials(CartesianDifferential(obj_vel * u.km / u.s))
+            sc_obj_icrs = SkyCoord(rep, frame=ICRS(), obstime=t_guess)
+            site_loc = EarthLocation.from_geocentric(
+                site_ecef_km[0] * u.km,
+                site_ecef_km[1] * u.km,
+                site_ecef_km[2] * u.km,
+            )
+            altaz = AltAz(obstime=t_obs, location=site_loc, pressure=0.0 * u.bar)
+            sc_obj_altaz = sc_obj_icrs.transform_to(altaz)
+            sc_apparent_icrs = sc_obj_altaz.transform_to(ICRS())
+            ra_deg = float(sc_apparent_icrs.ra.deg)
+            dec_deg = float(sc_apparent_icrs.dec.deg)
             s_ab = radec_to_unit(ra_deg, dec_deg)
         else:
             s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
@@ -883,6 +865,8 @@ def run_validator(
         earth_bary = earth_vec[:3].copy()
         earth_vel = earth_vec[3:].copy()
         site_bary, site_vel = site_bary_and_vel_from_mpc_site(site, epoch, site_catalog, earth_bary, earth_vel)
+        site_entry = site_catalog.get(site)
+        site_ecef = mpc_site_to_ecef_km(site_entry) if site_entry is not None else None
         ra_pred, dec_pred, dbg = predict_apparent_radec_for_obs(
             jpl_cmd,
             epoch,
@@ -890,6 +874,7 @@ def run_validator(
             site_vel,
             earth_bary_km=earth_bary,
             earth_vel_km_s=earth_vel,
+            site_ecef_km=site_ecef,
             limiter=limiter,
         )
         pred_ra.append(ra_pred)
