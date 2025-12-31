@@ -485,10 +485,14 @@ def sequential_fit_replicas(
         stage: str,
         metadata: dict[str, object] | None = None,
         error: str | None = None,
+        checkpoint_path_override: Path | None = None,
     ) -> None:
-        if not checkpoint_path:
+        if not checkpoint_path and checkpoint_path_override is None:
             return
-        ckpt_path = Path(checkpoint_path).expanduser().resolve()
+        if checkpoint_path_override is not None:
+            ckpt_path = Path(checkpoint_path_override).expanduser().resolve()
+        else:
+            ckpt_path = Path(checkpoint_path).expanduser().resolve()
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "next_obs_index": int(next_obs_index),
@@ -1110,6 +1114,20 @@ def sequential_fit_replicas(
                     next_obs_index=ob_idx + 1,
                     stage="assimilating",
                 )
+                if os.environ.get("NEOTUBE_CHECKPOINT_PER_OBS") == "1":
+                    ckpt_path = Path(checkpoint_path).expanduser().resolve()
+                    per_obs_path = ckpt_path.with_name(
+                        "{}_obs{:03d}{}".format(
+                            ckpt_path.stem, ob_idx, ckpt_path.suffix
+                        )
+                    )
+                    _save_checkpoint(
+                        states=states,
+                        weights=weights,
+                        next_obs_index=ob_idx + 1,
+                        stage="assimilating",
+                        checkpoint_path_override=per_obs_path,
+                    )
         except Exception as exc:
             _log("obs {} failed: {}".format(ob_idx, exc))
             _log(traceback.format_exc())
