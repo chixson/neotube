@@ -158,6 +158,10 @@ def _plot_composite(
     obs_dec: np.ndarray,
     pred_ra: np.ndarray,
     pred_dec: np.ndarray,
+    pred_ra_mean: np.ndarray,
+    pred_dec_mean: np.ndarray,
+    horizons_ra: np.ndarray | None,
+    horizons_dec: np.ndarray | None,
     out_dir: Path,
 ) -> None:
     fig, ax = plt.subplots(3, 2, figsize=(12, 14))
@@ -184,6 +188,16 @@ def _plot_composite(
 
     ax[2, 1].scatter(obs_ra, obs_dec, c="k", s=20, label="obs")
     ax[2, 1].scatter(pred_ra, pred_dec, c="tab:blue", s=8, alpha=0.4, label="replicas")
+    ax[2, 1].plot(pred_ra_mean, pred_dec_mean, color="tab:orange", lw=1.0, label="replica mean")
+    if horizons_ra is not None and horizons_dec is not None:
+        ax[2, 1].scatter(
+            horizons_ra,
+            horizons_dec,
+            c="tab:red",
+            s=36,
+            marker="*",
+            label="Horizons",
+        )
     ax[2, 1].set_xlabel("RA (deg)")
     ax[2, 1].set_ylabel("Dec (deg)")
     ax[2, 1].legend()
@@ -277,7 +291,22 @@ def main() -> None:
     # plot sky scatter using all predicted points
     pred_ra_flat = pred_ra.ravel()
     pred_dec_flat = pred_dec.ravel()
+    pred_ra_mean = np.mean(pred_ra, axis=0)
+    pred_dec_mean = np.mean(pred_dec, axis=0)
     _plot_sky(obs_ra, obs_dec, pred_ra_flat, pred_dec_flat, out_dir)
+
+    horizons_ra = None
+    horizons_dec = None
+    if args.horizons_target:
+        try:
+            site = obs[0].site or "500"
+            horizons_ra, horizons_dec = _fetch_horizons(args.horizons_target, site, obs_times)
+        except Exception:
+            # fallback to geocenter if MPC code is unknown to Horizons
+            try:
+                horizons_ra, horizons_dec = _fetch_horizons(args.horizons_target, "500", obs_times)
+            except Exception as exc:
+                print(f"[warn] Horizons overlay failed: {exc}")
 
     _plot_composite(
         obs_times.mjd,
@@ -290,25 +319,25 @@ def main() -> None:
         obs_dec,
         pred_ra_flat,
         pred_dec_flat,
+        pred_ra_mean,
+        pred_dec_mean,
+        horizons_ra,
+        horizons_dec,
         out_dir,
     )
 
     # Horizons overlay
-    if args.horizons_target:
-        try:
-            site = obs[0].site or "500"
-            h_ra, h_dec = _fetch_horizons(args.horizons_target, site, obs_times)
-            fig, ax = plt.subplots(figsize=(6, 6))
-            ax.scatter(obs_ra, obs_dec, c="k", s=20, label="obs")
-            ax.scatter(h_ra, h_dec, c="tab:red", s=30, label="Horizons")
-            ax.set_xlabel("RA (deg)")
-            ax.set_ylabel("Dec (deg)")
-            ax.legend()
-            fig.tight_layout()
-            fig.savefig(out_dir / "sky_obs_vs_horizons.png", dpi=150)
-            plt.close(fig)
-        except Exception as exc:
-            print(f"[warn] Horizons overlay failed: {exc}")
+    if horizons_ra is not None and horizons_dec is not None:
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.scatter(obs_ra, obs_dec, c="k", s=20, label="obs")
+        ax.scatter(horizons_ra, horizons_dec, c="tab:red", s=30, label="Horizons")
+        ax.plot(pred_ra_mean, pred_dec_mean, color="tab:orange", lw=1.0, label="replica mean")
+        ax.set_xlabel("RA (deg)")
+        ax.set_ylabel("Dec (deg)")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(out_dir / "sky_obs_vs_horizons.png", dpi=150)
+        plt.close(fig)
 
     summary_path = out_dir / "summary.json"
     with summary_path.open("w") as fh:
