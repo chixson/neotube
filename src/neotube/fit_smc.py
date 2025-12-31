@@ -19,9 +19,11 @@ from astropy.time import Time
 from .models import Observation
 from .fit_adapt import AdaptiveConfig, adaptively_grow_cloud
 from .propagate import (
+    _body_posvel_km,
     _body_posvel_km_single,
     _prepare_obs_cache,
     ObsCache,
+    PropagationConfig,
     default_propagation_ladder,
     predict_radec_from_epoch,
     predict_radec_with_contract,
@@ -122,6 +124,10 @@ def _predict_contract_chunk_args(
         epsilon_ast_arcsec=ctx["eps_arcsec"],
         allow_unknown_site=ctx["allow_unknown_site"],
         configs=ctx["ladder"],
+        obs_cache=ctx.get("obs_cache"),
+        obs_times_jd=ctx.get("obs_times_jd"),
+        sun_bary_km=ctx.get("sun_bary_km"),
+        use_cached_ephem=bool(ctx.get("use_cached_ephem")),
     )
     if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
         print("[astropy-trace] predict_radec_with_contract end", flush=True)
@@ -611,13 +617,22 @@ def sequential_fit_replicas(
         log_progress: bool = False,
         log_every: int = 10,
         log_label: str = "predict",
+        obs_cache: ObsCache | None = None,
+        obs_times_jd: np.ndarray | None = None,
+        sun_bary_km: np.ndarray | None = None,
+        use_cached_ephem: bool = False,
+        seed_configs: Sequence[PropagationConfig] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         ctx = {
             "epoch": epoch,
             "obs_chunk": obs_chunk,
             "eps_arcsec": eps_arcsec,
             "allow_unknown_site": allow_unknown_site,
-            "ladder": ladder,
+            "ladder": seed_configs if seed_configs is not None else ladder,
+            "obs_cache": obs_cache,
+            "obs_times_jd": obs_times_jd,
+            "sun_bary_km": sun_bary_km,
+            "use_cached_ephem": use_cached_ephem,
         }
         if executor is None or len(pool_states) <= chunk_size:
             return _predict_contract_chunk_args((pool_states, ctx))
@@ -668,6 +683,11 @@ def sequential_fit_replicas(
                 log_progress=True,
                 log_every=seed_score_log_every,
                 log_label="seed score",
+                obs_cache=seed_obs_cache,
+                obs_times_jd=seed_obs_times_jd,
+                sun_bary_km=sun_bary_seed,
+                use_cached_ephem=seed_use_cached,
+                seed_configs=seed_configs,
             )
         except Exception as exc:
             _log(f"seed scoring failed: {exc}")
@@ -734,6 +754,22 @@ def sequential_fit_replicas(
             next_obs_index = 3
     else:
         next_obs_index = 3
+
+    seed_obs_cache = _prepare_obs_cache(obs3, allow_unknown_site=allow_unknown_site)
+    seed_obs_times_jd = np.asarray(seed_obs_cache.times_tdb.jd, dtype=float)
+    sun_bary_seed, _ = _body_posvel_km("sun", seed_obs_cache.times_tdb)
+    seed_use_cached = worker_count > 1
+    seed_configs = ladder
+    if seed_use_cached:
+        seed_configs = [
+            cfg
+            for cfg in default_propagation_ladder(max_step=max_step)
+            if cfg.model == "kepler"
+        ]
+        if not seed_configs:
+            seed_use_cached = False
+        elif not use_kepler:
+            _log("seed scoring uses cached Kepler config for stability (override --no-kepler).")
 
     # Use the legacy vector fit to keep geometry consistent with the original pipeline.
     attrib, attrib_cov, s_seed, sdot_seed = build_attributable_vector_fit(

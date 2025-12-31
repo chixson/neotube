@@ -381,6 +381,9 @@ def _predict_with_config(
     *,
     allow_unknown_site: bool,
     obs_cache: ObsCache | None = None,
+    obs_times_jd: np.ndarray | None = None,
+    sun_bary_km: np.ndarray | None = None,
+    use_cached_ephem: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     use_kepler = config.model.lower() == "kepler"
     max_step = float(config.max_step)
@@ -393,6 +396,22 @@ def _predict_with_config(
                 config.perturbers,
                 config.step_scale,
             ),
+        )
+    if use_cached_ephem:
+        if obs_cache is None or obs_times_jd is None or sun_bary_km is None:
+            raise ValueError("Cached ephemeris requires obs_cache, obs_times_jd, sun_bary_km.")
+        if not use_kepler:
+            raise ValueError("Cached ephemeris supports only Kepler configs.")
+        return predict_radec_from_epoch_cached(
+            state,
+            float(epoch.tdb.jd),
+            obs_cache,
+            obs_times_jd,
+            sun_bary_km,
+            light_time_iters=config.light_time_iters,
+            full_physics=config.full_physics,
+            include_refraction=config.include_refraction,
+            require_kepler=True,
         )
     return predict_radec_from_epoch(
         state,
@@ -420,6 +439,10 @@ def predict_radec_with_contract(
     epsilon_ast_floor_arcsec: float = 0.01,
     epsilon_ast_ceiling_arcsec: float | None = None,
     allow_unknown_site: bool = True,
+    obs_cache: ObsCache | None = None,
+    obs_times_jd: np.ndarray | None = None,
+    sun_bary_km: np.ndarray | None = None,
+    use_cached_ephem: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Predict RA/Dec with a physics escalation ladder until angular error is below contract."""
     if not obs:
@@ -451,7 +474,13 @@ def predict_radec_with_contract(
     used_level = np.zeros(n_states, dtype=int)
     max_delta = np.zeros(n_states, dtype=float)
 
-    obs_cache = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
+    if obs_cache is None:
+        obs_cache = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
+    if use_cached_ephem:
+        if obs_times_jd is None:
+            obs_times_jd = np.asarray(obs_cache.times_tdb.jd, dtype=float)
+        if sun_bary_km is None:
+            raise ValueError("sun_bary_km required for cached ephemeris path.")
 
     current_ra = np.empty((n_states, n_obs), dtype=float)
     current_dec = np.empty((n_states, n_obs), dtype=float)
@@ -463,6 +492,9 @@ def predict_radec_with_contract(
             configs[0],
             allow_unknown_site=allow_unknown_site,
             obs_cache=obs_cache,
+            obs_times_jd=obs_times_jd,
+            sun_bary_km=sun_bary_km,
+            use_cached_ephem=use_cached_ephem,
         )
         current_ra[i] = ra_pred
         current_dec[i] = dec_pred
@@ -481,6 +513,9 @@ def predict_radec_with_contract(
                 configs[level],
                 allow_unknown_site=allow_unknown_site,
                 obs_cache=obs_cache,
+                obs_times_jd=obs_times_jd,
+                sun_bary_km=sun_bary_km,
+                use_cached_ephem=use_cached_ephem,
             )
             delta = _angular_sep_arcsec(current_ra[i], current_dec[i], ra_new, dec_new)
             delta_max = float(np.max(delta))
@@ -824,6 +859,48 @@ def propagate_state_kepler(
             out[i] = state
             continue
         out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+    return out
+
+
+def propagate_state_kepler_dt(
+    state: np.ndarray,
+    dt_seconds: np.ndarray | Sequence[float],
+    *,
+    mu_km3_s2: float = GM_SUN,
+    max_iter: int = 50,
+    tol: float = 1e-8,
+) -> np.ndarray:
+    """Propagate a heliocentric state assuming a pure two-body (Sun-only) Keplerian orbit.
+
+    Uses dt (seconds) directly to avoid astropy Time in tight loops.
+    """
+    dt_arr = np.atleast_1d(np.array(dt_seconds, dtype=float))
+    if dt_arr.size == 0:
+        return np.empty((0, 6), dtype=float)
+
+    r0 = np.array(state[:3], dtype=float)
+    v0 = np.array(state[3:], dtype=float)
+
+    if _HAS_NUMBA:
+        out, ok = _propagate_state_kepler_batch_numba(r0, v0, dt_arr, mu_km3_s2, max_iter, tol)
+        if np.all(ok):
+            return out
+        for i in range(len(dt_arr)):
+            if ok[i]:
+                continue
+            dt = float(dt_arr[i])
+            if abs(dt) < 1e-9:
+                out[i] = state
+                continue
+            out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+        return out
+
+    out = np.empty((len(dt_arr), 6), dtype=float)
+    for i, dt in enumerate(dt_arr):
+        if abs(dt) < 1e-9:
+            out[i] = state
+            continue
+        out[i] = _propagate_state_kepler_single(r0, v0, float(dt), mu_km3_s2, max_iter, tol)
     return out
 
 
@@ -1195,6 +1272,88 @@ def predict_radec_from_epoch(
             ra_vals[idx] = (
                 np.degrees(np.arctan2(topovec[1], topovec[0])) + 360.0
             ) % 360.0
+            dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
+
+    return ra_vals, dec_vals
+
+
+def _interp_vec_linear(times: np.ndarray, values: np.ndarray, t: float) -> np.ndarray:
+    """Linear interpolation for vector ephemeris arrays."""
+    if t <= times[0]:
+        return values[0]
+    if t >= times[-1]:
+        return values[-1]
+    idx = int(np.searchsorted(times, t)) - 1
+    t0 = times[idx]
+    t1 = times[idx + 1]
+    if t1 <= t0:
+        return values[idx]
+    w = (t - t0) / (t1 - t0)
+    return values[idx] * (1.0 - w) + values[idx + 1] * w
+
+
+def predict_radec_from_epoch_cached(
+    state: np.ndarray,
+    epoch_jd: float,
+    obs_cache: ObsCache,
+    obs_times_jd: np.ndarray,
+    sun_bary_km: np.ndarray,
+    *,
+    light_time_iters: int = 2,
+    full_physics: bool = False,
+    include_refraction: bool = False,
+    require_kepler: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Astropy-free RA/Dec prediction using cached ephemeris arrays."""
+    if not obs_times_jd.size:
+        return np.empty(0, dtype=float), np.empty(0, dtype=float)
+    if require_kepler is False:
+        raise ValueError("Cached prediction supports only Kepler propagation.")
+
+    ra_vals = np.empty(len(obs_times_jd), dtype=float)
+    dec_vals = np.empty(len(obs_times_jd), dtype=float)
+    c_km_s = 299792.458
+    epoch_jd = float(epoch_jd)
+
+    for idx in range(len(obs_times_jd)):
+        t_obs_jd = float(obs_times_jd[idx])
+        site_pos = obs_cache.site_pos_km[idx]
+        site_vel = obs_cache.site_vel_km_s[idx]
+        earth_bary = obs_cache.earth_bary_km[idx]
+        earth_bary_vel = obs_cache.earth_bary_vel_km_s[idx]
+        obs_bary = earth_bary + site_pos
+        obs_bary_vel = earth_bary_vel + site_vel
+
+        t_emit_jd = t_obs_jd
+        obj_bary = None
+        sun_bary = None
+        for _ in range(max(1, light_time_iters)):
+            dt_sec = (t_emit_jd - epoch_jd) * 86400.0
+            emit_state = propagate_state_kepler_dt(state, [dt_sec])[0]
+            sun_bary = _interp_vec_linear(obs_times_jd, sun_bary_km, t_emit_jd)
+            obj_bary = emit_state[:3] + sun_bary
+            rho = float(np.linalg.norm(obj_bary - obs_bary))
+            dt_geom = rho / c_km_s
+            if full_physics:
+                dt_shapiro = shapiro_delay_sun(obj_bary, obs_bary, sun_bary)
+            else:
+                dt_shapiro = 0.0
+            t_emit_jd = t_obs_jd - (dt_geom + dt_shapiro) / 86400.0
+
+        if obj_bary is None:
+            obj_bary = state[:3] + earth_bary * 0.0
+
+        topovec = obj_bary - obs_bary
+        if full_physics:
+            topounit = aberrate_direction_first_order(topovec, obs_bary_vel)
+            if include_refraction:
+                topounit = _apply_bennett_refraction(topounit, site_pos)
+            xy = np.hypot(topounit[0], topounit[1])
+            ra_vals[idx] = (np.degrees(np.arctan2(topounit[1], topounit[0])) + 360.0) % 360.0
+            dec_vals[idx] = np.degrees(np.arctan2(topounit[2], xy))
+        else:
+            xy = np.hypot(topovec[0], topovec[1])
+            ra_vals[idx] = (np.degrees(np.arctan2(topovec[1], topovec[0])) + 360.0) % 360.0
             dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
 
     return ra_vals, dec_vals
