@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import traceback
 import math
 import os
 import time
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
+import faulthandler
+import multiprocessing as mp
+import sys
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -98,6 +102,12 @@ def _predict_contract_chunk_args(
     args: tuple[np.ndarray, dict[str, object]]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     states, ctx = args
+    if os.environ.get("NEOTUBE_TRACE_SEED", "0") == "1":
+        pid = os.getpid()
+        print(
+            f"[seed-trace] pid={pid} n_states={len(states)} n_obs={len(ctx['obs_chunk'])} start",
+            flush=True,
+        )
     if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
         print("[astropy-trace] predict_radec_with_contract start", flush=True)
     result = predict_radec_with_contract(
@@ -110,6 +120,9 @@ def _predict_contract_chunk_args(
     )
     if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
         print("[astropy-trace] predict_radec_with_contract end", flush=True)
+    if os.environ.get("NEOTUBE_TRACE_SEED", "0") == "1":
+        pid = os.getpid()
+        print(f"[seed-trace] pid={pid} n_states={len(states)} end", flush=True)
     return result
 
 
@@ -395,10 +408,21 @@ def sequential_fit_replicas(
     halt_before_seed_score: bool = False,
     seed_score_limit: int | None = None,
     seed_score_log_every: int = 10,
+    mp_start_method: str | None = None,
+    worker_faulthandler: bool = False,
 ) -> ReplicaCloud:
     """Fit an SMC replica cloud from observations and return the final weighted states."""
     if len(observations) < 3:
         raise ValueError("Need at least 3 observations to seed SMC.")
+
+    if os.environ.get("NEOTUBE_FAULTHANDLER_MAIN", "0") == "1":
+        faulthandler.enable(all_threads=True, file=sys.stderr)
+
+    if os.environ.get("NEOTUBE_LIMIT_NATIVE_THREADS", "0") == "1":
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
     t_start = time.perf_counter()
 
@@ -408,6 +432,10 @@ def sequential_fit_replicas(
         elapsed = time.perf_counter() - t_start
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         print(f"[fit_smc {stamp} +{elapsed:8.1f}s] {msg}", flush=True)
+
+    def _init_worker(enable_faulthandler: bool) -> None:
+        if enable_faulthandler:
+            faulthandler.enable(all_threads=True, file=sys.stderr)
 
     def _save_checkpoint(
         *,
@@ -478,7 +506,15 @@ def sequential_fit_replicas(
 
     executor: ProcessPoolExecutor | None = None
     if worker_count > 1:
-        executor = ProcessPoolExecutor(max_workers=worker_count)
+        ctx = mp.get_context(mp_start_method) if mp_start_method else None
+        init = _init_worker if worker_faulthandler else None
+        initargs = (worker_faulthandler,) if worker_faulthandler else None
+        executor = ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=ctx,
+            initializer=init,
+            initargs=initargs,
+        )
 
     def _shutdown_executor() -> None:
         if executor is not None:
@@ -616,15 +652,27 @@ def sequential_fit_replicas(
             )
             for ob in obs3
         )
-        ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
-            score_states,
-            obs3,
-            eps_seed,
-            executor,
-            log_progress=True,
-            log_every=seed_score_log_every,
-            log_label="seed score",
-        )
+        try:
+            ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+                score_states,
+                obs3,
+                eps_seed,
+                executor,
+                log_progress=True,
+                log_every=seed_score_log_every,
+                log_label="seed score",
+            )
+        except Exception as exc:
+            _log(f"seed scoring failed: {exc}")
+            _log(traceback.format_exc())
+            _save_checkpoint(
+                states=score_states,
+                weights=np.ones(len(score_states), dtype=float) / max(1, len(score_states)),
+                next_obs_index=3,
+                stage="seed_score_error",
+                error=str(exc),
+            )
+            raise
         loglikes = np.zeros(len(score_states), dtype=float)
         for idx, ob in enumerate(obs3):
             sigma = _sigma_arcsec(ob, site_kappas)

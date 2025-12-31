@@ -614,6 +614,17 @@ def main() -> int:
         help="Stop after seeding and write a checkpoint before seed scoring.",
     )
     parser.add_argument(
+        "--fit-smc-mp-start",
+        choices=("fork", "spawn", "forkserver"),
+        default=None,
+        help="Multiprocessing start method for fit-SMC workers.",
+    )
+    parser.add_argument(
+        "--fit-smc-worker-faulthandler",
+        action="store_true",
+        help="Enable faulthandler in fit-SMC worker processes.",
+    )
+    parser.add_argument(
         "--mix-posterior-frac",
         type=float,
         default=0.0,
@@ -987,6 +998,8 @@ def main() -> int:
             admissible_bound=args.admissible_bound,
             admissible_q_min_au=args.admissible_q_min_au,
             admissible_q_max_au=args.admissible_q_max_au,
+            mp_start_method=args.fit_smc_mp_start,
+            worker_faulthandler=bool(args.fit_smc_worker_faulthandler),
         )
         weights = cloud.weights
         weights = weights / np.sum(weights)
