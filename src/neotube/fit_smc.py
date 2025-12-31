@@ -37,6 +37,14 @@ _SCORE_CONTEXT: dict[str, object] = {}
 _SCORE_FULL_CONTEXT: dict[str, object] = {}
 _PREDICT_CONTEXT: dict[str, object] = {}
 
+try:
+    from scipy.stats import qmc  # type: ignore
+
+    _HAS_SOBOL = True
+except Exception:
+    qmc = None
+    _HAS_SOBOL = False
+
 
 def _score_states_contract_chunk(states: np.ndarray) -> np.ndarray:
     ctx = _SCORE_CONTEXT
@@ -192,6 +200,84 @@ def _stratified_log_rho_samples(
         val = 10.0 ** (rng.random() * (hi - lo) + lo)
         out.append(val)
     return np.array(out[:n_samples], dtype=float)
+
+
+def sobol_logrho_rhodot(
+    n_points: int,
+    rho_min_km: float,
+    rho_max_km: float,
+    rhodot_min: float,
+    rhodot_max: float,
+    rng: np.random.Generator,
+    *,
+    scramble: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    lo = math.log10(max(1e-12, rho_min_km))
+    hi = math.log10(max(rho_min_km, rho_max_km))
+    if _HAS_SOBOL:
+        sampler = qmc.Sobol(d=2, scramble=scramble)
+        pts = sampler.random(n_points)
+        u1 = pts[:, 0]
+        u2 = pts[:, 1]
+    else:
+        u1 = np.linspace(0.0, 1.0, n_points, endpoint=False) + rng.random(n_points) / n_points
+        rng.shuffle(u1)
+        u2 = np.linspace(0.0, 1.0, n_points, endpoint=False) + rng.random(n_points) / n_points
+        rng.shuffle(u2)
+    logrho = lo + u1 * (hi - lo)
+    rho = (10.0 ** logrho).astype(float)
+    rhodot = (rhodot_min + u2 * (rhodot_max - rhodot_min)).astype(float)
+    return rho, rhodot
+
+
+def coarse_systematic_grid_scan(
+    obs_ref: Observation,
+    obs3: Sequence[Observation],
+    attrib_hat: Attributable,
+    epoch: Time,
+    *,
+    rho_min_km: float,
+    rho_max_km: float,
+    rhodot_min: float,
+    rhodot_max: float,
+    nx: int = 40,
+    ny: int = 40,
+    site_kappas: dict[str, float] | None = None,
+) -> list[tuple[float, float, float]]:
+    log_lo = math.log10(max(1e-12, rho_min_km))
+    log_hi = math.log10(max(rho_min_km, rho_max_km))
+    logrs = np.linspace(log_lo, log_hi, nx)
+    rds = np.linspace(rhodot_min, rhodot_max, ny)
+    candidates: list[tuple[float, float, float]] = []
+    for lr in logrs:
+        rho_km = 10.0 ** lr
+        for rd in rds:
+            try:
+                state = build_state_from_ranging(obs_ref, epoch, attrib_hat, rho_km, float(rd))
+                ra_pred, dec_pred = predict_radec_from_epoch(
+                    state,
+                    epoch,
+                    obs3,
+                    perturbers=("earth", "mars", "jupiter"),
+                    max_step=3600.0,
+                    use_kepler=True,
+                    allow_unknown_site=True,
+                    light_time_iters=1,
+                    full_physics=False,
+                )
+                score = 0.0
+                for ra, dec, ob in zip(ra_pred, dec_pred, obs3):
+                    sigma = _sigma_arcsec(ob, site_kappas)
+                    dra, ddec = _tangent_residuals(float(ra), float(dec), ob)
+                    score -= (dra / sigma) ** 2 + (ddec / sigma) ** 2
+                candidates.append((float(rho_km), float(rd), float(score)))
+            except Exception:
+                continue
+    if not candidates:
+        return []
+    candidates.sort(key=lambda x: -x[2])
+    keep = max(8, min(64, int(len(candidates) * 0.01)))
+    return candidates[:keep]
 
 
 def _photometry_loglike_marginal(
@@ -480,7 +566,13 @@ def sequential_fit_replicas(
             np.concatenate(delta_parts),
         )
 
-    attrib = build_attributable_vector_fit(obs3, epoch)
+    attrib, attrib_cov = build_attributable_vector_fit(
+        obs3,
+        epoch,
+        robust=True,
+        return_cov=True,
+        site_kappas=site_kappas,
+    )
     sigma_arcsec = float(np.median([o.sigma_arcsec for o in obs3]))
     sigma_deg = sigma_arcsec / 3600.0
     dt_days = max(1e-6, float((obs3[-1].time - obs3[0].time).to_value("day")))
@@ -489,26 +581,75 @@ def sequential_fit_replicas(
         [attrib.ra_deg, attrib.dec_deg, attrib.ra_dot_deg_per_day, attrib.dec_dot_deg_per_day],
         dtype=float,
     )
-    attrib_cov = np.diag(
-        [
-            sigma_deg**2,
-            sigma_deg**2,
-            sigma_rate_deg_per_day**2,
-            sigma_rate_deg_per_day**2,
-        ]
-    )
+    if attrib_cov is None or not np.all(np.isfinite(attrib_cov)) or not np.any(attrib_cov):
+        attrib_cov = np.diag(
+            [
+                sigma_deg**2,
+                sigma_deg**2,
+                sigma_rate_deg_per_day**2,
+                sigma_rate_deg_per_day**2,
+            ]
+        )
 
     if not resume:
-        attrib_samples = rng.multivariate_normal(attrib_mean, attrib_cov, size=n_particles)
-        rho_samples = _stratified_log_rho_samples(
-            n_particles, rho_min_au * AU_KM, rho_max_au * AU_KM, rng
-        )
-        rhodot_samples = rng.uniform(-rhodot_max_km_s, rhodot_max_km_s, size=n_particles)
-
         obs_ref = _ranging_reference_observation(obs3, epoch)
-        states = np.zeros((n_particles, 6), dtype=float)
-        valid = np.ones(n_particles, dtype=bool)
-        for i in range(n_particles):
+        seed_states: list[np.ndarray] = []
+        grid_hits = coarse_systematic_grid_scan(
+            obs_ref,
+            obs3,
+            attrib,
+            epoch,
+            rho_min_km=rho_min_au * AU_KM,
+            rho_max_km=rho_max_au * AU_KM,
+            rhodot_min=-float(rhodot_max_km_s),
+            rhodot_max=float(rhodot_max_km_s),
+            nx=40,
+            ny=40,
+            site_kappas=site_kappas,
+        )
+        if grid_hits:
+            grid_local = 10
+            max_grid = max(0, n_particles // 2)
+            if len(grid_hits) * grid_local > max_grid:
+                grid_hits = grid_hits[: max(1, max_grid // grid_local)]
+            for rho_km, rhodot_km_s, _ in grid_hits:
+                for _ in range(grid_local):
+                    a = rng.multivariate_normal(attrib_mean, attrib_cov)
+                    attrib_i = Attributable(
+                        ra_deg=float(a[0]),
+                        dec_deg=float(a[1]),
+                        ra_dot_deg_per_day=float(a[2]),
+                        dec_dot_deg_per_day=float(a[3]),
+                    )
+                    rho_local = float(rho_km) * (1.0 + rng.normal(scale=0.01))
+                    rhodot_local = float(rhodot_km_s) + rng.normal(
+                        scale=max(0.1, 0.05 * abs(rhodot_km_s))
+                    )
+                    try:
+                        state = build_state_from_ranging(
+                            obs_ref, epoch, attrib_i, rho_local, rhodot_local
+                        )
+                        seed_states.append(state)
+                    except Exception:
+                        continue
+
+        n_remaining = max(0, n_particles - len(seed_states))
+        rho_sobol, rhodot_sobol = sobol_logrho_rhodot(
+            n_remaining,
+            rho_min_au * AU_KM,
+            rho_max_au * AU_KM,
+            -float(rhodot_max_km_s),
+            float(rhodot_max_km_s),
+            rng,
+        )
+        attrib_samples = rng.multivariate_normal(attrib_mean, attrib_cov, size=n_remaining)
+
+        states_list: list[np.ndarray] = []
+        valid_mask: list[bool] = []
+        for state in seed_states:
+            states_list.append(state)
+            valid_mask.append(True)
+        for i in range(n_remaining):
             a = attrib_samples[i]
             attrib_i = Attributable(
                 ra_deg=float(a[0]),
@@ -516,10 +657,12 @@ def sequential_fit_replicas(
                 ra_dot_deg_per_day=float(a[2]),
                 dec_dot_deg_per_day=float(a[3]),
             )
-            state = build_state_from_ranging(obs_ref, epoch, attrib_i, rho_samples[i], rhodot_samples[i])
+            state = build_state_from_ranging(
+                obs_ref, epoch, attrib_i, rho_sobol[i], rhodot_sobol[i]
+            )
             if np.linalg.norm(state[3:]) > v_max_km_s:
-                valid[i] = False
-                states[i] = state
+                states_list.append(state)
+                valid_mask.append(False)
                 continue
             if not _admissible_ok(
                 state,
@@ -527,11 +670,14 @@ def sequential_fit_replicas(
                 q_max_au=admissible_q_max_au,
                 bound_only=admissible_bound,
             ):
-                valid[i] = False
-                states[i] = state
+                states_list.append(state)
+                valid_mask.append(False)
                 continue
-            states[i] = state
+            states_list.append(state)
+            valid_mask.append(True)
 
+        states = np.array(states_list, dtype=float)
+        valid = np.array(valid_mask, dtype=bool)
         states = states[valid]
         if states.size == 0:
             raise RuntimeError("No valid initial particles; widen rho/rhodot bounds.")

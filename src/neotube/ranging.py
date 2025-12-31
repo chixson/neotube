@@ -718,11 +718,11 @@ def _attrib_from_s_sdot(s: np.ndarray, sdot: np.ndarray) -> Attributable:
     )
 
 
-def build_attributable_vector_fit(observations: Sequence[Observation], epoch: Time) -> Attributable:
-    """Fit a linear model to topocentric direction unit vectors in ICRS.
-
-    This avoids RA/Dec wrapping and reduces frame/geometry bias when observers move.
-    """
+def _build_attributable_vector_fit_lstsq(
+    observations: Sequence[Observation],
+    epoch: Time,
+) -> Attributable:
+    """Fit a linear model to topocentric direction unit vectors in ICRS."""
     times = np.array([(ob.time - epoch).to(u.s).value for ob in observations], dtype=float)
     ra_deg = np.array([ob.ra_deg for ob in observations], dtype=float)
     dec_deg = np.array([ob.dec_deg for ob in observations], dtype=float)
@@ -749,6 +749,111 @@ def build_attributable_vector_fit(observations: Sequence[Observation], epoch: Ti
     # Remove radial component from sdot for a tangent-plane rate.
     sdot = sdot - np.dot(s0, sdot) * s0
     return _attrib_from_s_sdot(s0, sdot)
+
+
+def build_attributable_studentt(
+    observations: Sequence[Observation],
+    epoch: Time | None = None,
+    *,
+    nu: float = 4.0,
+    max_iter: int = 10,
+    tol: float = 1e-8,
+    site_kappas: dict[str, float] | None = None,
+) -> tuple[Attributable, np.ndarray]:
+    """Robust attributable fit using Student-t IRLS (deg/day output)."""
+    if site_kappas is None:
+        site_kappas = {}
+    if epoch is None:
+        epoch = observations[len(observations) // 2].time
+
+    dec0_rad = math.radians(float(np.mean([o.dec_deg for o in observations])))
+    cosd0 = math.cos(dec0_rad)
+
+    n = len(observations)
+    y = np.zeros(2 * n, dtype=float)
+    sigma = np.zeros(2 * n, dtype=float)
+    dt_days = np.zeros(n, dtype=float)
+    for i, ob in enumerate(observations):
+        y[2 * i] = ob.ra_deg * cosd0 * 3600.0
+        y[2 * i + 1] = ob.dec_deg * 3600.0
+        kappa = site_kappas.get(ob.site or "UNK", 1.0)
+        sigma_arc = max(1e-6, float(ob.sigma_arcsec) * float(kappa))
+        sigma[2 * i] = sigma_arc * cosd0
+        sigma[2 * i + 1] = sigma_arc
+        dt_days[i] = float((ob.time.tdb - epoch.tdb).to_value("day"))
+
+    G = np.zeros((2 * n, 4), dtype=float)
+    for i in range(n):
+        dt = float(dt_days[i])
+        G[2 * i, 0] = cosd0 * 3600.0
+        G[2 * i, 2] = cosd0 * 3600.0 * dt
+        G[2 * i + 1, 1] = 3600.0
+        G[2 * i + 1, 3] = 3600.0 * dt
+
+    W = np.diag(1.0 / (sigma**2 + 1e-12))
+    GTWG = G.T @ W @ G
+    try:
+        a = np.linalg.solve(GTWG, G.T @ W @ y)
+    except np.linalg.LinAlgError:
+        a = np.linalg.pinv(GTWG) @ (G.T @ W @ y)
+
+    nu = float(nu)
+    for _ in range(max_iter):
+        r = G @ a - y
+        scaled = (r / (sigma + 1e-12)) ** 2
+        w = (nu + 1.0) / (nu + scaled)
+        W_eff = np.diag(w / (sigma**2 + 1e-12))
+        GTWG = G.T @ W_eff @ G
+        rhs = G.T @ W_eff @ y
+        try:
+            a_new = np.linalg.solve(GTWG, rhs)
+        except np.linalg.LinAlgError:
+            a_new = np.linalg.pinv(GTWG) @ rhs
+        if np.linalg.norm(a_new - a) < tol:
+            a = a_new
+            W = W_eff
+            break
+        a = a_new
+        W = W_eff
+
+    try:
+        cov = np.linalg.inv(GTWG)
+    except np.linalg.LinAlgError:
+        cov = np.linalg.pinv(GTWG)
+
+    attrib = Attributable(
+        ra_deg=float(a[0]),
+        dec_deg=float(a[1]),
+        ra_dot_deg_per_day=float(a[2]),
+        dec_dot_deg_per_day=float(a[3]),
+    )
+    return attrib, cov
+
+
+def build_attributable_vector_fit(
+    observations: Sequence[Observation],
+    epoch: Time,
+    *,
+    robust: bool = True,
+    return_cov: bool = False,
+    nu: float = 4.0,
+    max_iter: int = 10,
+    tol: float = 1e-8,
+    site_kappas: dict[str, float] | None = None,
+) -> Attributable | tuple[Attributable, np.ndarray]:
+    """Fit a linear model to topocentric direction unit vectors in ICRS."""
+    if robust:
+        attrib, cov = build_attributable_studentt(
+            observations,
+            epoch=epoch,
+            nu=nu,
+            max_iter=max_iter,
+            tol=tol,
+            site_kappas=site_kappas,
+        )
+        return (attrib, cov) if return_cov else attrib
+    attrib = _build_attributable_vector_fit_lstsq(observations, epoch)
+    return (attrib, np.zeros((4, 4), dtype=float)) if return_cov else attrib
 
 def s_and_sdot(attrib: Attributable) -> tuple[np.ndarray, np.ndarray]:
     ra = math.radians(attrib.ra_deg)
