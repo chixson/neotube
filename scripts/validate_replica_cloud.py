@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""
+Validate and visualize a replica cloud against observations (and optional JPL Horizons).
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+from astropy.time import Time
+
+from neotube.fit_cli import load_observations
+from neotube.propagate import predict_radec_from_epoch
+
+try:
+    import matplotlib.pyplot as plt
+
+    _HAS_MPL = True
+except Exception:
+    plt = None
+    _HAS_MPL = False
+
+try:
+    from astroquery.jplhorizons import Horizons
+
+    _HAS_HORIZONS = True
+except Exception:
+    Horizons = None
+    _HAS_HORIZONS = False
+
+AU_KM = 149597870.7
+GM_SUN = 1.32712440018e11
+
+
+def _load_replicas_csv(path: Path) -> np.ndarray:
+    states = []
+    with path.open(newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            states.append(
+                [
+                    float(row["x_km"]),
+                    float(row["y_km"]),
+                    float(row["z_km"]),
+                    float(row["vx_km_s"]),
+                    float(row["vy_km_s"]),
+                    float(row["vz_km_s"]),
+                ]
+            )
+    return np.array(states, dtype=float)
+
+
+def _load_epoch(meta_path: Path) -> Time:
+    with meta_path.open() as fh:
+        meta = json.load(fh)
+    epoch_utc = meta.get("epoch_utc")
+    if not epoch_utc:
+        raise ValueError("epoch_utc missing in meta json")
+    return Time(epoch_utc)
+
+
+def _compute_elements(states: np.ndarray) -> dict[str, np.ndarray]:
+    r = states[:, :3]
+    v = states[:, 3:]
+    r_norm = np.linalg.norm(r, axis=1)
+    v2 = np.sum(v * v, axis=1)
+    h = np.cross(r, v)
+    h_norm = np.linalg.norm(h, axis=1)
+    e_vec = (np.cross(v, h) / GM_SUN) - (r / r_norm[:, None])
+    e = np.linalg.norm(e_vec, axis=1)
+    a = 1.0 / (2.0 / r_norm - v2 / GM_SUN)
+    inc = np.degrees(np.arccos(np.clip(h[:, 2] / np.maximum(h_norm, 1e-12), -1.0, 1.0)))
+    return {"a_au": a / AU_KM, "e": e, "inc_deg": inc, "r_au": r_norm / AU_KM}
+
+
+def _residuals_summary(residuals_ra: np.ndarray, residuals_dec: np.ndarray) -> dict[str, float]:
+    rms_ra = float(np.sqrt(np.mean(residuals_ra**2)))
+    rms_dec = float(np.sqrt(np.mean(residuals_dec**2)))
+    rms_total = float(np.sqrt(np.mean(residuals_ra**2 + residuals_dec**2)))
+    return {
+        "rms_ra_arcsec": rms_ra,
+        "rms_dec_arcsec": rms_dec,
+        "rms_total_arcsec": rms_total,
+    }
+
+
+def _plot_residuals(times: np.ndarray, ra_res: np.ndarray, dec_res: np.ndarray, out_dir: Path) -> None:
+    fig, ax = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    ax[0].plot(times, ra_res, "o", ms=4, alpha=0.8)
+    ax[0].axhline(0, color="k", lw=0.8)
+    ax[0].set_ylabel("RA residual (arcsec)")
+    ax[1].plot(times, dec_res, "o", ms=4, alpha=0.8)
+    ax[1].axhline(0, color="k", lw=0.8)
+    ax[1].set_ylabel("Dec residual (arcsec)")
+    ax[1].set_xlabel("Time (MJD)")
+    fig.tight_layout()
+    fig.savefig(out_dir / "residuals_timeseries.png", dpi=150)
+    plt.close(fig)
+
+
+def _plot_residual_hist(residuals_ra: np.ndarray, residuals_dec: np.ndarray, out_dir: Path) -> None:
+    fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+    ax[0].hist(residuals_ra, bins=40, alpha=0.7)
+    ax[0].set_title("RA residuals (arcsec)")
+    ax[1].hist(residuals_dec, bins=40, alpha=0.7)
+    ax[1].set_title("Dec residuals (arcsec)")
+    fig.tight_layout()
+    fig.savefig(out_dir / "residuals_hist.png", dpi=150)
+    plt.close(fig)
+
+
+def _plot_elements(elements: dict[str, np.ndarray], out_dir: Path) -> None:
+    fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+    ax[0].hist(elements["a_au"], bins=50)
+    ax[0].set_title("a (AU)")
+    ax[1].hist(elements["e"], bins=50)
+    ax[1].set_title("e")
+    ax[2].hist(elements["inc_deg"], bins=50)
+    ax[2].set_title("i (deg)")
+    fig.tight_layout()
+    fig.savefig(out_dir / "elements_hist.png", dpi=150)
+    plt.close(fig)
+
+
+def _plot_rho(elements: dict[str, np.ndarray], out_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(elements["r_au"], bins=50)
+    ax.set_title("Heliocentric distance r (AU)")
+    fig.tight_layout()
+    fig.savefig(out_dir / "r_au_hist.png", dpi=150)
+    plt.close(fig)
+
+
+def _plot_sky(obs_ra: np.ndarray, obs_dec: np.ndarray, pred_ra: np.ndarray, pred_dec: np.ndarray, out_dir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(obs_ra, obs_dec, c="k", s=20, label="obs")
+    ax.scatter(pred_ra, pred_dec, c="tab:blue", s=8, alpha=0.4, label="replicas")
+    ax.set_xlabel("RA (deg)")
+    ax.set_ylabel("Dec (deg)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_dir / "sky_scatter.png", dpi=150)
+    plt.close(fig)
+
+
+def _fetch_horizons(target: str, site: str, times: Time) -> tuple[np.ndarray, np.ndarray]:
+    if not _HAS_HORIZONS:
+        raise RuntimeError("astroquery.jplhorizons is not available")
+    obj = Horizons(id=target, location=site, epochs=times.tdb.jd)
+    eph = obj.ephemerides()
+    return np.array(eph["RA"], dtype=float), np.array(eph["DEC"], dtype=float)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Validate replica cloud and generate plots.")
+    p.add_argument("--replicas", required=True, type=Path)
+    p.add_argument("--obs", required=True, type=Path)
+    p.add_argument("--meta", type=Path, default=None)
+    p.add_argument("--out-dir", type=Path, required=True)
+    p.add_argument("--max-particles", type=int, default=200)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--use-kepler", action="store_true")
+    p.add_argument("--no-full-physics", action="store_true")
+    p.add_argument("--perturbers", nargs="*", default=["earth", "mars", "jupiter"])
+    p.add_argument("--max-step", type=float, default=3600.0)
+    p.add_argument("--horizons-target", type=str, default=None)
+    args = p.parse_args()
+
+    if not _HAS_MPL:
+        raise SystemExit("matplotlib is required for plotting")
+
+    obs = load_observations(str(args.obs), None)
+    if args.meta is None:
+        meta_path = args.replicas.with_name(args.replicas.stem + "_meta.json")
+    else:
+        meta_path = args.meta
+    epoch = _load_epoch(meta_path)
+
+    states = _load_replicas_csv(args.replicas)
+    rng = np.random.default_rng(int(args.seed))
+    if len(states) > args.max_particles:
+        idx = rng.choice(len(states), size=args.max_particles, replace=False)
+        states = states[idx]
+
+    obs_times = Time([o.time for o in obs])
+    obs_ra = np.array([o.ra_deg for o in obs], dtype=float)
+    obs_dec = np.array([o.dec_deg for o in obs], dtype=float)
+
+    pred_ra = np.zeros((len(states), len(obs)), dtype=float)
+    pred_dec = np.zeros((len(states), len(obs)), dtype=float)
+    for i, st in enumerate(states):
+        ra_i, dec_i = predict_radec_from_epoch(
+            st,
+            epoch,
+            obs,
+            tuple(args.perturbers),
+            args.max_step,
+            use_kepler=args.use_kepler,
+            allow_unknown_site=True,
+            light_time_iters=2,
+            full_physics=not args.no_full_physics,
+        )
+        pred_ra[i, :] = ra_i
+        pred_dec[i, :] = dec_i
+
+    # residuals in arcsec
+    ra_res = ((pred_ra - obs_ra[None, :] + 180.0) % 360.0 - 180.0) * 3600.0
+    dec_res = (pred_dec - obs_dec[None, :]) * 3600.0
+    # per-observation means for time series
+    ra_res_mean = np.mean(ra_res, axis=0)
+    dec_res_mean = np.mean(dec_res, axis=0)
+    # flatten for histograms
+    ra_res_flat = ra_res.ravel()
+    dec_res_flat = dec_res.ravel()
+    summary = _residuals_summary(ra_res_flat, dec_res_flat)
+
+    out_dir = args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    _plot_residuals(obs_times.mjd, ra_res_mean, dec_res_mean, out_dir)
+    _plot_residual_hist(ra_res_flat, dec_res_flat, out_dir)
+
+    elements = _compute_elements(states)
+    _plot_elements(elements, out_dir)
+    _plot_rho(elements, out_dir)
+
+    # plot sky scatter using all predicted points
+    _plot_sky(obs_ra, obs_dec, pred_ra.ravel(), pred_dec.ravel(), out_dir)
+
+    # Horizons overlay
+    if args.horizons_target:
+        try:
+            site = obs[0].site or "500"
+            h_ra, h_dec = _fetch_horizons(args.horizons_target, site, obs_times)
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.scatter(obs_ra, obs_dec, c="k", s=20, label="obs")
+            ax.scatter(h_ra, h_dec, c="tab:red", s=30, label="Horizons")
+            ax.set_xlabel("RA (deg)")
+            ax.set_ylabel("Dec (deg)")
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(out_dir / "sky_obs_vs_horizons.png", dpi=150)
+            plt.close(fig)
+        except Exception as exc:
+            print(f"[warn] Horizons overlay failed: {exc}")
+
+    summary_path = out_dir / "summary.json"
+    with summary_path.open("w") as fh:
+        json.dump(summary, fh, indent=2, sort_keys=True)
+
+    print(f"Saved plots and summary to {out_dir}")
+
+
+if __name__ == "__main__":
+    main()
