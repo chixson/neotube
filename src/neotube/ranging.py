@@ -1164,10 +1164,12 @@ def _init_worker(
     }
 
 
-def _score_chunk(chunk: Sequence[tuple[float, float]]) -> list[tuple[float, float, float, np.ndarray]]:
+def _score_chunk(
+    chunk: Sequence[tuple[float, float, float]]
+) -> list[tuple[float, float, float, np.ndarray, float]]:
     ctx = _RANGE_CTX
-    out: list[tuple[float, float, float, np.ndarray]] = []
-    for rho_km, rhodot_km_s in chunk:
+    out: list[tuple[float, float, float, np.ndarray, float]] = []
+    for rho_km, rhodot_km_s, log_q in chunk:
         if ctx.get("multiobs"):
             state = build_state_from_ranging_multiobs(
                 ctx["obs_eval"] or ctx["observations"],
@@ -1210,7 +1212,7 @@ def _score_chunk(chunk: Sequence[tuple[float, float]]) -> list[tuple[float, floa
             )
         except Exception:
             continue
-        out.append((rho_km, rhodot_km_s, ll, state))
+        out.append((rho_km, rhodot_km_s, ll, state, log_q))
     return out
 
 
@@ -1259,6 +1261,163 @@ def _score_state_chunk(states: np.ndarray) -> list[tuple[float, np.ndarray]]:
     return out
 
 
+def _normal_pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _truncnorm_sample(
+    rng: np.random.Generator, *, a: float, b: float, sigma: float, max_tries: int = 64
+) -> float | None:
+    if sigma <= 0.0 or a >= b:
+        return None
+    for _ in range(max_tries):
+        val = rng.normal(loc=0.0, scale=sigma)
+        if a <= val <= b:
+            return float(val)
+    return None
+
+
+def _truncnorm_pdf(x: float, *, a: float, b: float, sigma: float) -> float:
+    if sigma <= 0.0 or a >= b or x < a or x > b:
+        return 0.0
+    z = (_normal_cdf(b / sigma) - _normal_cdf(a / sigma))
+    if z <= 0.0:
+        return 0.0
+    return _normal_pdf(x / sigma) / (sigma * z)
+
+
+def _maxwell_pdf(speed: float, sigma: float) -> float:
+    if speed <= 0.0 or sigma <= 0.0:
+        return 0.0
+    coef = math.sqrt(2.0 / math.pi) / (sigma**3)
+    return coef * (speed**2) * math.exp(-0.5 * (speed / sigma) ** 2)
+
+
+def _sample_maxwell_speed(
+    rng: np.random.Generator, *, sigma: float, vmax: float, max_tries: int = 64
+) -> float | None:
+    if sigma <= 0.0 or vmax <= 0.0:
+        return None
+    for _ in range(max_tries):
+        vec = rng.normal(loc=0.0, scale=sigma, size=3)
+        speed = float(np.linalg.norm(vec))
+        if speed <= vmax:
+            return speed
+    return None
+
+
+def _sample_conditioned_ranging_proposals(
+    *,
+    rng: np.random.Generator,
+    n_proposals: int,
+    rho_min_au: float,
+    rho_max_au: float,
+    rhodot_max_kms: float,
+    s: np.ndarray,
+    sdot: np.ndarray,
+    earth_helio: np.ndarray,
+    earth_vel_helio: np.ndarray,
+    site_offset: np.ndarray,
+    site_vel: np.ndarray,
+    v_inf_max_kms: float | None,
+    sigma_rad_scale: float,
+    iso_fraction: float,
+    sigma_iso_kms: float,
+    oversample_factor: float = 3.0,
+    max_batches: int = 6,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    log_rho_min = math.log(max(1e-12, rho_min_au))
+    log_rho_max = math.log(max(rho_min_au, rho_max_au))
+    v_inf_cap = float(rhodot_max_kms if v_inf_max_kms is None else v_inf_max_kms)
+    v_inf_cap = max(v_inf_cap, 1e-6)
+    sigma_rad_scale = max(1e-6, float(sigma_rad_scale))
+    iso_fraction = float(np.clip(iso_fraction, 0.0, 1.0))
+
+    rhos: list[float] = []
+    rhodots: list[float] = []
+    log_qs: list[float] = []
+
+    for _ in range(max_batches):
+        remaining = n_proposals - len(rhos)
+        if remaining <= 0:
+            break
+        batch_size = max(128, int(math.ceil(remaining * max(1.0, oversample_factor))))
+        rhos_batch = np.exp(rng.uniform(log_rho_min, log_rho_max, size=batch_size)) * AU_KM
+        for rho_km in rhos_batch:
+            v0 = earth_vel_helio + site_vel + rho_km * sdot
+            s_dot_v0 = float(np.dot(s, v0))
+            v_t = v0 - s_dot_v0 * s
+            v_t2 = float(np.dot(v_t, v_t))
+
+            r_helio = earth_helio + site_offset + rho_km * s
+            r_norm = float(np.linalg.norm(r_helio))
+            if r_norm <= 0.0:
+                continue
+            v_esc = math.sqrt(2.0 * GM_SUN / r_norm)
+            v_max = math.sqrt(v_inf_cap * v_inf_cap + v_esc * v_esc)
+            if v_t2 >= v_max * v_max:
+                continue
+            v_rad_max = math.sqrt(max(0.0, v_max * v_max - v_t2))
+            if v_rad_max <= 0.0:
+                continue
+
+            if iso_fraction > 0.0 and rng.random() < iso_fraction:
+                v_inf = _sample_maxwell_speed(rng, sigma=sigma_iso_kms, vmax=v_inf_cap)
+                if v_inf is None:
+                    continue
+                v = math.sqrt(v_inf * v_inf + v_esc * v_esc)
+                if v * v <= v_t2:
+                    continue
+                v_rad_mag = math.sqrt(max(0.0, v * v - v_t2))
+                v_rad = v_rad_mag if rng.random() < 0.5 else -v_rad_mag
+                v_inf_from_vrad = math.sqrt(max(0.0, v_t2 + v_rad * v_rad - v_esc * v_esc))
+                if v_inf_from_vrad <= 0.0:
+                    continue
+                p_vinf = _maxwell_pdf(v_inf_from_vrad, sigma_iso_kms)
+                q_vrad = 0.5 * p_vinf * (abs(v_rad) / v_inf_from_vrad)
+                q = iso_fraction * q_vrad
+            else:
+                v_circ = math.sqrt(max(GM_SUN / r_norm, 1e-12))
+                sigma_rad = max(1e-6, sigma_rad_scale * v_circ)
+                v_rad = _truncnorm_sample(rng, a=-v_rad_max, b=v_rad_max, sigma=sigma_rad)
+                if v_rad is None:
+                    continue
+                q_bound = _truncnorm_pdf(v_rad, a=-v_rad_max, b=v_rad_max, sigma=sigma_rad)
+                q = (1.0 - iso_fraction) * q_bound
+
+            if not np.isfinite(q) or q <= 0.0:
+                continue
+            rhodot = float(v_rad - s_dot_v0)
+            if abs(rhodot) > rhodot_max_kms:
+                continue
+            rhos.append(float(rho_km))
+            rhodots.append(rhodot)
+            log_qs.append(float(math.log(q)))
+            if len(rhos) >= n_proposals:
+                break
+        if len(rhos) >= n_proposals:
+            break
+
+    if len(rhos) < n_proposals:
+        n_missing = n_proposals - len(rhos)
+        rhos_fallback = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n_missing)) * AU_KM
+        rhodots_fallback = rng.uniform(-rhodot_max_kms, rhodot_max_kms, size=n_missing)
+        q_uniform = math.log(0.5 / max(rhodot_max_kms, 1e-12))
+        rhos.extend(rhos_fallback.tolist())
+        rhodots.extend(rhodots_fallback.tolist())
+        log_qs.extend([q_uniform] * n_missing)
+
+    return (
+        np.asarray(rhos[:n_proposals], dtype=float),
+        np.asarray(rhodots[:n_proposals], dtype=float),
+        np.asarray(log_qs[:n_proposals], dtype=float),
+    )
+
+
 def sample_ranged_replicas(
     observations: Sequence[Observation],
     epoch: Time,
@@ -1287,6 +1446,11 @@ def sample_ranged_replicas(
     admissible_bound: bool = False,
     admissible_q_min_au: float | None = None,
     admissible_q_max_au: float | None = None,
+    rhodot_sampler: str = "conditioned",
+    rhodot_sigma_scale: float = 0.25,
+    rhodot_iso_fraction: float = 1e-3,
+    rhodot_iso_sigma_kms: float = 40.0,
+    rhodot_vinf_max_kms: float | None = None,
 ) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(int(seed))
     obs_ref = _ranging_reference_observation(observations, epoch)
@@ -1307,11 +1471,46 @@ def sample_ranged_replicas(
         ),
         flush=True,
     )
-    rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n_proposals)) * AU_KM
-    rhodots = rng.uniform(-rhodot_max_kms, rhodot_max_kms, size=n_proposals)
-    print("[ranging] proposals sampled; scoring...", flush=True)
+    sampler = rhodot_sampler.lower().strip()
+    if sampler == "conditioned":
+        s, sdot = s_and_sdot(attrib)
+        earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
+        sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
+        earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
+        earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+        site_pos, site_vel = _site_states(
+            [epoch],
+            [obs_ref.site],
+            observer_positions_km=[obs_ref.observer_pos_km],
+            observer_velocities_km_s=None,
+            allow_unknown_site=True,
+        )
+        rhos, rhodots, log_q = _sample_conditioned_ranging_proposals(
+            rng=rng,
+            n_proposals=n_proposals,
+            rho_min_au=rho_min_au,
+            rho_max_au=rho_max_au,
+            rhodot_max_kms=rhodot_max_kms,
+            s=s,
+            sdot=sdot,
+            earth_helio=earth_helio,
+            earth_vel_helio=earth_vel_helio,
+            site_offset=site_pos[0],
+            site_vel=site_vel[0],
+            v_inf_max_kms=rhodot_vinf_max_kms,
+            sigma_rad_scale=rhodot_sigma_scale,
+            iso_fraction=rhodot_iso_fraction,
+            sigma_iso_kms=rhodot_iso_sigma_kms,
+        )
+    elif sampler == "uniform":
+        rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n_proposals)) * AU_KM
+        rhodots = rng.uniform(-rhodot_max_kms, rhodot_max_kms, size=n_proposals)
+        log_q = np.full(n_proposals, math.log(0.5 / max(rhodot_max_kms, 1e-12)))
+    else:
+        raise ValueError(f"Unknown rhodot_sampler={rhodot_sampler!r}")
+    print(f"[ranging] {sampler} proposals sampled; scoring...", flush=True)
 
-    proposals = list(zip(rhos, rhodots))
+    proposals = list(zip(rhos, rhodots, log_q))
     if n_workers < 1:
         n_workers = 1
     if chunk_size is None:
@@ -1324,7 +1523,7 @@ def sample_ranged_replicas(
         results = []
         n_fail = 0
         best_ll = -np.inf
-        for i, (rho_km, rhodot_km_s) in enumerate(proposals):
+        for i, (rho_km, rhodot_km_s, log_qi) in enumerate(proposals):
             if multiobs:
                 state = build_state_from_ranging_multiobs(
                     obs_eval,
@@ -1349,7 +1548,7 @@ def sample_ranged_replicas(
                 ):
                     ll = -np.inf
                     n_fail += 1
-                    results.append((rho_km, rhodot_km_s, ll, state))
+                    results.append((rho_km, rhodot_km_s, ll, state, log_qi))
                     continue
                 ll, _ = score_candidate(
                     state,
@@ -1367,7 +1566,7 @@ def sample_ranged_replicas(
                 n_fail += 1
             if ll > best_ll:
                 best_ll = ll
-            results.append((rho_km, rhodot_km_s, ll, state))
+            results.append((rho_km, rhodot_km_s, ll, state, log_qi))
             if log_every and ((i + 1) % log_every == 0 or (i + 1) == n_proposals):
                 elapsed = time.perf_counter() - t0
                 rate = (i + 1) / max(elapsed, 1e-6)
@@ -1412,9 +1611,10 @@ def sample_ranged_replicas(
     rhodots_out = np.array([r[1] for r in results], dtype=float)
     loglikes = np.array([r[2] for r in results], dtype=float)
     states = np.array([r[3] for r in results], dtype=float)
+    log_q = np.array([r[4] for r in results], dtype=float)
 
     log_prior = _rho_log_prior(rhos_out, rho_prior_mode, rho_prior_power)
-    log_w = loglikes + log_prior
+    log_w = loglikes + log_prior - log_q
     max_lw = np.max(log_w)
     weights = np.exp(log_w - max_lw)
     weights /= np.sum(weights)
@@ -1435,6 +1635,7 @@ def sample_ranged_replicas(
         top_states = states[selected_idx]
         top_rhos = rhos_out[selected_idx]
         top_rhodots = rhodots_out[selected_idx]
+        top_log_q = log_q[selected_idx]
         if n_workers > 1:
             state_chunks = [
                 top_states[i : i + chunk_size] for i in range(0, len(top_states), chunk_size)
@@ -1472,19 +1673,21 @@ def sample_ranged_replicas(
                 scored.append((ll, st))
         lls = np.array([r[0] for r in scored], dtype=float)
         log_prior_top = _rho_log_prior(top_rhos, rho_prior_mode, rho_prior_power)
-        log_w_top = lls + log_prior_top
+        log_w_top = lls + log_prior_top - top_log_q
         max_lw_top = np.max(log_w_top)
         weights = np.exp(log_w_top - max_lw_top)
         weights /= np.sum(weights)
         states = top_states
         rhos_out = top_rhos
         rhodots_out = top_rhodots
+        log_q = top_log_q
 
     return {
         "states": states,
         "weights": weights,
         "rhos": rhos_out,
         "rhodots": rhodots_out,
+        "log_q_rhodot": log_q,
         "attrib": attrib,
         "diagnostics": prefilter_debug or {},
     }
