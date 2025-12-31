@@ -11,11 +11,11 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 from astropy import units as u
-from astropy.coordinates import SkyCoord, get_body_barycentric_posvel
+from astropy.coordinates import SkyCoord
 from astropy.time import Time
 
 from .fit import _predict_batch, _site_offset, _site_offset_cached
-from .propagate import _site_states, GM_SUN, _prepare_obs_cache
+from .propagate import _site_states, GM_SUN, _prepare_obs_cache, _body_posvel_km_single
 from .sites import get_site_ephemeris, get_site_kind
 from .models import Observation
 
@@ -266,10 +266,10 @@ def add_attributable_jitter(
     if epoch is None:
         raise RuntimeError("posterior.epoch is required for attributable jitter")
 
-    earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
-    sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
-    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
-    earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+    earth_bary, earth_bary_vel = _body_posvel_km_single("earth", epoch)
+    sun_bary, sun_bary_vel = _body_posvel_km_single("sun", epoch)
+    earth_helio = earth_bary - sun_bary
+    earth_vel_helio = earth_bary_vel - sun_bary_vel
     site_offset = site_offsets
 
     states = np.asarray(states, dtype=float)
@@ -356,10 +356,10 @@ def _attrib_rho_from_state(
     epoch: Time,
 ) -> tuple[Attributable, float, float]:
     """Compute attributable + (rho, rhodot) from a heliocentric state at epoch."""
-    earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
-    sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
-    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
-    earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+    earth_bary, earth_bary_vel = _body_posvel_km_single("earth", epoch)
+    sun_bary, sun_bary_vel = _body_posvel_km_single("sun", epoch)
+    earth_helio = earth_bary - sun_bary
+    earth_vel_helio = earth_bary_vel - sun_bary_vel
     site_pos, site_vel = _site_states(
         [epoch],
         [obs.site],
@@ -918,10 +918,10 @@ def build_state_from_ranging_s_sdot(
     rhodot_km_s: float,
 ) -> np.ndarray:
     """Build heliocentric state directly from (s, sdot) to preserve velocity precision."""
-    earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
-    sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
-    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
-    earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+    earth_bary, earth_bary_vel = _body_posvel_km_single("earth", epoch)
+    sun_bary, sun_bary_vel = _body_posvel_km_single("sun", epoch)
+    earth_helio = earth_bary - sun_bary
+    earth_vel_helio = earth_bary_vel - sun_bary_vel
 
     site_pos, site_vel = _site_states(
         [epoch],
@@ -1010,10 +1010,10 @@ def build_state_from_ranging_multiobs(
         return build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
     if s is None or sdot is None:
         s, sdot = s_and_sdot(attrib)
-    earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
-    sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
-    earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
-    earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+    earth_bary, earth_bary_vel = _body_posvel_km_single("earth", epoch)
+    sun_bary, sun_bary_vel = _body_posvel_km_single("sun", epoch)
+    earth_helio = earth_bary - sun_bary
+    earth_vel_helio = earth_bary_vel - sun_bary_vel
     site_pos, site_vel = _site_states(
         [epoch],
         [obs_ref.site],
@@ -1635,10 +1635,10 @@ def sample_ranged_replicas(
     )
     sampler = rhodot_sampler.lower().strip()
     if sampler == "conditioned":
-        earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
-        sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
-        earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
-        earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+        earth_bary, earth_bary_vel = _body_posvel_km_single("earth", epoch)
+        sun_bary, sun_bary_vel = _body_posvel_km_single("sun", epoch)
+        earth_helio = earth_bary - sun_bary
+        earth_vel_helio = earth_bary_vel - sun_bary_vel
         site_pos, site_vel = _site_states(
             [epoch],
             [obs_ref.site],

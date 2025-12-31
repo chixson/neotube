@@ -14,7 +14,7 @@ dependencies = [
   "requests>=2.31",
   "numpy>=1.26",
   "scipy>=1.11",
-  "astropy>=6.0",
+  "astropy @ git+https://github.com/chixson/astropy-numba.git@v7.2.x",
   "astroquery>=0.4.6",
   "pandas>=2.0",
   "matplotlib>=3.8",

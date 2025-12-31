@@ -14,7 +14,7 @@ from astropy.time import Time
 from .models import Observation
 from .fit_adapt import AdaptiveConfig, adaptively_grow_cloud
 from .propagate import (
-    _body_posvel,
+    _body_posvel_km_single,
     _prepare_obs_cache,
     ObsCache,
     default_propagation_ladder,
@@ -859,8 +859,7 @@ def sequential_fit_replicas(
                 for ob in phot_obs:
                     obs_cache = _prepare_obs_cache([ob], allow_unknown_site=allow_unknown_site)
                     obs_bary = obs_cache.earth_bary_km[0] + obs_cache.site_pos_km[0]
-                    sun_pos, _ = _body_posvel("sun", ob.time.tdb)
-                    sun_bary = sun_pos.xyz.to_value("km").flatten()
+                    sun_bary, _ = _body_posvel_km_single("sun", ob.time.tdb)
                     obs_helio = obs_bary - sun_bary
                     _photometry_accumulate(
                         pool_states,
@@ -971,8 +970,7 @@ def sequential_fit_replicas(
             for ob in phot_obs:
                 obs_cache = _prepare_obs_cache([ob], allow_unknown_site=allow_unknown_site)
                 obs_bary = obs_cache.earth_bary_km[0] + obs_cache.site_pos_km[0]
-                sun_pos, _ = _body_posvel("sun", ob.time.tdb)
-                sun_bary = sun_pos.xyz.to_value("km").flatten()
+                sun_bary, _ = _body_posvel_km_single("sun", ob.time.tdb)
                 obs_helio = obs_bary - sun_bary
                 _photometry_accumulate(
                     states, ob, obs_helio, mu_h, g, sum_inv_var, sum_y_inv_var, sum_y2_inv_var

@@ -38,6 +38,16 @@ except Exception:  # pragma: no cover - optional dependency
     nb = None
     _HAS_NUMBA = False
 
+try:
+    from astropy.numba import solar_system as nb_solar_system
+    from astropy.numba import time as nb_time
+
+    _HAS_ASTROPY_NUMBA = True
+except Exception:  # pragma: no cover - optional dependency
+    nb_solar_system = None
+    nb_time = None
+    _HAS_ASTROPY_NUMBA = False
+
 if _HAS_NUMBA:
     _NUMBA_THREADS = int(os.environ.get("NEOTUBE_NUMBA_THREADS", "0") or "0")
     if _NUMBA_THREADS <= 0:
@@ -46,6 +56,54 @@ if _HAS_NUMBA:
         nb.set_num_threads(_NUMBA_THREADS)
     except Exception:
         pass
+
+_USE_FAST_EPHEM = os.environ.get("NEOTUBE_FAST_EPHEM", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+_USE_NUMBA_ACCEL = _HAS_NUMBA and os.environ.get("NEOTUBE_NUMBA_ACCEL", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+
+if _HAS_NUMBA:
+    _NUMBA_NJIT = nb.njit(cache=True, nogil=True, fastmath=True)
+    _NUMBA_NJIT_PAR = nb.njit(cache=True, nogil=True, fastmath=True, parallel=True)
+
+    @_NUMBA_NJIT_PAR
+    def _light_time_linear_numba(obj_bary, obj_bary_vel, obs_bary, iters, c_km_s):
+        n = obj_bary.shape[0]
+        out = obj_bary.copy()
+        for _ in range(iters):
+            for i in nb.prange(n):
+                dx = out[i, 0] - obs_bary[i, 0]
+                dy = out[i, 1] - obs_bary[i, 1]
+                dz = out[i, 2] - obs_bary[i, 2]
+                rho = math.sqrt(dx * dx + dy * dy + dz * dz)
+                dt = rho / c_km_s
+                out[i, 0] = obj_bary[i, 0] - obj_bary_vel[i, 0] * dt
+                out[i, 1] = obj_bary[i, 1] - obj_bary_vel[i, 1] * dt
+                out[i, 2] = obj_bary[i, 2] - obj_bary_vel[i, 2] * dt
+        return out
+
+    @_NUMBA_NJIT_PAR
+    def _radec_from_topovec_numba(topovec):
+        n = topovec.shape[0]
+        ra_out = np.empty(n, dtype=np.float64)
+        dec_out = np.empty(n, dtype=np.float64)
+        for i in nb.prange(n):
+            x = topovec[i, 0]
+            y = topovec[i, 1]
+            z = topovec[i, 2]
+            xy = math.hypot(x, y)
+            ra = math.degrees(math.atan2(y, x))
+            if ra < 0.0:
+                ra += 360.0
+            ra_out[i] = ra
+            dec_out[i] = math.degrees(math.atan2(z, xy))
+        return ra_out, dec_out
 
 __all__ = [
     "propagate_state",
@@ -63,6 +121,8 @@ __all__ = [
 ]
 
 GM_SUN = 1.32712440018e11  # km^3 / s^2
+AU_KM = 149597870.7
+DAY_S = 86400.0
 
 PLANET_GMS = {
     "mercury": 2.203233e4,
@@ -120,19 +180,17 @@ def _prepare_obs_cache(
         observer_velocities_km_s=None,
         allow_unknown_site=allow_unknown_site,
     )
-    earth_pos, earth_vel = _body_posvel("earth", time_tdb)
-    earth_bary = earth_pos.xyz.to(u.km).value
-    earth_bary_vel = earth_vel.xyz.to(u.km / u.s).value
-    if earth_bary.shape[1] != len(obs):
-        earth_bary = earth_bary[:, : len(obs)]
-        earth_bary_vel = earth_bary_vel[:, : len(obs)]
+    earth_bary_km, earth_bary_vel_km_s = _body_posvel_km("earth", time_tdb)
+    if earth_bary_km.shape[0] != len(obs):
+        earth_bary_km = earth_bary_km[: len(obs)]
+        earth_bary_vel_km_s = earth_bary_vel_km_s[: len(obs)]
     return ObsCache(
         times_obs=time_obs,
         times_tdb=time_tdb,
         site_pos_km=site_pos_km,
         site_vel_km_s=site_vel_km_s,
-        earth_bary_km=earth_bary.T,
-        earth_bary_vel_km_s=earth_bary_vel.T,
+        earth_bary_km=earth_bary_km,
+        earth_bary_vel_km_s=earth_bary_vel_km_s,
     )
 
 
@@ -440,6 +498,50 @@ def predict_radec_with_contract(
 
 # Cache for repeated ephemeris lookups (per process).
 _BULK_EPHEM_CACHE: dict[tuple, np.ndarray] = {}
+
+
+def _time_to_jd12_tdb(times: Time) -> tuple[np.ndarray, np.ndarray]:
+    if times.scale == "tdb":
+        tdb = times
+    else:
+        tdb = times.tdb
+    if nb_time is not None:
+        jd1, jd2 = nb_time.time_to_jd1_jd2(tdb, "tdb")
+    else:
+        jd1, jd2 = tdb.jd1, tdb.jd2
+    return np.asarray(jd1), np.asarray(jd2)
+
+
+def _body_posvel_km(body: str, times: Time, ephemeris: str = "de432s") -> tuple[np.ndarray, np.ndarray]:
+    if _USE_FAST_EPHEM and _HAS_ASTROPY_NUMBA:
+        jd1, jd2 = _time_to_jd12_tdb(times)
+        scalar = jd1.shape == ()
+        if scalar:
+            jd1 = jd1.reshape(1)
+            jd2 = jd2.reshape(1)
+        with solar_system_ephemeris.set(ephemeris):
+            pos_km, vel_km_day = nb_solar_system.get_body_barycentric_posvel_jd(
+                body, jd1, jd2, ephemeris=None, unit="km"
+            )
+        pos_km = np.asarray(pos_km)
+        vel_km_s = np.asarray(vel_km_day) / 86400.0
+    else:
+        with solar_system_ephemeris.set(ephemeris):
+            pos, vel = get_body_barycentric_posvel(body, times)
+        pos_val = pos.xyz.to(u.km).value
+        vel_val = vel.xyz.to(u.km / u.s).value
+        if pos_val.ndim == 1:
+            pos_km = pos_val.reshape(1, 3)
+            vel_km_s = vel_val.reshape(1, 3)
+        else:
+            pos_km = pos_val.T
+            vel_km_s = vel_val.T
+    return pos_km, vel_km_s
+
+
+def _body_posvel_km_single(body: str, time: Time, ephemeris: str = "de432s") -> tuple[np.ndarray, np.ndarray]:
+    pos_km, vel_km_s = _body_posvel_km(body, time, ephemeris=ephemeris)
+    return pos_km[0], vel_km_s[0]
 
 
 def _body_posvel(body: str, times: Time):
@@ -801,25 +903,23 @@ class PerturberTable:
         return out
 
 
-def _bulk_heliocentric_positions(body: str, times: Time, sun_coord: SkyCoord) -> np.ndarray:
+def _bulk_heliocentric_positions(body: str, times: Time, sun_pos_km: np.ndarray) -> np.ndarray:
     """Return heliocentric (km) positions for body over multiple epochs."""
     key = (body.lower(), _times_cache_key(times))
     cached = _BULK_EPHEM_CACHE.get(key)
     if cached is not None:
         return cached
-    body_pos, _ = _body_posvel(body, times)
-    vec = body_pos.xyz - sun_coord.xyz
-    out = vec.to(u.km).value.T
+    body_pos_km, _ = _body_posvel_km(body, times)
+    out = body_pos_km - sun_pos_km
     _BULK_EPHEM_CACHE[key] = out
     return out
 
 
 def _heliocentric_position(body: str, epoch: Time) -> np.ndarray:
     """Return heliocentric (km) position for a single epoch."""
-    body_pos, _ = _body_posvel(body, epoch)
-    sun_pos, _ = _body_posvel("sun", epoch)
-    vec = body_pos.xyz - sun_pos.xyz
-    return vec.to(u.km).value
+    body_pos_km, _ = _body_posvel_km(body, epoch)
+    sun_pos_km, _ = _body_posvel_km("sun", epoch)
+    return body_pos_km[0] - sun_pos_km[0]
 
 
 def _build_perturber_table(
@@ -835,7 +935,7 @@ def _build_perturber_table(
     n_steps = max(2, int(ceil(max_offset / step)) + 1)
     grid = np.linspace(0.0, max_offset, n_steps, dtype=float)
     times = epoch + TimeDelta(grid * u.s)
-    sun_pos, _ = _body_posvel("sun", times)
+    sun_pos_km, _ = _body_posvel_km("sun", times)
 
     bodies = []
     position_list = []
@@ -844,7 +944,7 @@ def _build_perturber_table(
         gm = PLANET_GMS.get(body.lower())
         if gm is None:
             continue
-        body_pos = _bulk_heliocentric_positions(body, times, sun_pos)
+        body_pos = _bulk_heliocentric_positions(body, times, sun_pos_km)
         bodies.append(body.lower())
         position_list.append(body_pos)
         gms.append(gm)
@@ -932,7 +1032,7 @@ def propagate_state(
                 dtype=float,
             )
         times = epoch + TimeDelta(table_times * u.s)
-        sun_pos, _ = _body_posvel("sun", times)
+        sun_pos_km, _ = _body_posvel_km("sun", times)
         bodies = []
         position_list = []
         gms = []
@@ -940,7 +1040,7 @@ def propagate_state(
             gm = PLANET_GMS.get(body.lower())
             if gm is None:
                 continue
-            body_pos = _bulk_heliocentric_positions(body, times, sun_pos)
+            body_pos = _bulk_heliocentric_positions(body, times, sun_pos_km)
             bodies.append(body.lower())
             position_list.append(body_pos)
             gms.append(gm)
@@ -1060,8 +1160,7 @@ def predict_radec_from_epoch(
                 emit_state = propagate_state(
                     state, epoch, (t_emit,), perturbers=perturbers, max_step=max_step
                 )[0]
-            sun_pos, _ = _body_posvel("sun", t_emit)
-            sun_bary = sun_pos.xyz.to(u.km).value.flatten()
+            sun_bary, _ = _body_posvel_km_single("sun", t_emit)
             obj_bary = emit_state[:3] + sun_bary
             rho = float(np.linalg.norm(obj_bary - obs_bary))
             dt_geom = rho / c_km_s
@@ -1139,9 +1238,7 @@ def predict_radec_with_geometry(
         site_pos = obs_pos_km[0]
         site_vel = obs_vel_km_s[0]
 
-        earth_pos, earth_vel = _body_posvel("earth", t_obs_tdb)
-        earth_bary = earth_pos.xyz.to(u.km).value.flatten()
-        earth_bary_vel = earth_vel.xyz.to(u.km / u.s).value.flatten()
+        earth_bary, earth_bary_vel = _body_posvel_km_single("earth", t_obs_tdb)
 
         t_emit = t_obs_tdb
         obj_bary = None
@@ -1158,8 +1255,7 @@ def predict_radec_with_geometry(
                 emit_state = propagate_state(
                     state, epoch, (t_emit,), perturbers=perturbers, max_step=max_step
                 )[0]
-            sun_pos, _ = _body_posvel("sun", t_emit)
-            sun_bary = sun_pos.xyz.to(u.km).value.flatten()
+            sun_bary, _ = _body_posvel_km_single("sun", t_emit)
             obj_bary = emit_state[:3] + sun_bary
             obs_bary = earth_bary + site_pos
             rho = float(np.linalg.norm(obj_bary - obs_bary))
@@ -1172,8 +1268,7 @@ def predict_radec_with_geometry(
 
         if obj_bary is None or sun_bary is None:
             obj_bary = state[:3] + earth_bary * 0.0
-            sun_pos, _ = _body_posvel("sun", t_obs_tdb)
-            sun_bary = sun_pos.xyz.to(u.km).value.flatten()
+            sun_bary, _ = _body_posvel_km_single("sun", t_obs_tdb)
 
         obs_bary = earth_bary + site_pos
         obs_bary_vel = earth_bary_vel + site_vel
@@ -1214,6 +1309,21 @@ def _site_error_message(site: str | None, time: Time, message: str) -> str:
     return f"{message} (site='{site_label}', time='{time_label}')"
 
 
+def _icrs_from_horizons_au(
+    x_au: float,
+    y_au: float,
+    z_au: float,
+    vx_au_day: float,
+    vy_au_day: float,
+    vz_au_day: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    pos = np.array([x_au, y_au, z_au], dtype=float) * AU_KM
+    vel = (
+        np.array([vx_au_day, vy_au_day, vz_au_day], dtype=float) * (AU_KM / DAY_S)
+    )
+    return pos, vel
+
+
 @lru_cache(maxsize=2048)
 def _spacecraft_barycentric_state(
     ephemeris_id: str,
@@ -1240,9 +1350,12 @@ def _spacecraft_barycentric_state(
     vx = float(vec["vx"][0])
     vy = float(vec["vy"][0])
     vz = float(vec["vz"][0])
+    frame_key = (ephemeris_frame or "icrs").strip().lower()
+    if frame_key in {"icrs", "bcrs"}:
+        return _icrs_from_horizons_au(x, y, z, vx, vy, vz)
+
     rep = CartesianRepresentation(x * u.au, y * u.au, z * u.au)
     diff = CartesianDifferential(vx * u.au / u.day, vy * u.au / u.day, vz * u.au / u.day)
-    frame_key = (ephemeris_frame or "icrs").strip().lower()
     if frame_key in {"tete", "tod", "earth"}:
         coord = SkyCoord(rep.with_differentials(diff), frame=TETE(obstime=t))
         coord = coord.transform_to(ICRS())
@@ -1314,12 +1427,10 @@ def _site_states(
                 )
                 if ephemeris_location.lower() in {"@ssb", "500@0", "@sun"}:
                     if ephemeris_location.lower() in {"@sun", "500@0"}:
-                        sun_pos, sun_vel = _body_posvel("sun", time)
-                        pos_bary = pos_bary + sun_pos.xyz.to(u.km).value.flatten()
-                        vel_bary = vel_bary + sun_vel.xyz.to(u.km / u.s).value.flatten()
-                    earth_pos, earth_vel = _body_posvel("earth", time)
-                    earth_km = earth_pos.xyz.to(u.km).value.flatten()
-                    earth_kms = earth_vel.xyz.to(u.km / u.s).value.flatten()
+                        sun_km, sun_kms = _body_posvel_km_single("sun", time)
+                        pos_bary = pos_bary + sun_km
+                        vel_bary = vel_bary + sun_kms
+                    earth_km, earth_kms = _body_posvel_km_single("earth", time)
                     positions[idx] = pos_bary - earth_km
                     velocities[idx] = vel_bary - earth_kms
                 else:
@@ -1382,12 +1493,10 @@ def predict_radec_batch(
 
     time_obs = Time(epochs)
     time_tdb = time_obs.tdb
-    sun_pos, sun_vel = _body_posvel("sun", time_tdb)
-    sun_bary = sun_pos.xyz.to(u.km).value
-    sun_bary_vel = sun_vel.xyz.to(u.km / u.s).value
-    if sun_bary.shape[1] != len(epochs):
-        sun_bary = sun_bary[:, : len(epochs)]
-        sun_bary_vel = sun_bary_vel[:, : len(epochs)]
+    sun_bary, sun_bary_vel = _body_posvel_km("sun", time_tdb)
+    if sun_bary.shape[0] != len(epochs):
+        sun_bary = sun_bary[: len(epochs)]
+        sun_bary_vel = sun_bary_vel[: len(epochs)]
 
     obj_pos = states_arr[:, :3]
     obj_vel = states_arr[:, 3:]
@@ -1400,16 +1509,14 @@ def predict_radec_batch(
         observer_velocities_km_s,
         allow_unknown_site=allow_unknown_site,
     )
-    obj_bary = obj_pos + sun_bary.T
-    obj_bary_vel = obj_vel + sun_bary_vel.T
-    earth_pos, earth_vel = _body_posvel("earth", time_tdb)
-    earth_bary = earth_pos.xyz.to(u.km).value
-    earth_bary_vel = earth_vel.xyz.to(u.km / u.s).value
-    if earth_bary.shape[1] != len(epochs):
-        earth_bary = earth_bary[:, : len(epochs)]
-        earth_bary_vel = earth_bary_vel[:, : len(epochs)]
-    obs_bary = earth_bary.T + obs_pos_km
-    obs_bary_vel = earth_bary_vel.T + obs_vel_km_s
+    obj_bary = obj_pos + sun_bary
+    obj_bary_vel = obj_vel + sun_bary_vel
+    earth_bary, earth_bary_vel = _body_posvel_km("earth", time_tdb)
+    if earth_bary.shape[0] != len(epochs):
+        earth_bary = earth_bary[: len(epochs)]
+        earth_bary_vel = earth_bary_vel[: len(epochs)]
+    obs_bary = earth_bary + obs_pos_km
+    obs_bary_vel = earth_bary_vel + obs_vel_km_s
 
     # Light-time correction: iterate emission time using barycentric positions.
     c_km_s = 299792.458
@@ -1443,11 +1550,17 @@ def predict_radec_batch(
                 obj_helio_emit[idx] = emit_state[:3]
             obj_bary_lt = obj_helio_emit + sun_bary.T
     else:
-        for _ in range(max(1, light_time_iters)):
-            vec = obj_bary_lt - obs_bary
-            rho = np.linalg.norm(vec, axis=1)
-            dt = rho / c_km_s
-            obj_bary_lt = obj_bary - obj_bary_vel * dt[:, None]
+        iters = max(1, light_time_iters)
+        if _USE_NUMBA_ACCEL:
+            obj_bary_lt = _light_time_linear_numba(
+                obj_bary, obj_bary_vel, obs_bary, iters, c_km_s
+            )
+        else:
+            for _ in range(iters):
+                vec = obj_bary_lt - obs_bary
+                rho = np.linalg.norm(vec, axis=1)
+                dt = rho / c_km_s
+                obj_bary_lt = obj_bary - obj_bary_vel * dt[:, None]
 
     if full_physics:
         ra_vals = np.empty(len(epochs), dtype=float)
@@ -1465,8 +1578,7 @@ def predict_radec_batch(
                     ]
                 except Exception:
                     emit_state = states_arr[idx]
-                sun_pos_emit, _ = _body_posvel("sun", t_emit)
-                sun_bary_emit = sun_pos_emit.xyz.to(u.km).value.flatten()
+                sun_bary_emit, _ = _body_posvel_km_single("sun", t_emit)
                 obj_bary_exact = emit_state[:3] + sun_bary_emit
                 rho = float(np.linalg.norm(obj_bary_exact - obs_b))
                 dt_geom = rho / c_km_s
@@ -1484,6 +1596,8 @@ def predict_radec_batch(
         return ra_vals, dec_vals
 
     topovec = obj_bary_lt - obs_bary
+    if _USE_NUMBA_ACCEL:
+        return _radec_from_topovec_numba(topovec)
     xy = np.hypot(topovec[:, 0], topovec[:, 1])
     ra_out = (np.degrees(np.arctan2(topovec[:, 1], topovec[:, 0])) + 360.0) % 360.0
     dec_out = np.degrees(np.arctan2(topovec[:, 2], xy))

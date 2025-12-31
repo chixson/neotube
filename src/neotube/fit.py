@@ -12,17 +12,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 from astropy import units as u
-from astropy.coordinates import (
-    BarycentricTrueEcliptic,
-    CartesianDifferential,
-    CartesianRepresentation,
-    GCRS,
-    ICRS,
-    EarthLocation,
-    get_body_barycentric_posvel,
-    HeliocentricTrueEcliptic,
-    SkyCoord,
-)
+from astropy.coordinates import EarthLocation
 from astropy.time import Time
 from astroquery.jplhorizons import Horizons
 
@@ -32,12 +22,16 @@ from .propagate import (
     predict_radec_from_epoch,
     propagate_state,
     propagate_state_kepler,
+    _body_posvel_km_single,
 )
 from .sites import get_site_ephemeris, get_site_kind, get_site_location, load_observatories
 
 _MISSING_SITE_REFRESHED: set[str] = set()
 
 __all__ = ["fit_orbit", "sample_replicas", "predict_orbit", "load_posterior"]
+
+AU_KM = 149597870.7
+DAY_S = 86400.0
 
 
 def _normalize_horizons_id(raw: str) -> str:
@@ -60,28 +54,16 @@ def _initial_state_from_horizons(target: str, epoch: Time) -> np.ndarray:
     # Request equatorial vectors directly to avoid ecliptic-of-date conversion drift.
     vec = obj.vectors(refplane="earth")
     row = vec[0]
-
-    pos = CartesianRepresentation(
-        row["x"] * u.au,
-        row["y"] * u.au,
-        row["z"] * u.au,
-    )
-    vel = CartesianDifferential(
-        row["vx"] * u.au / u.day,
-        row["vy"] * u.au / u.day,
-        row["vz"] * u.au / u.day,
-    )
-    coord = SkyCoord(pos.with_differentials(vel), frame=ICRS())
-    cart = coord.cartesian
-
+    au_km = AU_KM
+    au_per_day_to_km_s = AU_KM / DAY_S
     return np.array(
         [
-            cart.x.to(u.km).value,
-            cart.y.to(u.km).value,
-            cart.z.to(u.km).value,
-            cart.differentials["s"].d_x.to(u.km / u.s).value,
-            cart.differentials["s"].d_y.to(u.km / u.s).value,
-            cart.differentials["s"].d_z.to(u.km / u.s).value,
+            float(row["x"]) * au_km,
+            float(row["y"]) * au_km,
+            float(row["z"]) * au_km,
+            float(row["vx"]) * au_per_day_to_km_s,
+            float(row["vy"]) * au_per_day_to_km_s,
+            float(row["vz"]) * au_per_day_to_km_s,
         ],
         dtype=float,
     )
@@ -179,10 +161,9 @@ def _resolve_spacecraft_offset(obs: Observation) -> np.ndarray | None:
         )
         if ephemeris_location.lower() in {"@ssb", "500@0", "@sun"}:
             if ephemeris_location.lower() in {"@sun", "500@0"}:
-                sun_pos, _ = get_body_barycentric_posvel("sun", obs.time)
-                pos_bary = pos_bary + sun_pos.xyz.to(u.km).value.flatten()
-            earth_pos, _ = get_body_barycentric_posvel("earth", obs.time)
-            earth_km = earth_pos.xyz.to(u.km).value.flatten()
+                sun_km, _ = _body_posvel_km_single("sun", obs.time)
+                pos_bary = pos_bary + sun_km
+            earth_km, _ = _body_posvel_km_single("earth", obs.time)
             return pos_bary - earth_km
         return pos_bary
     vec = ephemeris(obs.time) if callable(ephemeris) else ephemeris
@@ -310,7 +291,7 @@ def _site_offset(obs: Observation, *, allow_unknown_site: bool = False) -> np.nd
 def _body_bary_posvel_cached(body: str, jd_seconds: int):
     """Cache body barycentric posvel keyed by integer-second JD."""
     t = Time(jd_seconds / 86400.0, format="jd")
-    return get_body_barycentric_posvel(body, t)
+    return _body_posvel_km_single(body, t)
 
 
 def _body_bary_posvel_for_time(body: str, obstime: Time):
@@ -348,17 +329,12 @@ def _site_offset_cached(obs: Observation, *, allow_unknown_site: bool = False) -
 def _observation_line_of_sight(
     obs: Observation, *, allow_unknown_site: bool = False
 ) -> tuple[np.ndarray, np.ndarray]:
-    coord = SkyCoord(
-        ra=obs.ra_deg * u.deg,
-        dec=obs.dec_deg * u.deg,
-        distance=1.0 * u.au,
-        frame="icrs",
-        obstime=obs.time,
-    )
-    direction = coord.cartesian.xyz.to(u.km).value
+    ra = np.deg2rad(float(obs.ra_deg))
+    dec = np.deg2rad(float(obs.dec_deg))
+    cd = np.cos(dec)
+    direction = np.array([cd * np.cos(ra), cd * np.sin(ra), np.sin(dec)], dtype=float)
     direction = direction / np.linalg.norm(direction)
-    earth_pos, _ = _body_bary_posvel_for_time("earth", obs.time)
-    earth_km = earth_pos.xyz.to(u.km).value
+    earth_km, _ = _body_bary_posvel_for_time("earth", obs.time)
     # Use cached site-offset to avoid repeated EarthLocation/GCRS conversions.
     offset = _site_offset_cached(obs, allow_unknown_site=allow_unknown_site)
     return earth_km + offset, direction
@@ -385,17 +361,14 @@ def _initial_state_from_observations(observations: list[Observation]) -> np.ndar
         raise ValueError("Need at least two observations to build an initial state.")
 
     def _heliocentric_pos(obs: Observation) -> np.ndarray:
-        coord = SkyCoord(
-            ra=obs.ra_deg * u.deg,
-            dec=obs.dec_deg * u.deg,
-            distance=1.0 * u.au,
-            frame="icrs",
-            obstime=obs.time,
+        ra = np.deg2rad(float(obs.ra_deg))
+        dec = np.deg2rad(float(obs.dec_deg))
+        cd = np.cos(dec)
+        direction = np.array(
+            [cd * np.cos(ra), cd * np.sin(ra), np.sin(dec)], dtype=float
         )
-        direction = coord.cartesian.xyz.to(u.km).value
-        earth_pos, _ = _body_bary_posvel_for_time("earth", obs.time)
-        earth_km = earth_pos.xyz.to(u.km).value
-        return earth_km + direction
+        earth_km, _ = _body_bary_posvel_for_time("earth", obs.time)
+        return earth_km + direction * AU_KM
 
     pos0 = _heliocentric_pos(observations[0])
     pos1 = _heliocentric_pos(observations[-1])
@@ -494,8 +467,8 @@ def _initial_state_from_attributable(
 
     earth_pos, earth_vel = _body_bary_posvel_for_time("earth", epoch)
     sun_pos, sun_vel = _body_bary_posvel_for_time("sun", epoch)
-    earth_pos_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
-    earth_vel_helio = (earth_vel.xyz - sun_vel.xyz).to(u.km / u.s).value.flatten()
+    earth_pos_helio = earth_pos - sun_pos
+    earth_vel_helio = earth_vel - sun_vel
 
     site_code = site_choice or observations[0].site
     site_offset = np.zeros(3, dtype=float)
