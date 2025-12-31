@@ -910,12 +910,26 @@ def sequential_fit_replicas(
                 "Halted before seed scoring; checkpoint saved to {}".format(checkpoint_path)
             )
 
-        weights, used_level, max_delta = _score_seed(states)
+        _log("seed scoring start (n={})".format(len(states)))
+        try:
+            weights, used_level, max_delta = _score_seed(states)
+        except Exception as exc:
+            _log("seed scoring failed: {}".format(exc))
+            _log(traceback.format_exc())
+            _save_checkpoint(
+                states=states,
+                weights=np.full(len(states), 1.0 / len(states), dtype=float),
+                next_obs_index=0,
+                stage="seed_score_error",
+                error=str(exc),
+            )
+            raise
         _log(
             "seed scoring complete; starting assimilation from obs index {}".format(
                 next_obs_index
             )
         )
+        _log("entering obs loop at index {}".format(next_obs_index))
 
     diag_used_levels = []
     diag_max_delta = []
@@ -927,6 +941,8 @@ def sequential_fit_replicas(
 
     for ob_idx, ob in enumerate(obs[next_obs_index:], start=next_obs_index):
         try:
+            if ob_idx == next_obs_index or ob_idx % log_every_obs == 0:
+                _log("obs {} start (n={})".format(ob_idx, len(states)))
             loglikes = np.empty(len(states), dtype=float)
             sigma = _sigma_arcsec(ob, site_kappas)
             eps_ob = _epsilon_arcsec_for_obs(
