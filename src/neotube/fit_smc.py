@@ -589,10 +589,11 @@ def sequential_fit_replicas(
             np.concatenate(delta_parts),
         )
 
+    # Use the legacy vector fit to keep geometry consistent with the original pipeline.
     attrib, attrib_cov = build_attributable_vector_fit(
         obs3,
         epoch,
-        robust=True,
+        robust=False,
         return_cov=True,
         site_kappas=site_kappas,
     )
