@@ -1090,8 +1090,13 @@ def sequential_fit_replicas(
                 states = _systematic_resample(states, weights, rng)
                 weights = np.full(len(states), 1.0 / len(states), dtype=float)
                 if rejuvenation_scale > 0.0 and len(states) > 1:
+                    # TODO: Replace floor jitter with MH rejuvenation to avoid bias.
+                    pos_floor_km = 1_000.0
+                    vel_floor_km_s = 0.05
                     cov = np.cov(states.T)
                     cov = cov * rejuvenation_scale
+                    cov[:3, :3] += np.eye(3) * (pos_floor_km**2)
+                    cov[3:, 3:] += np.eye(3) * (vel_floor_km_s**2)
                     jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
                     states = states + jitter
                 _log("resampled ess={:.1f} -> uniform weights".format(ess))
