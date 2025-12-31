@@ -209,10 +209,15 @@ def adaptively_grow_cloud(
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     diagnostics: dict[str, object] = {"iterations": []}
     total_states = states.copy()
+    total_loglikes: np.ndarray | None = None
     iteration = 0
     while True:
         iteration += 1
-        loglikes = score_fn(total_states)
+        if total_loglikes is None:
+            loglikes = score_fn(total_states)
+            total_loglikes = loglikes.copy()
+        else:
+            loglikes = total_loglikes
         obs_bary = _obs_barycentric(obs_ref)
         rho_au = np.linalg.norm(total_states[:, :3] - obs_bary[None, :], axis=1) / AU_KM
         logprior = _rho_prior_logprob(rho_au, cfg.rho_prior_mode, cfg.rho_prior_power)
@@ -323,4 +328,6 @@ def adaptively_grow_cloud(
             diagnostics["final_psis_khat"] = float(khat)
             diagnostics["logrho_edges"] = edges.tolist()
             return total_states, weights, diagnostics
+        new_loglikes = score_fn(new_states)
         total_states = np.vstack([total_states, new_states])
+        total_loglikes = np.concatenate([total_loglikes, new_loglikes])
