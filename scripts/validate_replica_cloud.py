@@ -207,12 +207,42 @@ def _plot_composite(
     plt.close(fig)
 
 
-def _fetch_horizons(target: str, site: str, times: Time) -> tuple[np.ndarray, np.ndarray]:
+def _fetch_horizons(
+    target: str, site: str, times: Time, id_type: str | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     if not _HAS_HORIZONS:
         raise RuntimeError("astroquery.jplhorizons is not available")
-    obj = Horizons(id=target, location=site, epochs=times.tdb.jd)
+    kwargs = {}
+    if id_type:
+        kwargs["id_type"] = id_type
+    obj = Horizons(id=target, location=site, epochs=times.tdb.jd, **kwargs)
     eph = obj.ephemerides()
     return np.array(eph["RA"], dtype=float), np.array(eph["DEC"], dtype=float)
+
+
+def _fetch_horizons_any(
+    target: str, site: str, times: Time, id_type: str | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    attempts: list[tuple[str, str | None]] = []
+    attempts.append((target, id_type))
+    attempts.append((target, "smallbody"))
+    attempts.append((target, "majorbody"))
+    parts = target.strip().split()
+    if len(parts) > 1:
+        attempts.append((parts[0], "smallbody"))
+        attempts.append((parts[-1], "smallbody"))
+    if "ceres" in target.lower():
+        attempts.append(("1", "smallbody"))
+        attempts.append(("Ceres", "smallbody"))
+    last_exc = None
+    for tgt, idt in attempts:
+        try:
+            return _fetch_horizons(tgt, site, times, idt)
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Horizons query failed")
 
 
 def main() -> None:
@@ -228,6 +258,7 @@ def main() -> None:
     p.add_argument("--perturbers", nargs="*", default=["earth", "mars", "jupiter"])
     p.add_argument("--max-step", type=float, default=3600.0)
     p.add_argument("--horizons-target", type=str, default=None)
+    p.add_argument("--horizons-id-type", type=str, default=None)
     args = p.parse_args()
 
     if not _HAS_MPL:
@@ -300,11 +331,14 @@ def main() -> None:
     if args.horizons_target:
         try:
             site = obs[0].site or "500"
-            horizons_ra, horizons_dec = _fetch_horizons(args.horizons_target, site, obs_times)
+            horizons_ra, horizons_dec = _fetch_horizons_any(
+                args.horizons_target, site, obs_times, args.horizons_id_type
+            )
         except Exception:
-            # fallback to geocenter if MPC code is unknown to Horizons
             try:
-                horizons_ra, horizons_dec = _fetch_horizons(args.horizons_target, "500", obs_times)
+                horizons_ra, horizons_dec = _fetch_horizons_any(
+                    args.horizons_target, "500", obs_times, args.horizons_id_type
+                )
             except Exception as exc:
                 print(f"[warn] Horizons overlay failed: {exc}")
 
