@@ -429,10 +429,15 @@ def add_range_jitter(
             attrib, _, _ = _attrib_rho_from_state(st, obs0, epoch)
         except Exception:
             continue
+        s, sdot = s_and_sdot(attrib)
         rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n_per_state)) * AU_KM
         rhodots = rng.uniform(-rhodot_max_kms, rhodot_max_kms, size=n_per_state)
         for rho_km, rhodot_km_s in zip(rhos, rhodots):
-            out.append(build_state_from_ranging(obs0, epoch, attrib, float(rho_km), float(rhodot_km_s)))
+            out.append(
+                build_state_from_ranging_s_sdot(
+                    obs0, epoch, s, sdot, float(rho_km), float(rhodot_km_s)
+                )
+            )
     if not out:
         return np.empty((0, 6), dtype=float)
     return np.array(out, dtype=float)
@@ -718,11 +723,11 @@ def _attrib_from_s_sdot(s: np.ndarray, sdot: np.ndarray) -> Attributable:
     )
 
 
-def _build_attributable_vector_fit_lstsq(
+def fit_unit_vector_rate(
     observations: Sequence[Observation],
     epoch: Time,
-) -> Attributable:
-    """Fit a linear model to topocentric direction unit vectors in ICRS."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit s and sdot directly to avoid RA/Dec rate round-trip error."""
     times = np.array([(ob.time - epoch).to(u.s).value for ob in observations], dtype=float)
     ra_deg = np.array([ob.ra_deg for ob in observations], dtype=float)
     dec_deg = np.array([ob.dec_deg for ob in observations], dtype=float)
@@ -744,10 +749,19 @@ def _build_attributable_vector_fit_lstsq(
 
     s0_norm = np.linalg.norm(s0)
     if s0_norm <= 0:
-        return build_attributable(observations, epoch)
+        fallback = build_attributable(observations, epoch)
+        return s_and_sdot(fallback)
     s0 = s0 / s0_norm
-    # Remove radial component from sdot for a tangent-plane rate.
     sdot = sdot - np.dot(s0, sdot) * s0
+    return s0, sdot
+
+
+def _build_attributable_vector_fit_lstsq(
+    observations: Sequence[Observation],
+    epoch: Time,
+) -> Attributable:
+    """Fit a linear model to topocentric direction unit vectors in ICRS."""
+    s0, sdot = fit_unit_vector_rate(observations, epoch)
     return _attrib_from_s_sdot(s0, sdot)
 
 
@@ -836,6 +850,7 @@ def build_attributable_vector_fit(
     *,
     robust: bool = True,
     return_cov: bool = False,
+    return_s_sdot: bool = False,
     nu: float = 4.0,
     max_iter: int = 10,
     tol: float = 1e-8,
@@ -851,8 +866,15 @@ def build_attributable_vector_fit(
             tol=tol,
             site_kappas=site_kappas,
         )
+        if return_s_sdot:
+            # Use the direct unit-vector fit for s/sdot to avoid RA/Dec rate round-trip error.
+            s0, sdot = fit_unit_vector_rate(observations, epoch)
+            return (attrib, cov, s0, sdot) if return_cov else (attrib, s0, sdot)
         return (attrib, cov) if return_cov else attrib
-    attrib = _build_attributable_vector_fit_lstsq(observations, epoch)
+    s0, sdot = fit_unit_vector_rate(observations, epoch)
+    attrib = _attrib_from_s_sdot(s0, sdot)
+    if return_s_sdot:
+        return (attrib, np.zeros((4, 4), dtype=float), s0, sdot) if return_cov else (attrib, s0, sdot)
     return (attrib, np.zeros((4, 4), dtype=float)) if return_cov else attrib
 
 def s_and_sdot(attrib: Attributable) -> tuple[np.ndarray, np.ndarray]:
@@ -977,13 +999,17 @@ def build_state_from_ranging_multiobs(
     max_step: float,
     use_kepler: bool,
     max_iter: int = 2,
+    *,
+    s: np.ndarray | None = None,
+    sdot: np.ndarray | None = None,
 ) -> np.ndarray:
     rho = float(rho_km)
     rhodot = float(rhodot_km_s)
     obs_list = list(observations)
     if not obs_list:
         return build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
-    s, sdot = s_and_sdot(attrib)
+    if s is None or sdot is None:
+        s, sdot = s_and_sdot(attrib)
     earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
     sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
     earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
@@ -1246,6 +1272,8 @@ def _init_worker(
     obs_ref: Observation,
     epoch: Time,
     attrib: Attributable,
+    s: np.ndarray | None,
+    sdot: np.ndarray | None,
     observations: Sequence[Observation],
     perturbers: Sequence[str],
     max_step: float,
@@ -1265,6 +1293,8 @@ def _init_worker(
         "obs_ref": obs_ref,
         "epoch": epoch,
         "attrib": attrib,
+        "s": s,
+        "sdot": sdot,
         "observations": observations,
         "perturbers": perturbers,
         "max_step": max_step,
@@ -1299,15 +1329,27 @@ def _score_chunk(
                 ctx["max_step"],
                 ctx["use_kepler"],
                 max_iter=int(ctx.get("multiobs_max_iter", 2)),
+                s=ctx.get("s"),
+                sdot=ctx.get("sdot"),
             )
         else:
-            state = build_state_from_ranging(
-                ctx["obs_ref"],
-                ctx["epoch"],
-                ctx["attrib"],
-                rho_km,
-                rhodot_km_s,
-            )
+            if ctx.get("s") is None or ctx.get("sdot") is None:
+                state = build_state_from_ranging(
+                    ctx["obs_ref"],
+                    ctx["epoch"],
+                    ctx["attrib"],
+                    rho_km,
+                    rhodot_km_s,
+                )
+            else:
+                state = build_state_from_ranging_s_sdot(
+                    ctx["obs_ref"],
+                    ctx["epoch"],
+                    ctx["s"],
+                    ctx["sdot"],
+                    rho_km,
+                    rhodot_km_s,
+                )
         try:
             if not _admissible_ok(
                 state,
@@ -1577,8 +1619,11 @@ def sample_ranged_replicas(
         obs_eval = list(observations)
     if attrib_mode == "linear":
         attrib = build_attributable(observations, epoch)
+        s, sdot = s_and_sdot(attrib)
     else:
-        attrib = build_attributable_vector_fit(observations, epoch)
+        attrib, s, sdot = build_attributable_vector_fit(
+            observations, epoch, return_s_sdot=True
+        )
     log_rho_min = math.log(max(1e-12, rho_min_au))
     log_rho_max = math.log(max(rho_min_au, rho_max_au))
 
@@ -1590,7 +1635,6 @@ def sample_ranged_replicas(
     )
     sampler = rhodot_sampler.lower().strip()
     if sampler == "conditioned":
-        s, sdot = s_and_sdot(attrib)
         earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
         sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
         earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
@@ -1653,9 +1697,13 @@ def sample_ranged_replicas(
                     max_step,
                     use_kepler,
                     max_iter=multiobs_max_iter,
+                    s=s,
+                    sdot=sdot,
                 )
             else:
-                state = build_state_from_ranging(obs_ref, epoch, attrib, rho_km, rhodot_km_s)
+                state = build_state_from_ranging_s_sdot(
+                    obs_ref, epoch, s, sdot, rho_km, rhodot_km_s
+                )
             try:
                 if not _admissible_ok(
                     state,
@@ -1703,6 +1751,8 @@ def sample_ranged_replicas(
                 obs_ref,
                 epoch,
                 attrib,
+                s,
+                sdot,
                 list(observations),
                 tuple(perturbers),
                 max_step,

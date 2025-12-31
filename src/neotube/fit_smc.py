@@ -27,9 +27,8 @@ from .ranging import (
     _ranging_reference_observation,
     Attributable,
     build_attributable_vector_fit,
-    build_state_from_ranging,
     build_state_from_ranging_s_sdot,
-    s_and_sdot,
+    build_state_from_ranging,
 )
 
 AU_KM = 149597870.7
@@ -245,6 +244,8 @@ def coarse_systematic_grid_scan(
     nx: int = 40,
     ny: int = 40,
     site_kappas: dict[str, float] | None = None,
+    s_seed: np.ndarray | None = None,
+    sdot_seed: np.ndarray | None = None,
 ) -> list[tuple[float, float, float]]:
     log_lo = math.log10(max(1e-12, rho_min_km))
     log_hi = math.log10(max(rho_min_km, rho_max_km))
@@ -255,7 +256,17 @@ def coarse_systematic_grid_scan(
         rho_km = 10.0 ** lr
         for rd in rds:
             try:
-                state = build_state_from_ranging(obs_ref, epoch, attrib_hat, rho_km, float(rd))
+                if s_seed is None or sdot_seed is None:
+                    state = build_state_from_ranging(obs_ref, epoch, attrib_hat, rho_km, float(rd))
+                else:
+                    state = build_state_from_ranging_s_sdot(
+                        obs_ref,
+                        epoch,
+                        s_seed,
+                        sdot_seed,
+                        rho_km,
+                        float(rd),
+                    )
                 ra_pred, dec_pred = predict_radec_from_epoch(
                     state,
                     epoch,
@@ -592,14 +603,14 @@ def sequential_fit_replicas(
         )
 
     # Use the legacy vector fit to keep geometry consistent with the original pipeline.
-    attrib, attrib_cov = build_attributable_vector_fit(
+    attrib, attrib_cov, s_seed, sdot_seed = build_attributable_vector_fit(
         obs3,
         epoch,
         robust=False,
         return_cov=True,
+        return_s_sdot=True,
         site_kappas=site_kappas,
     )
-    s_seed, sdot_seed = s_and_sdot(attrib)
     sigma_arcsec = float(np.median([o.sigma_arcsec for o in obs3]))
     sigma_deg = sigma_arcsec / 3600.0
     dt_days = max(1e-6, float((obs3[-1].time - obs3[0].time).to_value("day")))
@@ -633,6 +644,8 @@ def sequential_fit_replicas(
             nx=40,
             ny=40,
             site_kappas=site_kappas,
+            s_seed=s_seed,
+            sdot_seed=sdot_seed,
         )
         if grid_hits:
             grid_local = 10
