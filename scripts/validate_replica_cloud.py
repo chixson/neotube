@@ -207,6 +207,38 @@ def _plot_composite(
     plt.close(fig)
 
 
+def _plot_cloud_planes(
+    states: np.ndarray,
+    jpl_xyz: tuple[float, float, float] | None,
+    out_dir: Path,
+) -> None:
+    r_au = states[:, :3] / AU_KM
+    fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+    ax[0].scatter(r_au[:, 0], r_au[:, 1], s=6, alpha=0.3, label="replicas")
+    ax[0].set_xlabel("x (AU)")
+    ax[0].set_ylabel("y (AU)")
+    ax[0].set_title("XY")
+    ax[1].scatter(r_au[:, 0], r_au[:, 2], s=6, alpha=0.3, label="replicas")
+    ax[1].set_xlabel("x (AU)")
+    ax[1].set_ylabel("z (AU)")
+    ax[1].set_title("XZ")
+    ax[2].scatter(r_au[:, 1], r_au[:, 2], s=6, alpha=0.3, label="replicas")
+    ax[2].set_xlabel("y (AU)")
+    ax[2].set_ylabel("z (AU)")
+    ax[2].set_title("YZ")
+    if jpl_xyz is not None:
+        xj, yj, zj = (np.array(jpl_xyz) / AU_KM).tolist()
+        ax[0].scatter([xj], [yj], s=60, c="tab:red", marker="*", label="Horizons")
+        ax[1].scatter([xj], [zj], s=60, c="tab:red", marker="*", label="Horizons")
+        ax[2].scatter([yj], [zj], s=60, c="tab:red", marker="*", label="Horizons")
+    for a in ax:
+        a.legend()
+        a.axis("equal")
+    fig.tight_layout()
+    fig.savefig(out_dir / "cloud_xyz_planes.png", dpi=150)
+    plt.close(fig)
+
+
 def _fetch_horizons(
     target: str, site: str, times: Time, id_type: str | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -245,6 +277,42 @@ def _fetch_horizons_any(
     raise RuntimeError("Horizons query failed")
 
 
+def _fetch_horizons_vector_any(
+    target: str, epoch: Time, id_type: str | None = None
+) -> tuple[float, float, float]:
+    if not _HAS_HORIZONS:
+        raise RuntimeError("astroquery.jplhorizons is not available")
+    attempts: list[tuple[str, str | None]] = []
+    attempts.append((target, id_type))
+    attempts.append((target, "smallbody"))
+    attempts.append((target, "majorbody"))
+    parts = target.strip().split()
+    if len(parts) > 1:
+        attempts.append((parts[0], "smallbody"))
+        attempts.append((parts[-1], "smallbody"))
+    if "ceres" in target.lower():
+        attempts.append(("2000001", "smallbody"))
+        attempts.append(("1", "smallbody"))
+        attempts.append(("Ceres", "smallbody"))
+    last_exc = None
+    for tgt, idt in attempts:
+        try:
+            kwargs = {}
+            if idt:
+                kwargs["id_type"] = idt
+            obj = Horizons(id=tgt, location="@sun", epochs=epoch.tdb.jd, **kwargs)
+            vec = obj.vectors()
+            x = float(vec["x"][0])
+            y = float(vec["y"][0])
+            z = float(vec["z"][0])
+            return x, y, z
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Horizons vector query failed")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Validate replica cloud and generate plots.")
     p.add_argument("--replicas", required=True, type=Path)
@@ -259,6 +327,11 @@ def main() -> None:
     p.add_argument("--max-step", type=float, default=3600.0)
     p.add_argument("--horizons-target", type=str, default=None)
     p.add_argument("--horizons-id-type", type=str, default=None)
+    p.add_argument(
+        "--cloud-only",
+        action="store_true",
+        help="Skip ephemeris/residual calculations; only plot cloud/element projections.",
+    )
     args = p.parse_args()
 
     if not _HAS_MPL:
@@ -281,53 +354,16 @@ def main() -> None:
     obs_ra = np.array([o.ra_deg for o in obs], dtype=float)
     obs_dec = np.array([o.dec_deg for o in obs], dtype=float)
 
-    pred_ra = np.zeros((len(states), len(obs)), dtype=float)
-    pred_dec = np.zeros((len(states), len(obs)), dtype=float)
-    for i, st in enumerate(states):
-        ra_i, dec_i = predict_radec_from_epoch(
-            st,
-            epoch,
-            obs,
-            tuple(args.perturbers),
-            args.max_step,
-            use_kepler=args.use_kepler,
-            allow_unknown_site=True,
-            light_time_iters=2,
-            full_physics=not args.no_full_physics,
-        )
-        pred_ra[i, :] = ra_i
-        pred_dec[i, :] = dec_i
-
-    # residuals in arcsec
-    ra_res = ((pred_ra - obs_ra[None, :] + 180.0) % 360.0 - 180.0) * 3600.0
-    dec_res = (pred_dec - obs_dec[None, :]) * 3600.0
-    # per-observation means for time series
-    ra_res_mean = np.mean(ra_res, axis=0)
-    dec_res_mean = np.mean(dec_res, axis=0)
-    # flatten for histograms
-    ra_res_flat = ra_res.ravel()
-    dec_res_flat = dec_res.ravel()
-    summary = _residuals_summary(ra_res_flat, dec_res_flat)
-
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    _plot_residuals(obs_times.mjd, ra_res_mean, dec_res_mean, out_dir)
-    _plot_residual_hist(ra_res_flat, dec_res_flat, out_dir)
 
     elements = _compute_elements(states)
     _plot_elements(elements, out_dir)
     _plot_rho(elements, out_dir)
 
-    # plot sky scatter using all predicted points
-    pred_ra_flat = pred_ra.ravel()
-    pred_dec_flat = pred_dec.ravel()
-    pred_ra_mean = np.mean(pred_ra, axis=0)
-    pred_dec_mean = np.mean(pred_dec, axis=0)
-    _plot_sky(obs_ra, obs_dec, pred_ra_flat, pred_dec_flat, out_dir)
-
     horizons_ra = None
     horizons_dec = None
+    horizons_xyz = None
     if args.horizons_target:
         try:
             site = obs[0].site or "500"
@@ -341,37 +377,84 @@ def main() -> None:
                 )
             except Exception as exc:
                 print(f"[warn] Horizons overlay failed: {exc}")
+        try:
+            horizons_xyz = _fetch_horizons_vector_any(
+                args.horizons_target, epoch, args.horizons_id_type
+            )
+        except Exception as exc:
+            print(f"[warn] Horizons vector failed: {exc}")
 
-    _plot_composite(
-        obs_times.mjd,
-        ra_res_mean,
-        dec_res_mean,
-        ra_res_flat,
-        dec_res_flat,
-        elements,
-        obs_ra,
-        obs_dec,
-        pred_ra_flat,
-        pred_dec_flat,
-        pred_ra_mean,
-        pred_dec_mean,
-        horizons_ra,
-        horizons_dec,
-        out_dir,
-    )
+    if not args.cloud_only:
+        pred_ra = np.zeros((len(states), len(obs)), dtype=float)
+        pred_dec = np.zeros((len(states), len(obs)), dtype=float)
+        for i, st in enumerate(states):
+            ra_i, dec_i = predict_radec_from_epoch(
+                st,
+                epoch,
+                obs,
+                tuple(args.perturbers),
+                args.max_step,
+                use_kepler=args.use_kepler,
+                allow_unknown_site=True,
+                light_time_iters=2,
+                full_physics=not args.no_full_physics,
+            )
+            pred_ra[i, :] = ra_i
+            pred_dec[i, :] = dec_i
 
-    # Horizons overlay
-    if horizons_ra is not None and horizons_dec is not None:
-        fig, ax = plt.subplots(figsize=(6, 6))
-        ax.scatter(obs_ra, obs_dec, c="k", s=20, label="obs")
-        ax.scatter(horizons_ra, horizons_dec, c="tab:red", s=30, label="Horizons")
-        ax.plot(pred_ra_mean, pred_dec_mean, color="tab:orange", lw=1.0, label="replica mean")
-        ax.set_xlabel("RA (deg)")
-        ax.set_ylabel("Dec (deg)")
-        ax.legend()
-        fig.tight_layout()
-        fig.savefig(out_dir / "sky_obs_vs_horizons.png", dpi=150)
-        plt.close(fig)
+        ra_res = ((pred_ra - obs_ra[None, :] + 180.0) % 360.0 - 180.0) * 3600.0
+        dec_res = (pred_dec - obs_dec[None, :]) * 3600.0
+        ra_res_mean = np.mean(ra_res, axis=0)
+        dec_res_mean = np.mean(dec_res, axis=0)
+        ra_res_flat = ra_res.ravel()
+        dec_res_flat = dec_res.ravel()
+        summary = _residuals_summary(ra_res_flat, dec_res_flat)
+
+        _plot_residuals(obs_times.mjd, ra_res_mean, dec_res_mean, out_dir)
+        _plot_residual_hist(ra_res_flat, dec_res_flat, out_dir)
+
+        pred_ra_flat = pred_ra.ravel()
+        pred_dec_flat = pred_dec.ravel()
+        pred_ra_mean = np.mean(pred_ra, axis=0)
+        pred_dec_mean = np.mean(pred_dec, axis=0)
+        _plot_sky(obs_ra, obs_dec, pred_ra_flat, pred_dec_flat, out_dir)
+
+        _plot_composite(
+            obs_times.mjd,
+            ra_res_mean,
+            dec_res_mean,
+            ra_res_flat,
+            dec_res_flat,
+            elements,
+            obs_ra,
+            obs_dec,
+            pred_ra_flat,
+            pred_dec_flat,
+            pred_ra_mean,
+            pred_dec_mean,
+            horizons_ra,
+            horizons_dec,
+            out_dir,
+        )
+
+        if horizons_ra is not None and horizons_dec is not None:
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.scatter(obs_ra, obs_dec, c="k", s=20, label="obs")
+            ax.scatter(horizons_ra, horizons_dec, c="tab:red", s=30, label="Horizons")
+            ax.plot(pred_ra_mean, pred_dec_mean, color="tab:orange", lw=1.0, label="replica mean")
+            ax.set_xlabel("RA (deg)")
+            ax.set_ylabel("Dec (deg)")
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(out_dir / "sky_obs_vs_horizons.png", dpi=150)
+            plt.close(fig)
+    else:
+        summary = {
+            "n_states": int(states.shape[0]),
+            "epoch_utc": epoch.isot,
+        }
+
+    _plot_cloud_planes(states, horizons_xyz, out_dir)
 
     summary_path = out_dir / "summary.json"
     with summary_path.open("w") as fh:
