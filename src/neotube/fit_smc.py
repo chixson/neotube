@@ -28,6 +28,8 @@ from .ranging import (
     Attributable,
     build_attributable_vector_fit,
     build_state_from_ranging,
+    build_state_from_ranging_s_sdot,
+    s_and_sdot,
 )
 
 AU_KM = 149597870.7
@@ -597,6 +599,7 @@ def sequential_fit_replicas(
         return_cov=True,
         site_kappas=site_kappas,
     )
+    s_seed, sdot_seed = s_and_sdot(attrib)
     sigma_arcsec = float(np.median([o.sigma_arcsec for o in obs3]))
     sigma_deg = sigma_arcsec / 3600.0
     dt_days = max(1e-6, float((obs3[-1].time - obs3[0].time).to_value("day")))
@@ -650,8 +653,8 @@ def sequential_fit_replicas(
                         scale=max(0.1, 0.05 * abs(rhodot_km_s))
                     )
                     try:
-                        state = build_state_from_ranging(
-                            obs_ref, epoch, attrib_i, rho_local, rhodot_local
+                        state = build_state_from_ranging_s_sdot(
+                            obs_ref, epoch, s_seed, sdot_seed, rho_local, rhodot_local
                         )
                         seed_states.append(state)
                     except Exception:
@@ -674,15 +677,8 @@ def sequential_fit_replicas(
             states_list.append(state)
             valid_mask.append(True)
         for i in range(n_remaining):
-            a = attrib_samples[i]
-            attrib_i = Attributable(
-                ra_deg=float(a[0]),
-                dec_deg=float(a[1]),
-                ra_dot_deg_per_day=float(a[2]),
-                dec_dot_deg_per_day=float(a[3]),
-            )
-            state = build_state_from_ranging(
-                obs_ref, epoch, attrib_i, rho_sobol[i], rhodot_sobol[i]
+            state = build_state_from_ranging_s_sdot(
+                obs_ref, epoch, s_seed, sdot_seed, rho_sobol[i], rhodot_sobol[i]
             )
             if np.linalg.norm(state[3:]) > v_max_km_s:
                 states_list.append(state)

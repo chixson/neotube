@@ -884,6 +884,18 @@ def build_state_from_ranging(
     rhodot_km_s: float,
 ) -> np.ndarray:
     s, sdot = s_and_sdot(attrib)
+    return build_state_from_ranging_s_sdot(obs, epoch, s, sdot, rho_km, rhodot_km_s)
+
+
+def build_state_from_ranging_s_sdot(
+    obs: Observation,
+    epoch: Time,
+    s: np.ndarray,
+    sdot: np.ndarray,
+    rho_km: float,
+    rhodot_km_s: float,
+) -> np.ndarray:
+    """Build heliocentric state directly from (s, sdot) to preserve velocity precision."""
     earth_pos, earth_vel = get_body_barycentric_posvel("earth", epoch)
     sun_pos, sun_vel = get_body_barycentric_posvel("sun", epoch)
     earth_helio = (earth_pos.xyz - sun_pos.xyz).to(u.km).value.flatten()
