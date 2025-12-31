@@ -835,6 +835,14 @@ def propagate_state_kepler(
 
     r0 = np.array(state[:3], dtype=float)
     v0 = np.array(state[3:], dtype=float)
+    r0_norm = float(np.linalg.norm(r0))
+    v0_norm = float(np.linalg.norm(v0))
+    alpha = 2.0 / max(r0_norm, 1e-12) - (v0_norm * v0_norm) / mu_km3_s2
+    if not np.isfinite(alpha) or not np.isfinite(r0_norm) or r0_norm <= 0.0:
+        return np.full((len(targets), 6), np.nan, dtype=float)
+    if abs(alpha) < 1e-14:
+        # Near-parabolic or invalid energy; avoid universal-variable divergence.
+        return np.full((len(targets), 6), np.nan, dtype=float)
 
     dt_arr = np.array([(t - epoch).to(u.s).value for t in targets], dtype=float)
 
@@ -881,6 +889,14 @@ def propagate_state_kepler_dt(
 
     r0 = np.array(state[:3], dtype=float)
     v0 = np.array(state[3:], dtype=float)
+    r0_norm = float(np.linalg.norm(r0))
+    v0_norm = float(np.linalg.norm(v0))
+    alpha = 2.0 / max(r0_norm, 1e-12) - (v0_norm * v0_norm) / mu_km3_s2
+    if not np.isfinite(alpha) or not np.isfinite(r0_norm) or r0_norm <= 0.0:
+        return np.full((len(dt_arr), 6), np.nan, dtype=float)
+    if abs(alpha) < 1e-14:
+        # Near-parabolic or invalid energy; avoid universal-variable divergence.
+        return np.full((len(dt_arr), 6), np.nan, dtype=float)
 
     if _HAS_NUMBA:
         out, ok = _propagate_state_kepler_batch_numba(r0, v0, dt_arr, mu_km3_s2, max_iter, tol)
