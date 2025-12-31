@@ -144,7 +144,6 @@ except Exception:
 try:
     from astropy.time import Time, TimeDelta  # type: ignore
     from astropy.coordinates import (  # type: ignore
-        AltAz,
         EarthLocation,
         GCRS,
         ICRS,
@@ -450,6 +449,33 @@ def horizons_vectors_cached(
     return np.array(vals, dtype=float)
 
 
+def _horizons_id_type(command: str) -> str:
+    try:
+        if str(command).isdigit() and int(str(command)) < 2000000:
+            return "majorbody"
+    except Exception:
+        pass
+    return "smallbody"
+
+
+def horizons_apparent_radec_from_astroquery(
+    command: str, site_code: str, t_obs_tdb: "Time"
+) -> Optional[Tuple[float, float]]:
+    if not _HAVE_ASTROPY:
+        return None
+    try:
+        hz = AQ_Horizons(
+            id=str(command),
+            location=site_code,
+            epochs=t_obs_tdb.jd,
+            id_type=_horizons_id_type(command),
+        )
+        eph = hz.ephemerides()
+        return float(eph["RA"][0]), float(eph["DEC"][0])
+    except Exception:
+        return None
+
+
 # ----------------------
 # MPC ObsCodes parsing (cached)
 # ----------------------
@@ -612,50 +638,9 @@ def predict_apparent_radec_for_obs(
             last_tau = tau
             t_guess = t_new
         r_topo = obj_bary[:3] - site_bary_km
-        if site_ecef_km is not None and obj_vel is not None and earth_bary_km is not None:
-            obj_geoc_icrs_km = obj_bary[:3] - earth_bary_km
-            rep = CartesianRepresentation(obj_geoc_icrs_km * u.km)
-            rep = rep.with_differentials(CartesianDifferential(obj_vel * u.km / u.s))
-            sc_obj_icrs = SkyCoord(rep, frame=ICRS(), obstime=t_guess)
-            site_loc = EarthLocation.from_geocentric(
-                site_ecef_km[0] * u.km,
-                site_ecef_km[1] * u.km,
-                site_ecef_km[2] * u.km,
-            )
-            altaz = AltAz(obstime=t_obs, location=site_loc, pressure=0.0 * u.bar)
-            sc_obj_altaz = sc_obj_icrs.transform_to(altaz)
-            sc_apparent_icrs = sc_obj_altaz.transform_to(ICRS())
-            ra_deg = float(sc_apparent_icrs.ra.deg)
-            dec_deg = float(sc_apparent_icrs.dec.deg)
-            unit_vec_icrs = sc_apparent_icrs.cartesian.xyz.value
-            s_ab = unit_vec_icrs / (np.linalg.norm(unit_vec_icrs) + 1e-30)
-            if os.environ.get("NEOTUBE_DEBUG_APPARENT") == "1":
-                print(
-                    "[DEBUG] t_em_tdb=",
-                    t_guess.iso,
-                    "t_obs_utc=",
-                    t_obs.iso,
-                    "obj_bary_norm_km=",
-                    float(np.linalg.norm(obj_bary[:3])),
-                    "earth_bary_norm_km=",
-                    float(np.linalg.norm(earth_bary_km)),
-                    "obj_geoc_norm_km=",
-                    float(np.linalg.norm(obj_geoc_icrs_km)),
-                    "site_ecef_norm_km=",
-                    float(np.linalg.norm(site_ecef_km)),
-                    "altaz_az_deg=",
-                    float(sc_obj_altaz.az.deg),
-                    "altaz_alt_deg=",
-                    float(sc_obj_altaz.alt.deg),
-                    "ra_deg=",
-                    ra_deg,
-                    "dec_deg=",
-                    dec_deg,
-                )
-        else:
-            s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
-            s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
-            ra_deg, dec_deg = unit_to_radec(s_ab)
+        s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
+        s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
+        ra_deg, dec_deg = unit_to_radec(s_ab)
         debug = PredictDebug(
             iterations=it + 1,
             tau_s=float(last_tau if last_tau is not None else 0.0),
@@ -877,12 +862,18 @@ def run_validator(
     print(f"[INFO] unique epochs: {len(unique_epochs)}")
     epoch_to_earth = {}
     for epoch in unique_epochs:
-        v = horizons_vectors_cached("399", epoch, center="@ssb", refplane="earth", limiter=limiter)
+        if _HAVE_ASTROPY:
+            t_obs = Time(epoch, scale="utc")
+            v = horizons_vectors_cached("399", t_obs.tdb.iso, center="@ssb", refplane="frame", limiter=limiter)
+        else:
+            v = horizons_vectors_cached("399", epoch, center="@ssb", refplane="earth", limiter=limiter)
         epoch_to_earth[epoch] = v
 
     results = []
     pred_ra = []
     pred_dec = []
+    debug_vectors = os.environ.get("NEOTUBE_DEBUG_VECTORS") == "1"
+    debug_done = False
     for i, ob in enumerate(obs_list):
         site = (ob.get("site") or "").strip().upper()
         epoch = ob["t_utc"]
@@ -904,6 +895,88 @@ def run_validator(
         )
         pred_ra.append(ra_pred)
         pred_dec.append(dec_pred)
+        if debug_vectors and not debug_done:
+            debug_done = True
+            obj_bary_forward = np.array(dbg.obj_bary_km, dtype=float)
+            r_topo = np.array(dbg.r_topo_km, dtype=float)
+            s_unit = np.array(dbg.unit_topovec, dtype=float)
+            site_eci = site_bary - earth_bary
+            print(
+                "[DEBUG] obj_bary_km=",
+                obj_bary_forward.tolist(),
+                "earth_bary_km=",
+                earth_bary.tolist(),
+                "site_eci_km=",
+                site_eci.tolist(),
+                "site_vel_km_s=",
+                site_vel.tolist(),
+                "r_topo_km=",
+                r_topo.tolist(),
+                "s_unit=",
+                s_unit.tolist(),
+            )
+            u_our_geoc = (obj_bary_forward - earth_bary) / (
+                np.linalg.norm(obj_bary_forward - earth_bary) + 1e-30
+            )
+            u_hz_geoc = u_our_geoc
+            obj_hz_vec = None
+            if _HAVE_ASTROPY:
+                try:
+                    t_obs = Time(epoch, scale="utc")
+                    t_em = t_obs.tdb - TimeDelta(float(dbg.tau_s), format="sec")
+                    obj_hz_vec = horizons_vectors_cached(
+                        jpl_cmd, t_em.iso, center="@ssb", refplane="frame", limiter=limiter
+                    )
+                    u_hz_geoc = (obj_hz_vec[:3] - earth_bary) / (
+                        np.linalg.norm(obj_hz_vec[:3] - earth_bary) + 1e-30
+                    )
+                except Exception:
+                    pass
+            print(
+                "[DEBUG] dot(u_our_geoc,u_hz_geoc)=",
+                float(np.dot(u_our_geoc, u_hz_geoc)),
+            )
+            if _HAVE_ASTROPY:
+                try:
+                    t_obs = Time(epoch, scale="utc")
+                    if site_ecef is not None:
+                        t_em = t_obs.tdb - TimeDelta(float(dbg.tau_s), format="sec")
+                        site_loc = EarthLocation.from_geocentric(
+                            site_ecef[0] * u.km,
+                            site_ecef[1] * u.km,
+                            site_ecef[2] * u.km,
+                        )
+                        site_gcrs = site_loc.get_gcrs(obstime=t_obs.tdb)
+                        obj_geoc = obj_bary_forward - earth_bary
+                        rep = CartesianRepresentation(obj_geoc * u.km)
+                        if obj_hz_vec is not None:
+                            rep = rep.with_differentials(
+                                CartesianDifferential(obj_hz_vec[3:] * u.km / u.s)
+                            )
+                        sc_obj_icrs = SkyCoord(rep, frame=ICRS(), obstime=t_em)
+                        sc_obj_gcrs = sc_obj_icrs.transform_to(GCRS(obstime=t_obs.tdb))
+                        topo_gcrs = sc_obj_gcrs.cartesian.xyz.to(u.km).value - site_gcrs.cartesian.xyz.to(u.km).value
+                        topo_gcrs_unit = topo_gcrs / (np.linalg.norm(topo_gcrs) + 1e-30)
+                        print(
+                            "[DEBUG] sc_obj_gcrs_km=",
+                            sc_obj_gcrs.cartesian.xyz.to(u.km).value.tolist(),
+                            "site_gcrs_km=",
+                            site_gcrs.cartesian.xyz.to(u.km).value.tolist(),
+                            "dot(u_topo_gcrs,u_topo)=",
+                            float(np.dot(topo_gcrs_unit, s_unit)),
+                        )
+                    hz_radec = horizons_apparent_radec_from_astroquery(jpl_cmd, site, t_obs.tdb)
+                    if hz_radec is not None:
+                        hz_unit = radec_to_unit(hz_radec[0], hz_radec[1])
+                        dot_topo = float(np.dot(s_unit, hz_unit))
+                        print(
+                            "[DEBUG] horizons_ra_dec=",
+                            hz_radec,
+                            "dot(u_topo_ours,hz_topo)=",
+                            dot_topo,
+                        )
+                except Exception:
+                    pass
         s_unit = np.array(dbg.unit_topovec, dtype=float)
         obj_bary_inv, t_em_iso, inv_iters = invert_apparent_to_obj_bary(
             jpl_cmd, epoch, site_bary, site_vel, s_unit, limiter=limiter
