@@ -30,6 +30,7 @@ from .ranging import (
     build_attributable_vector_fit,
     build_state_from_ranging_s_sdot,
     build_state_from_ranging,
+    s_and_sdot,
 )
 
 AU_KM = 149597870.7
@@ -741,13 +742,14 @@ def sequential_fit_replicas(
                         ra_dot_deg_per_day=float(a[2]),
                         dec_dot_deg_per_day=float(a[3]),
                     )
+                    s_i, sdot_i = s_and_sdot(attrib_i)
                     rho_local = float(rho_km) * (1.0 + rng.normal(scale=0.01))
                     rhodot_local = float(rhodot_km_s) + rng.normal(
                         scale=max(0.1, 0.05 * abs(rhodot_km_s))
                     )
                     try:
                         state = build_state_from_ranging_s_sdot(
-                            obs_ref, epoch, s_seed, sdot_seed, rho_local, rhodot_local
+                            obs_ref, epoch, s_i, sdot_i, rho_local, rhodot_local
                         )
                         seed_states.append(state)
                     except Exception:
@@ -762,16 +764,22 @@ def sequential_fit_replicas(
             float(rhodot_max_km_s),
             rng,
         )
-        attrib_samples = rng.multivariate_normal(attrib_mean, attrib_cov, size=n_remaining)
-
         states_list: list[np.ndarray] = []
         valid_mask: list[bool] = []
         for state in seed_states:
             states_list.append(state)
             valid_mask.append(True)
         for i in range(n_remaining):
+            a = rng.multivariate_normal(attrib_mean, attrib_cov)
+            attrib_i = Attributable(
+                ra_deg=float(a[0]),
+                dec_deg=float(a[1]),
+                ra_dot_deg_per_day=float(a[2]),
+                dec_dot_deg_per_day=float(a[3]),
+            )
+            s_i, sdot_i = s_and_sdot(attrib_i)
             state = build_state_from_ranging_s_sdot(
-                obs_ref, epoch, s_seed, sdot_seed, rho_sobol[i], rhodot_sobol[i]
+                obs_ref, epoch, s_i, sdot_i, rho_sobol[i], rhodot_sobol[i]
             )
             if np.linalg.norm(state[3:]) > v_max_km_s:
                 states_list.append(state)

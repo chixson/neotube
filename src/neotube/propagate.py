@@ -68,6 +68,10 @@ _USE_NUMBA_ACCEL = _HAS_NUMBA and os.environ.get("NEOTUBE_NUMBA_ACCEL", "1").low
     "no",
 }
 
+def _trace_astropy(message: str) -> None:
+    if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
+        print(f"[astropy-trace] {message}", flush=True)
+
 if _HAS_NUMBA:
     _NUMBA_NJIT = nb.njit(cache=True, nogil=True, fastmath=True)
     _NUMBA_NJIT_PAR = nb.njit(cache=True, nogil=True, fastmath=True, parallel=True)
@@ -545,8 +549,11 @@ def _body_posvel_km_single(body: str, time: Time, ephemeris: str = "de432s") -> 
 
 
 def _body_posvel(body: str, times: Time):
+    _trace_astropy(f"get_body_barycentric_posvel start body={body} n={len(np.atleast_1d(times))}")
     with solar_system_ephemeris.set("de432s"):
-        return get_body_barycentric_posvel(body, times)
+        posvel = get_body_barycentric_posvel(body, times)
+    _trace_astropy(f"get_body_barycentric_posvel end body={body}")
+    return posvel
 
 
 def _body_posvel_ephem(body: str, times: Time, ephemeris: str):
