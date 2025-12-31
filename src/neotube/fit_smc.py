@@ -531,7 +531,10 @@ def sequential_fit_replicas(
             return max(1, base_chunk)
         desired = int(math.ceil(n / max(1, target_chunks)))
         desired = max(1, desired)
-        return min(base_chunk, desired) if base_chunk > 0 else desired
+        if base_chunk <= 0:
+            return desired
+        # Keep chunks at least as large as the user-provided base to avoid tiny tasks.
+        return max(base_chunk, desired)
 
     def _score_chunks(
         pool_states: np.ndarray,
