@@ -50,7 +50,12 @@ try:
     _HAS_SOBOL = True
 except Exception:
     qmc = None
-    _HAS_SOBOL = False
+_HAS_SOBOL = False
+
+
+def _smc_worker_init(enable_faulthandler: bool) -> None:
+    if enable_faulthandler:
+        faulthandler.enable(all_threads=True, file=sys.stderr)
 
 
 def _score_states_contract_chunk_args(args: tuple[np.ndarray, dict[str, object]]) -> np.ndarray:
@@ -433,10 +438,6 @@ def sequential_fit_replicas(
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         print(f"[fit_smc {stamp} +{elapsed:8.1f}s] {msg}", flush=True)
 
-    def _init_worker(enable_faulthandler: bool) -> None:
-        if enable_faulthandler:
-            faulthandler.enable(all_threads=True, file=sys.stderr)
-
     def _save_checkpoint(
         *,
         states: np.ndarray,
@@ -444,6 +445,7 @@ def sequential_fit_replicas(
         next_obs_index: int,
         stage: str,
         metadata: dict[str, object] | None = None,
+        error: str | None = None,
     ) -> None:
         if not checkpoint_path:
             return
@@ -455,6 +457,8 @@ def sequential_fit_replicas(
             "epoch_isot": epoch.isot,
             "metadata": json.dumps(metadata or {}, sort_keys=True),
         }
+        if error:
+            payload["error"] = str(error)
         rng_state = rng.bit_generator.state
         np.savez_compressed(
             ckpt_path,
@@ -507,7 +511,7 @@ def sequential_fit_replicas(
     executor: ProcessPoolExecutor | None = None
     if worker_count > 1:
         ctx = mp.get_context(mp_start_method) if mp_start_method else None
-        init = _init_worker if worker_faulthandler else None
+        init = _smc_worker_init if worker_faulthandler else None
         initargs = (worker_faulthandler,) if worker_faulthandler else None
         executor = ProcessPoolExecutor(
             max_workers=worker_count,
