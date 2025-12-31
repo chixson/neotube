@@ -612,8 +612,9 @@ def predict_apparent_radec_for_obs(
             last_tau = tau
             t_guess = t_new
         r_topo = obj_bary[:3] - site_bary_km
-        if site_ecef_km is not None and obj_vel is not None:
-            rep = CartesianRepresentation(obj_bary[:3] * u.km)
+        if site_ecef_km is not None and obj_vel is not None and earth_bary_km is not None:
+            obj_geoc_icrs_km = obj_bary[:3] - earth_bary_km
+            rep = CartesianRepresentation(obj_geoc_icrs_km * u.km)
             rep = rep.with_differentials(CartesianDifferential(obj_vel * u.km / u.s))
             sc_obj_icrs = SkyCoord(rep, frame=ICRS(), obstime=t_guess)
             site_loc = EarthLocation.from_geocentric(
@@ -626,7 +627,31 @@ def predict_apparent_radec_for_obs(
             sc_apparent_icrs = sc_obj_altaz.transform_to(ICRS())
             ra_deg = float(sc_apparent_icrs.ra.deg)
             dec_deg = float(sc_apparent_icrs.dec.deg)
-            s_ab = radec_to_unit(ra_deg, dec_deg)
+            unit_vec_icrs = sc_apparent_icrs.cartesian.xyz.value
+            s_ab = unit_vec_icrs / (np.linalg.norm(unit_vec_icrs) + 1e-30)
+            if os.environ.get("NEOTUBE_DEBUG_APPARENT") == "1":
+                print(
+                    "[DEBUG] t_em_tdb=",
+                    t_guess.iso,
+                    "t_obs_utc=",
+                    t_obs.iso,
+                    "obj_bary_norm_km=",
+                    float(np.linalg.norm(obj_bary[:3])),
+                    "earth_bary_norm_km=",
+                    float(np.linalg.norm(earth_bary_km)),
+                    "obj_geoc_norm_km=",
+                    float(np.linalg.norm(obj_geoc_icrs_km)),
+                    "site_ecef_norm_km=",
+                    float(np.linalg.norm(site_ecef_km)),
+                    "altaz_az_deg=",
+                    float(sc_obj_altaz.az.deg),
+                    "altaz_alt_deg=",
+                    float(sc_obj_altaz.alt.deg),
+                    "ra_deg=",
+                    ra_deg,
+                    "dec_deg=",
+                    dec_deg,
+                )
         else:
             s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
             s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
