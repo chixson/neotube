@@ -612,8 +612,13 @@ def predict_apparent_radec_for_obs(
             last_tau = tau
             t_guess = t_new
         r_topo = obj_bary[:3] - site_bary_km
-        if site_ecef_km is not None and obj_vel is not None and earth_bary_km is not None:
-            obj_geoc_icrs_km = obj_bary[:3] - earth_bary_km
+        if site_ecef_km is not None and obj_vel is not None:
+            earth_at_em = horizons_vectors_cached(
+                "399", t_guess.iso, center="@ssb", refplane="frame", limiter=limiter
+            )
+            earth_bary_t_em = earth_at_em[:3]
+            earth_vel_t_em = earth_at_em[3:]
+            obj_geoc_icrs_km = obj_bary[:3] - earth_bary_t_em
             rep = CartesianRepresentation(obj_geoc_icrs_km * u.km)
             rep = rep.with_differentials(CartesianDifferential(obj_vel * u.km / u.s))
             sc_obj_icrs = SkyCoord(rep, frame=ICRS(), obstime=t_guess)
@@ -622,7 +627,7 @@ def predict_apparent_radec_for_obs(
                 site_ecef_km[1] * u.km,
                 site_ecef_km[2] * u.km,
             )
-            altaz = AltAz(obstime=t_obs, location=site_loc, pressure=0.0 * u.bar)
+            altaz = AltAz(obstime=t_obs_tdb, location=site_loc, pressure=0.0 * u.bar)
             sc_obj_altaz = sc_obj_icrs.transform_to(altaz)
             sc_apparent_icrs = sc_obj_altaz.transform_to(ICRS())
             ra_deg = float(sc_apparent_icrs.ra.deg)
@@ -637,12 +642,14 @@ def predict_apparent_radec_for_obs(
                     t_obs.iso,
                     "obj_bary_norm_km=",
                     float(np.linalg.norm(obj_bary[:3])),
-                    "earth_bary_norm_km=",
-                    float(np.linalg.norm(earth_bary_km)),
+                    "earth_bary_em_norm_km=",
+                    float(np.linalg.norm(earth_bary_t_em)),
                     "obj_geoc_norm_km=",
                     float(np.linalg.norm(obj_geoc_icrs_km)),
                     "site_ecef_norm_km=",
                     float(np.linalg.norm(site_ecef_km)),
+                    "earth_vel_em_norm_km_s=",
+                    float(np.linalg.norm(earth_vel_t_em)),
                     "altaz_az_deg=",
                     float(sc_obj_altaz.az.deg),
                     "altaz_alt_deg=",
