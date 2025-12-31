@@ -147,6 +147,52 @@ def _plot_sky(obs_ra: np.ndarray, obs_dec: np.ndarray, pred_ra: np.ndarray, pred
     plt.close(fig)
 
 
+def _plot_composite(
+    times: np.ndarray,
+    ra_res: np.ndarray,
+    dec_res: np.ndarray,
+    ra_res_flat: np.ndarray,
+    dec_res_flat: np.ndarray,
+    elements: dict[str, np.ndarray],
+    obs_ra: np.ndarray,
+    obs_dec: np.ndarray,
+    pred_ra: np.ndarray,
+    pred_dec: np.ndarray,
+    out_dir: Path,
+) -> None:
+    fig, ax = plt.subplots(3, 2, figsize=(12, 14))
+
+    ax[0, 0].plot(times, ra_res, "o", ms=4, alpha=0.8)
+    ax[0, 0].axhline(0, color="k", lw=0.8)
+    ax[0, 0].set_ylabel("RA residual (arcsec)")
+    ax[0, 0].set_xlabel("Time (MJD)")
+
+    ax[0, 1].plot(times, dec_res, "o", ms=4, alpha=0.8)
+    ax[0, 1].axhline(0, color="k", lw=0.8)
+    ax[0, 1].set_ylabel("Dec residual (arcsec)")
+    ax[0, 1].set_xlabel("Time (MJD)")
+
+    ax[1, 0].hist(ra_res_flat, bins=40, alpha=0.7)
+    ax[1, 0].set_title("RA residuals (arcsec)")
+    ax[1, 1].hist(dec_res_flat, bins=40, alpha=0.7)
+    ax[1, 1].set_title("Dec residuals (arcsec)")
+
+    ax[2, 0].hist(elements["a_au"], bins=50)
+    ax[2, 0].set_title("a (AU)")
+    ax[2, 0].set_xlabel("a (AU)")
+    ax[2, 0].set_ylabel("count")
+
+    ax[2, 1].scatter(obs_ra, obs_dec, c="k", s=20, label="obs")
+    ax[2, 1].scatter(pred_ra, pred_dec, c="tab:blue", s=8, alpha=0.4, label="replicas")
+    ax[2, 1].set_xlabel("RA (deg)")
+    ax[2, 1].set_ylabel("Dec (deg)")
+    ax[2, 1].legend()
+
+    fig.tight_layout()
+    fig.savefig(out_dir / "summary_composite.png", dpi=150)
+    plt.close(fig)
+
+
 def _fetch_horizons(target: str, site: str, times: Time) -> tuple[np.ndarray, np.ndarray]:
     if not _HAS_HORIZONS:
         raise RuntimeError("astroquery.jplhorizons is not available")
@@ -173,7 +219,7 @@ def main() -> None:
     if not _HAS_MPL:
         raise SystemExit("matplotlib is required for plotting")
 
-    obs = load_observations(str(args.obs), None)
+    obs = load_observations(args.obs, None)
     if args.meta is None:
         meta_path = args.replicas.with_name(args.replicas.stem + "_meta.json")
     else:
@@ -229,7 +275,23 @@ def main() -> None:
     _plot_rho(elements, out_dir)
 
     # plot sky scatter using all predicted points
-    _plot_sky(obs_ra, obs_dec, pred_ra.ravel(), pred_dec.ravel(), out_dir)
+    pred_ra_flat = pred_ra.ravel()
+    pred_dec_flat = pred_dec.ravel()
+    _plot_sky(obs_ra, obs_dec, pred_ra_flat, pred_dec_flat, out_dir)
+
+    _plot_composite(
+        obs_times.mjd,
+        ra_res_mean,
+        dec_res_mean,
+        ra_res_flat,
+        dec_res_flat,
+        elements,
+        obs_ra,
+        obs_dec,
+        pred_ra_flat,
+        pred_dec_flat,
+        out_dir,
+    )
 
     # Horizons overlay
     if args.horizons_target:
