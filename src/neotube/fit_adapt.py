@@ -204,10 +204,14 @@ def adaptively_grow_cloud(
     final_score_fn: Callable[[np.ndarray], np.ndarray] | None,
     cfg: AdaptiveConfig,
     rng: np.random.Generator,
+    log_fn: Callable[[str], None] | None = None,
+    checkpoint_fn: Callable[[np.ndarray, np.ndarray, dict], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     diagnostics: dict[str, object] = {"iterations": []}
     total_states = states.copy()
+    iteration = 0
     while True:
+        iteration += 1
         loglikes = score_fn(total_states)
         obs_bary = _obs_barycentric(obs_ref)
         rho_au = np.linalg.norm(total_states[:, :3] - obs_bary[None, :], axis=1) / AU_KM
@@ -236,6 +240,17 @@ def adaptively_grow_cloud(
         mode_counts = np.array(
             [int(np.sum(mode_labels == i)) for i in range(len(mode_weights))], dtype=int
         )
+        if log_fn is not None:
+            log_fn(
+                "auto-grow iter={} n={} ess={:.1f} khat={:.3f} min_bin={} min_mode={}".format(
+                    iteration,
+                    len(total_states),
+                    float(ess),
+                    float(khat),
+                    int(np.min(counts)) if len(counts) else 0,
+                    int(np.min(mode_counts)) if len(mode_counts) else 0,
+                )
+            )
         diagnostics["iterations"].append(
             {
                 "n": int(len(total_states)),
@@ -247,6 +262,8 @@ def adaptively_grow_cloud(
                 "mode_counts": mode_counts.tolist(),
             }
         )
+        if checkpoint_fn is not None:
+            checkpoint_fn(total_states, weights, diagnostics)
 
         passes = True
         if ess < cfg.ess_target:
@@ -265,6 +282,12 @@ def adaptively_grow_cloud(
             diagnostics["final_ess"] = float(ess)
             diagnostics["final_psis_khat"] = float(khat)
             diagnostics["logrho_edges"] = edges.tolist()
+            if log_fn is not None:
+                log_fn(
+                    "auto-grow exit n={} ess={:.1f} khat={:.3f}".format(
+                        len(total_states), float(ess), float(khat)
+                    )
+                )
             if final_score_fn is not None:
                 final_loglikes = final_score_fn(total_states)
                 logw = final_loglikes + logprior

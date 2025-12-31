@@ -394,7 +394,12 @@ def _attach_photometry(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sample replicas from an existing orbit posterior.")
-    parser.add_argument("--posterior", type=Path, required=True, help="Path to posterior .npz artifact.")
+    parser.add_argument(
+        "--posterior",
+        type=Path,
+        required=False,
+        help="Path to posterior .npz artifact (required unless using --fit-smc).",
+    )
     parser.add_argument("--n", type=int, default=500, help="Number of replicas to sample.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--output", type=Path, default=Path("replicas.csv"), help="Output path for replica table.")
@@ -568,6 +573,34 @@ def main() -> int:
         type=int,
         default=512,
         help="Chunk size for fit-SMC parallel scoring.",
+    )
+    parser.add_argument(
+        "--fit-smc-log-every",
+        type=int,
+        default=1,
+        help="Log fit-SMC progress every N observations.",
+    )
+    parser.add_argument(
+        "--fit-smc-quiet",
+        action="store_true",
+        help="Suppress fit-SMC progress logging.",
+    )
+    parser.add_argument(
+        "--fit-smc-checkpoint",
+        type=Path,
+        default=None,
+        help="Checkpoint path to save fit-SMC state for resume.",
+    )
+    parser.add_argument(
+        "--fit-smc-resume",
+        action="store_true",
+        help="Resume fit-SMC from checkpoint (requires --fit-smc-checkpoint).",
+    )
+    parser.add_argument(
+        "--fit-smc-checkpoint-every",
+        type=int,
+        default=1,
+        help="Checkpoint every N observations during fit-SMC.",
     )
     parser.add_argument(
         "--mix-posterior-frac",
@@ -860,11 +893,15 @@ def main() -> int:
             f"rho=[{args.rho_min_au},{args.rho_max_au}] AU, rhodot_max={args.rhodot_max_kms} km/s"
         )
 
-    posterior = load_posterior(args.posterior)
-    nu_val = posterior.nu if posterior.nu is not None else args.nu
+    posterior = None
+    if args.posterior is not None:
+        posterior = load_posterior(args.posterior)
+    elif not args.fit_smc:
+        raise SystemExit("--posterior is required unless using --fit-smc.")
+    nu_val = args.nu if posterior is None else (posterior.nu if posterior.nu is not None else args.nu)
     fit_smc_meta: dict | None = None
     fit_smc_diag: str | None = None
-    output_epoch = posterior.epoch
+    output_epoch = posterior.epoch if posterior is not None else None
     if args.fit_smc:
         if args.smc or args.ranged:
             raise SystemExit("--fit-smc cannot be combined with --smc or --ranged.")
@@ -922,6 +959,15 @@ def main() -> int:
             auto_min_per_decade=int(args.fit_smc_min_per_decade),
             workers=int(args.fit_smc_workers),
             chunk_size=int(args.fit_smc_chunk_size),
+            log_every_obs=int(args.fit_smc_log_every),
+            verbose=not args.fit_smc_quiet,
+            checkpoint_path=(
+                str(args.fit_smc_checkpoint.expanduser().resolve())
+                if args.fit_smc_checkpoint is not None
+                else None
+            ),
+            resume=bool(args.fit_smc_resume),
+            checkpoint_every_obs=int(args.fit_smc_checkpoint_every),
             seed=int(args.seed),
             admissible_bound=args.admissible_bound,
             admissible_q_min_au=args.admissible_q_min_au,
@@ -1450,8 +1496,12 @@ def main() -> int:
         chosen = combined[idxs]
         replicas = chosen.T
 
+    if output_epoch is None:
+        raise SystemExit("Missing output epoch; provide --posterior or use --fit-smc.")
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     meta_path = args.output.with_name(args.output.stem + "_meta.json")
+    fit_scale = float(getattr(posterior, "fit_scale", 1.0)) if posterior is not None else 1.0
     with meta_path.open("w") as fh:
         json.dump(
             {
@@ -1462,7 +1512,7 @@ def main() -> int:
                 "perturbers": args.perturbers,
                 "method": args.method,
                 "nu": nu_val,
-                "fit_scale": float(getattr(posterior, "fit_scale", 1.0)),
+                "fit_scale": fit_scale,
                 "ranged": args.ranged,
                 "obs": str(args.obs) if args.obs else None,
                 "n_proposals": args.n_proposals,

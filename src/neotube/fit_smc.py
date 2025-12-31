@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import time
+from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -279,10 +281,67 @@ def sequential_fit_replicas(
     admissible_bound: bool = True,
     admissible_q_min_au: float | None = None,
     admissible_q_max_au: float | None = None,
+    log_every_obs: int = 1,
+    verbose: bool = True,
+    checkpoint_path: str | None = None,
+    resume: bool = False,
+    checkpoint_every_obs: int = 1,
 ) -> ReplicaCloud:
     """Fit an SMC replica cloud from observations and return the final weighted states."""
     if len(observations) < 3:
         raise ValueError("Need at least 3 observations to seed SMC.")
+
+    t_start = time.perf_counter()
+
+    def _log(msg: str) -> None:
+        if not verbose:
+            return
+        elapsed = time.perf_counter() - t_start
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[fit_smc {stamp} +{elapsed:8.1f}s] {msg}", flush=True)
+
+    def _save_checkpoint(
+        *,
+        states: np.ndarray,
+        weights: np.ndarray,
+        next_obs_index: int,
+        stage: str,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        if not checkpoint_path:
+            return
+        ckpt_path = Path(checkpoint_path).expanduser().resolve()
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "next_obs_index": int(next_obs_index),
+            "stage": stage,
+            "epoch_isot": epoch.isot,
+            "metadata": json.dumps(metadata or {}, sort_keys=True),
+        }
+        rng_state = rng.bit_generator.state
+        np.savez_compressed(
+            ckpt_path,
+            states=states,
+            weights=weights,
+            rng_state=np.array([rng_state], dtype=object),
+            **payload,
+        )
+
+    def _load_checkpoint() -> tuple[np.ndarray, np.ndarray, int, str, dict[str, object] | None]:
+        if not checkpoint_path:
+            raise RuntimeError("checkpoint_path is required for resume.")
+        ckpt_path = Path(checkpoint_path).expanduser().resolve()
+        data = np.load(ckpt_path, allow_pickle=True)
+        states = np.array(data["states"], dtype=float)
+        weights = np.array(data["weights"], dtype=float)
+        next_obs_index = int(data["next_obs_index"])
+        stage = str(data["stage"])
+        epoch_isot = str(data["epoch_isot"])
+        rng_state = data["rng_state"].item()
+        rng.bit_generator.state = rng_state
+        meta_raw = str(data.get("metadata", "{}"))
+        meta = json.loads(meta_raw) if meta_raw else {}
+        return states, weights, next_obs_index, stage, meta, epoch_isot
 
     obs = sorted(observations, key=lambda ob: ob.time)
     obs3 = obs[:3]
@@ -293,6 +352,38 @@ def sequential_fit_replicas(
         ladder = [cfg for cfg in ladder if cfg.model != "kepler"]
     worker_count = max(1, int(workers or 1))
     chunk_size = max(64, int(chunk_size))
+    log_every_obs = max(1, int(log_every_obs))
+
+    _log(
+        "start n_particles={} obs={} use_kepler={} full_physics_final={} auto_grow={} "
+        "workers={} chunk_size={}".format(
+            n_particles,
+            len(obs),
+            bool(use_kepler),
+            bool(full_physics_final),
+            bool(auto_grow),
+            worker_count,
+            chunk_size,
+        )
+    )
+
+    checkpoint_every_obs = max(1, int(checkpoint_every_obs))
+    if resume:
+        states, weights, next_obs_index, stage, ckpt_meta, epoch_isot = _load_checkpoint()
+        epoch = Time(epoch_isot)
+        weights = weights / np.sum(weights)
+        _log(
+            "resumed from checkpoint stage={} next_obs_index={} n={}".format(
+                stage, next_obs_index, len(states)
+            )
+        )
+        if stage == "final":
+            metadata = ckpt_meta if ckpt_meta is not None else {}
+            metadata["resumed_from_checkpoint"] = str(checkpoint_path)
+            metadata["checkpoint_stage"] = stage
+            return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)
+    else:
+        next_obs_index = 3
 
     def _score_chunks(
         pool_states: np.ndarray,
@@ -406,70 +497,86 @@ def sequential_fit_replicas(
             sigma_rate_deg_per_day**2,
         ]
     )
-    attrib_samples = rng.multivariate_normal(attrib_mean, attrib_cov, size=n_particles)
 
-    rho_samples = _stratified_log_rho_samples(
-        n_particles, rho_min_au * AU_KM, rho_max_au * AU_KM, rng
-    )
-    rhodot_samples = rng.uniform(-rhodot_max_km_s, rhodot_max_km_s, size=n_particles)
-
-    obs_ref = _ranging_reference_observation(obs3, epoch)
-    states = np.zeros((n_particles, 6), dtype=float)
-    valid = np.ones(n_particles, dtype=bool)
-    for i in range(n_particles):
-        a = attrib_samples[i]
-        attrib_i = Attributable(
-            ra_deg=float(a[0]),
-            dec_deg=float(a[1]),
-            ra_dot_deg_per_day=float(a[2]),
-            dec_dot_deg_per_day=float(a[3]),
+    if not resume:
+        attrib_samples = rng.multivariate_normal(attrib_mean, attrib_cov, size=n_particles)
+        rho_samples = _stratified_log_rho_samples(
+            n_particles, rho_min_au * AU_KM, rho_max_au * AU_KM, rng
         )
-        state = build_state_from_ranging(obs_ref, epoch, attrib_i, rho_samples[i], rhodot_samples[i])
-        if np.linalg.norm(state[3:]) > v_max_km_s:
-            valid[i] = False
-            states[i] = state
-            continue
-        if not _admissible_ok(
-            state,
-            q_min_au=admissible_q_min_au,
-            q_max_au=admissible_q_max_au,
-            bound_only=admissible_bound,
-        ):
-            valid[i] = False
-            states[i] = state
-            continue
-        states[i] = state
+        rhodot_samples = rng.uniform(-rhodot_max_km_s, rhodot_max_km_s, size=n_particles)
 
-    states = states[valid]
-    if states.size == 0:
-        raise RuntimeError("No valid initial particles; widen rho/rhodot bounds.")
-    if len(states) < n_particles:
-        idx = rng.choice(len(states), size=n_particles, replace=True)
-        states = states[idx]
+        obs_ref = _ranging_reference_observation(obs3, epoch)
+        states = np.zeros((n_particles, 6), dtype=float)
+        valid = np.ones(n_particles, dtype=bool)
+        for i in range(n_particles):
+            a = attrib_samples[i]
+            attrib_i = Attributable(
+                ra_deg=float(a[0]),
+                dec_deg=float(a[1]),
+                ra_dot_deg_per_day=float(a[2]),
+                dec_dot_deg_per_day=float(a[3]),
+            )
+            state = build_state_from_ranging(obs_ref, epoch, attrib_i, rho_samples[i], rhodot_samples[i])
+            if np.linalg.norm(state[3:]) > v_max_km_s:
+                valid[i] = False
+                states[i] = state
+                continue
+            if not _admissible_ok(
+                state,
+                q_min_au=admissible_q_min_au,
+                q_max_au=admissible_q_max_au,
+                bound_only=admissible_bound,
+            ):
+                valid[i] = False
+                states[i] = state
+                continue
+            states[i] = state
 
-    eps_seed = min(
-        _epsilon_arcsec_for_obs(
-            ob,
-            epsilon_ast_arcsec=epsilon_ast_arcsec,
-            epsilon_ast_scale=epsilon_ast_scale,
-            epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
-            epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+        states = states[valid]
+        if states.size == 0:
+            raise RuntimeError("No valid initial particles; widen rho/rhodot bounds.")
+        if len(states) < n_particles:
+            idx = rng.choice(len(states), size=n_particles, replace=True)
+            states = states[idx]
+        _log("seeded {} states (valid={})".format(len(states), int(np.sum(valid))))
+
+        eps_seed = min(
+            _epsilon_arcsec_for_obs(
+                ob,
+                epsilon_ast_arcsec=epsilon_ast_arcsec,
+                epsilon_ast_scale=epsilon_ast_scale,
+                epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
+                epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+            )
+            for ob in obs3
         )
-        for ob in obs3
-    )
-    ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
-        states,
-        obs3,
-        eps_seed,
-    )
-    loglikes = np.zeros(len(states), dtype=float)
-    for idx, ob in enumerate(obs3):
-        sigma = _sigma_arcsec(ob, site_kappas)
-        for i in range(len(states)):
-            loglikes[i] += _gaussian_loglike(float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma)
-    loglikes -= float(np.max(loglikes))
-    weights = np.exp(loglikes)
-    weights = weights / np.sum(weights)
+        ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+            states,
+            obs3,
+            eps_seed,
+        )
+        loglikes = np.zeros(len(states), dtype=float)
+        for idx, ob in enumerate(obs3):
+            sigma = _sigma_arcsec(ob, site_kappas)
+            for i in range(len(states)):
+                loglikes[i] += _gaussian_loglike(float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma)
+        loglikes -= float(np.max(loglikes))
+        weights = np.exp(loglikes)
+        weights = weights / np.sum(weights)
+        ess = 1.0 / np.sum(weights**2)
+        _log(
+            "seed scoring done ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f}".format(
+                ess,
+                int(np.max(used_level)) if len(used_level) else 0,
+                float(np.max(max_delta)) if len(max_delta) else 0.0,
+            )
+        )
+        _save_checkpoint(
+            states=states,
+            weights=weights,
+            next_obs_index=3,
+            stage="seeded",
+        )
 
     diag_used_levels = []
     diag_max_delta = []
@@ -479,7 +586,7 @@ def sequential_fit_replicas(
         diag_max_delta.append(max_delta.copy())
         diag_step_labels.append("seed")
 
-    for ob_idx, ob in enumerate(obs[3:], start=3):
+    for ob_idx, ob in enumerate(obs[next_obs_index:], start=next_obs_index):
         loglikes = np.empty(len(states), dtype=float)
         sigma = _sigma_arcsec(ob, site_kappas)
         eps_ob = _epsilon_arcsec_for_obs(
@@ -507,6 +614,15 @@ def sequential_fit_replicas(
             diag_step_labels.append(f"obs_{ob_idx}")
 
         ess = 1.0 / np.sum(weights**2)
+        if ob_idx % log_every_obs == 0 or ob_idx == len(obs) - 1:
+            _log(
+                "obs {} ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f}".format(
+                    ob_idx,
+                    ess,
+                    int(np.max(used_level)) if len(used_level) else 0,
+                    float(np.max(max_delta)) if len(max_delta) else 0.0,
+                )
+            )
         if ess < ess_threshold * len(weights):
             states = _systematic_resample(states, weights, rng)
             weights = np.full(len(states), 1.0 / len(states), dtype=float)
@@ -515,6 +631,15 @@ def sequential_fit_replicas(
                 cov = cov * rejuvenation_scale
                 jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
                 states = states + jitter
+            _log("resampled ess={:.1f} -> uniform weights".format(ess))
+
+        if checkpoint_path and (ob_idx % checkpoint_every_obs == 0 or ob_idx == len(obs) - 1):
+            _save_checkpoint(
+                states=states,
+                weights=weights,
+                next_obs_index=ob_idx + 1,
+                stage="assimilating",
+            )
 
     auto_grow_done = False
     auto_grow_diag: dict | None = None
@@ -522,6 +647,11 @@ def sequential_fit_replicas(
         obs_ref = _ranging_reference_observation(obs, epoch)
         attrib_mean = attrib_mean
         attrib_cov = attrib_cov
+        _log(
+            "auto-grow start n={} n_max={} n_add={} ess_target={} psis_khat={}".format(
+                len(states), auto_n_max, auto_n_add, auto_ess_target, auto_psis_khat
+            )
+        )
 
         def _score_contract(pool_states: np.ndarray) -> np.ndarray:
             eps_final = min(
@@ -591,6 +721,18 @@ def sequential_fit_replicas(
             rhodot_max_km_s=float(rhodot_max_km_s),
             v_max_km_s=float(v_max_km_s),
         )
+
+        def _auto_grow_checkpoint(
+            states_local: np.ndarray, weights_local: np.ndarray, diag: dict[str, object]
+        ) -> None:
+            _save_checkpoint(
+                states=states_local,
+                weights=weights_local,
+                next_obs_index=len(obs),
+                stage="auto_grow",
+                metadata={"auto_grow_diag": diag},
+            )
+
         states, weights, auto_grow_diag = adaptively_grow_cloud(
             states,
             obs,
@@ -603,10 +745,20 @@ def sequential_fit_replicas(
             final_score_fn=_score_full,
             cfg=cfg,
             rng=rng,
+            log_fn=_log if verbose else None,
+            checkpoint_fn=_auto_grow_checkpoint if checkpoint_path else None,
         )
         auto_grow_done = True
+        _log("auto-grow done n={}".format(len(states)))
 
     if full_physics_final and not auto_grow_done:
+        _log("full-physics final scoring start n={}".format(len(states)))
+        _save_checkpoint(
+            states=states,
+            weights=weights,
+            next_obs_index=len(obs),
+            stage="pre_final",
+        )
         eps_final = min(
             _epsilon_arcsec_for_obs(
                 ob,
@@ -656,6 +808,13 @@ def sequential_fit_replicas(
         loglikes -= float(np.max(loglikes))
         weights = np.exp(loglikes)
         weights = weights / np.sum(weights)
+        _log("full-physics final scoring done")
+        _save_checkpoint(
+            states=states,
+            weights=weights,
+            next_obs_index=len(obs),
+            stage="final",
+        )
 
     diagnostics: dict[str, float] = {}
     if shadow_diagnostics and diag_max_delta:
@@ -698,4 +857,5 @@ def sequential_fit_replicas(
         "auto_grow_diag": auto_grow_diag,
     }
     metadata.update(diagnostics)
+    _log("done n={} ess={:.1f}".format(len(states), float(1.0 / np.sum(weights**2))))
     return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)
