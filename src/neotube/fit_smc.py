@@ -752,6 +752,11 @@ def sequential_fit_replicas(
             _log("resuming seed scoring from checkpoint")
             weights, used_level, max_delta = _score_seed(states)
             next_obs_index = 3
+            _log(
+                "seed scoring complete; starting assimilation from obs index {}".format(
+                    next_obs_index
+                )
+            )
     else:
         next_obs_index = 3
 
@@ -912,6 +917,11 @@ def sequential_fit_replicas(
             )
 
         weights, used_level, max_delta = _score_seed(states)
+        _log(
+            "seed scoring complete; starting assimilation from obs index {}".format(
+                next_obs_index
+            )
+        )
 
     diag_used_levels = []
     diag_max_delta = []
