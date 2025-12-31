@@ -6,7 +6,7 @@ import math
 import os
 import time
 from pathlib import Path
-from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Executor, ThreadPoolExecutor
 import faulthandler
 import multiprocessing as mp
 import sys
@@ -514,17 +514,11 @@ def sequential_fit_replicas(
         )
     )
 
-    executor: ProcessPoolExecutor | None = None
+    executor: Executor | None = None
     if worker_count > 1:
-        ctx = mp.get_context(mp_start_method) if mp_start_method else None
-        init = _smc_worker_init if worker_faulthandler else None
-        initargs = (worker_faulthandler,) if worker_faulthandler else None
-        executor = ProcessPoolExecutor(
-            max_workers=worker_count,
-            mp_context=ctx,
-            initializer=init,
-            initargs=initargs,
-        )
+        if mp_start_method or worker_faulthandler:
+            _log("fit-smc uses ThreadPoolExecutor; mp_start/worker_faulthandler ignored.")
+        executor = ThreadPoolExecutor(max_workers=worker_count)
 
     def _shutdown_executor() -> None:
         if executor is not None:
