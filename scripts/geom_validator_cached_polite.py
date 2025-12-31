@@ -145,6 +145,7 @@ try:
     from astropy.time import Time, TimeDelta  # type: ignore
     from astropy.coordinates import (  # type: ignore
         AltAz,
+        CIRS,
         EarthLocation,
         GCRS,
         ICRS,
@@ -622,9 +623,10 @@ def predict_apparent_radec_for_obs(
                 site_ecef_km[1] * u.km,
                 site_ecef_km[2] * u.km,
             )
-            altaz = AltAz(obstime=t_obs, location=site_loc, pressure=0.0 * u.bar)
+            altaz = AltAz(obstime=t_obs_tdb, location=site_loc, pressure=0.0 * u.bar)
             sc_obj_altaz = sc_obj_icrs.transform_to(altaz)
-            sc_apparent_icrs = sc_obj_altaz.transform_to(ICRS())
+            sc_apparent_cirs = sc_obj_altaz.transform_to(CIRS(obstime=t_obs_tdb))
+            sc_apparent_icrs = sc_apparent_cirs.transform_to(ICRS())
             ra_deg = float(sc_apparent_icrs.ra.deg)
             dec_deg = float(sc_apparent_icrs.dec.deg)
             unit_vec_icrs = sc_apparent_icrs.cartesian.xyz.value
