@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
@@ -96,7 +97,9 @@ def _predict_contract_chunk_args(
     args: tuple[np.ndarray, dict[str, object]]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     states, ctx = args
-    return predict_radec_with_contract(
+    if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
+        print("[astropy-trace] predict_radec_with_contract start", flush=True)
+    result = predict_radec_with_contract(
         states,
         ctx["epoch"],
         ctx["obs_chunk"],
@@ -104,6 +107,9 @@ def _predict_contract_chunk_args(
         allow_unknown_site=ctx["allow_unknown_site"],
         configs=ctx["ladder"],
     )
+    if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
+        print("[astropy-trace] predict_radec_with_contract end", flush=True)
+    return result
 
 
 @dataclass
@@ -1055,8 +1061,34 @@ def sequential_fit_replicas(
             "shadow_mean_arcsec": float(np.mean(deltas)),
         }
         if diagnostics_path:
-            levels = np.stack(diag_used_levels, axis=0)
-            deltas_steps = np.stack(diag_max_delta, axis=0)
+            level_lengths = [arr.shape[0] for arr in diag_used_levels]
+            delta_lengths = [arr.shape[0] for arr in diag_max_delta]
+            max_len = max(level_lengths + delta_lengths)
+            if len(set(level_lengths)) > 1 or len(set(delta_lengths)) > 1:
+                _log(
+                    "shadow diagnostics length mismatch; padding to {}".format(max_len)
+                )
+                padded_levels = []
+                padded_deltas = []
+                for arr in diag_used_levels:
+                    pad = max_len - arr.shape[0]
+                    if pad > 0:
+                        padded = np.pad(arr, (0, pad), mode="constant", constant_values=-1)
+                    else:
+                        padded = arr
+                    padded_levels.append(padded)
+                for arr in diag_max_delta:
+                    pad = max_len - arr.shape[0]
+                    if pad > 0:
+                        padded = np.pad(arr, (0, pad), mode="constant", constant_values=np.nan)
+                    else:
+                        padded = arr
+                    padded_deltas.append(padded)
+                levels = np.stack(padded_levels, axis=0)
+                deltas_steps = np.stack(padded_deltas, axis=0)
+            else:
+                levels = np.stack(diag_used_levels, axis=0)
+                deltas_steps = np.stack(diag_max_delta, axis=0)
             step_labels = np.array(diag_step_labels, dtype=str)
             np.savez_compressed(
                 diagnostics_path,
