@@ -386,6 +386,8 @@ def sequential_fit_replicas(
     resume: bool = False,
     checkpoint_every_obs: int = 1,
     halt_before_seed_score: bool = False,
+    seed_score_limit: int | None = None,
+    seed_score_log_every: int = 10,
 ) -> ReplicaCloud:
     """Fit an SMC replica cloud from observations and return the final weighted states."""
     if len(observations) < 3:
@@ -476,27 +478,6 @@ def sequential_fit_replicas(
             executor.shutdown(wait=True)
 
     checkpoint_every_obs = max(1, int(checkpoint_every_obs))
-    if resume:
-        states, weights, next_obs_index, stage, ckpt_meta, epoch_isot = _load_checkpoint()
-        epoch = Time(epoch_isot)
-        weights = weights / np.sum(weights)
-        _log(
-            "resumed from checkpoint stage={} next_obs_index={} n={}".format(
-                stage, next_obs_index, len(states)
-            )
-        )
-        if stage == "final":
-            metadata = ckpt_meta if ckpt_meta is not None else {}
-            metadata["resumed_from_checkpoint"] = str(checkpoint_path)
-            metadata["checkpoint_stage"] = stage
-            _shutdown_executor()
-            return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)
-        if stage == "pre_seed_score":
-            _log("resuming seed scoring from checkpoint")
-            weights, used_level, max_delta = _score_seed(states)
-            next_obs_index = 3
-    else:
-        next_obs_index = 3
 
     def _choose_chunk_size(n: int, base_chunk: int, target_chunks: int = 1000) -> int:
         if n <= 0:
@@ -576,6 +557,10 @@ def sequential_fit_replicas(
         obs_chunk: Sequence[Observation],
         eps_arcsec: float,
         executor: ProcessPoolExecutor | None,
+        *,
+        log_progress: bool = False,
+        log_every: int = 10,
+        log_label: str = "predict",
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         ctx = {
             "epoch": epoch,
@@ -594,12 +579,15 @@ def sequential_fit_replicas(
         dec_parts = []
         lvl_parts = []
         delta_parts = []
-        for result in executor.map(_predict_contract_chunk_args, tasks):
+        total = len(tasks)
+        for idx, result in enumerate(executor.map(_predict_contract_chunk_args, tasks), start=1):
             ra, dec, levels, deltas = result
             ra_parts.append(ra)
             dec_parts.append(dec)
             lvl_parts.append(levels)
             delta_parts.append(deltas)
+            if log_progress and (idx % max(1, log_every) == 0 or idx == total):
+                _log(f"{log_label} chunks {idx}/{total}")
         return (
             np.vstack(ra_parts),
             np.vstack(dec_parts),
@@ -608,6 +596,9 @@ def sequential_fit_replicas(
         )
 
     def _score_seed(states: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        score_states = states
+        if seed_score_limit is not None and seed_score_limit > 0:
+            score_states = states[: seed_score_limit]
         eps_seed = min(
             _epsilon_arcsec_for_obs(
                 ob,
@@ -619,15 +610,18 @@ def sequential_fit_replicas(
             for ob in obs3
         )
         ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
-            states,
+            score_states,
             obs3,
             eps_seed,
             executor,
+            log_progress=True,
+            log_every=seed_score_log_every,
+            log_label="seed score",
         )
-        loglikes = np.zeros(len(states), dtype=float)
+        loglikes = np.zeros(len(score_states), dtype=float)
         for idx, ob in enumerate(obs3):
             sigma = _sigma_arcsec(ob, site_kappas)
-            for i in range(len(states)):
+            for i in range(len(score_states)):
                 loglikes[i] += _gaussian_loglike(
                     float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma
                 )
@@ -636,12 +630,19 @@ def sequential_fit_replicas(
         weights = weights / np.sum(weights)
         ess = 1.0 / np.sum(weights**2)
         _log(
-            "seed scoring done ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f}".format(
+            "seed scoring done ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f} (n={})".format(
                 ess,
                 int(np.max(used_level)) if len(used_level) else 0,
                 float(np.max(max_delta)) if len(max_delta) else 0.0,
+                len(score_states),
             )
         )
+        if len(score_states) < len(states):
+            raise SystemExit(
+                "Seed scoring sample complete (n={}); set --fit-smc-seed-score-limit=0 to score full set.".format(
+                    len(score_states)
+                )
+            )
         _save_checkpoint(
             states=states,
             weights=weights,
@@ -649,6 +650,28 @@ def sequential_fit_replicas(
             stage="seeded",
         )
         return weights, used_level, max_delta
+
+    if resume:
+        states, weights, next_obs_index, stage, ckpt_meta, epoch_isot = _load_checkpoint()
+        epoch = Time(epoch_isot)
+        weights = weights / np.sum(weights)
+        _log(
+            "resumed from checkpoint stage={} next_obs_index={} n={}".format(
+                stage, next_obs_index, len(states)
+            )
+        )
+        if stage == "final":
+            metadata = ckpt_meta if ckpt_meta is not None else {}
+            metadata["resumed_from_checkpoint"] = str(checkpoint_path)
+            metadata["checkpoint_stage"] = stage
+            _shutdown_executor()
+            return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)
+        if stage == "pre_seed_score":
+            _log("resuming seed scoring from checkpoint")
+            weights, used_level, max_delta = _score_seed(states)
+            next_obs_index = 3
+    else:
+        next_obs_index = 3
 
     # Use the legacy vector fit to keep geometry consistent with the original pipeline.
     attrib, attrib_cov, s_seed, sdot_seed = build_attributable_vector_fit(

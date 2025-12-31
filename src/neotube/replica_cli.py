@@ -603,6 +603,12 @@ def main() -> int:
         help="Checkpoint every N observations during fit-SMC.",
     )
     parser.add_argument(
+        "--fit-smc-seed-score-limit",
+        type=int,
+        default=0,
+        help="If >0, score only the first N seed states (debug).",
+    )
+    parser.add_argument(
         "--fit-smc-halt-before-seed-score",
         action="store_true",
         help="Stop after seeding and write a checkpoint before seed scoring.",
@@ -974,6 +980,9 @@ def main() -> int:
             resume=bool(args.fit_smc_resume),
             checkpoint_every_obs=int(args.fit_smc_checkpoint_every),
             halt_before_seed_score=bool(args.fit_smc_halt_before_seed_score),
+            seed_score_limit=int(args.fit_smc_seed_score_limit)
+            if int(args.fit_smc_seed_score_limit) > 0
+            else None,
             seed=int(args.seed),
             admissible_bound=args.admissible_bound,
             admissible_q_min_au=args.admissible_q_min_au,
