@@ -19,3 +19,7 @@ runs/ceres_archive_20251222222344/07_cutouts_dec5_11/
 runs/ceres_archive_20251222222344/*/_full/
 
 runs/
+!runs/
+!runs/ceres/
+!runs/ceres/**
+!replicas.csv
