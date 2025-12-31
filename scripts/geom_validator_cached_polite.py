@@ -758,17 +758,38 @@ def site_bary_and_vel_from_mpc_site(
         return earth_bary_km, earth_vel_km_s
     if _HAVE_ASTROPY:
         try:
+            debug_vectors = os.environ.get("NEOTUBE_DEBUG_VECTORS") == "1"
             t_obs = Time(obs_time_iso, scale="utc")
             t_obs_tdb = t_obs.tdb
             loc = EarthLocation.from_geocentric(ecef[0] * u.km, ecef[1] * u.km, ecef[2] * u.km)
             gcrs = loc.get_gcrs(obstime=t_obs_tdb)
-            site_eci = gcrs.cartesian.xyz.to(u.km).value
+            site_gcrs = gcrs.cartesian.xyz.to(u.km).value
             try:
-                v_site = gcrs.velocity.d_xyz.to(u.km / u.s).value
+                v_site = gcrs.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
             except Exception:
+                dt = parse_iso_utc(obs_time_iso)
+                jd_ut1 = utc_to_jd(dt)
+                gmst = gmst_from_jd_ut1(jd_ut1)
+                site_eci_manual = ecef_to_eci(ecef, gmst)
                 omega = np.array([0.0, 0.0, OMEGA_EARTH])
-                v_site = np.cross(omega, site_eci)
-            site_bary = earth_bary_km + site_eci
+                v_site = np.cross(omega, site_eci_manual)
+            if debug_vectors:
+                dt = parse_iso_utc(obs_time_iso)
+                jd_ut1 = utc_to_jd(dt)
+                gmst = gmst_from_jd_ut1(jd_ut1)
+                site_eci_manual = ecef_to_eci(ecef, gmst)
+                diff_vec = site_eci_manual - site_gcrs
+                print(
+                    "[DEBUG_SITE] site_eci_manual_km=",
+                    site_eci_manual.tolist(),
+                    "site_gcrs_km=",
+                    site_gcrs.tolist(),
+                    "diff_km=",
+                    diff_vec.tolist(),
+                    "diff_m=",
+                    float(np.linalg.norm(diff_vec)) * 1000.0,
+                )
+            site_bary = earth_bary_km + site_gcrs
             site_vel_bary = earth_vel_km_s + v_site
             return site_bary, site_vel_bary
         except Exception:
