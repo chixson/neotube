@@ -926,84 +926,100 @@ def sequential_fit_replicas(
         diag_step_labels.append("seed")
 
     for ob_idx, ob in enumerate(obs[next_obs_index:], start=next_obs_index):
-        loglikes = np.empty(len(states), dtype=float)
-        sigma = _sigma_arcsec(ob, site_kappas)
-        eps_ob = _epsilon_arcsec_for_obs(
-            ob,
-            epsilon_ast_arcsec=epsilon_ast_arcsec,
-            epsilon_ast_scale=epsilon_ast_scale,
-            epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
-            epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
-        )
-        obs_cache_single = _prepare_obs_cache([ob], allow_unknown_site=allow_unknown_site)
-        obs_times_single = np.asarray(obs_cache_single.times_tdb.jd, dtype=float)
-        sun_bary_single, _ = _body_posvel_km("sun", obs_cache_single.times_tdb)
-        use_cached_single = worker_count > 1
-        ob_configs = ladder
-        if use_cached_single:
-            ob_configs = [
-                cfg
-                for cfg in default_propagation_ladder(max_step=max_step)
-                if cfg.model == "kepler"
-            ]
-            if not ob_configs:
-                use_cached_single = False
-            elif not use_kepler:
+        try:
+            loglikes = np.empty(len(states), dtype=float)
+            sigma = _sigma_arcsec(ob, site_kappas)
+            eps_ob = _epsilon_arcsec_for_obs(
+                ob,
+                epsilon_ast_arcsec=epsilon_ast_arcsec,
+                epsilon_ast_scale=epsilon_ast_scale,
+                epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
+                epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+            )
+            obs_cache_single = _prepare_obs_cache([ob], allow_unknown_site=allow_unknown_site)
+            obs_times_single = np.asarray(obs_cache_single.times_tdb.jd, dtype=float)
+            sun_bary_single, _ = _body_posvel_km("sun", obs_cache_single.times_tdb)
+            use_cached_single = worker_count > 1
+            ob_configs = ladder
+            if use_cached_single:
+                ob_configs = [
+                    cfg
+                    for cfg in default_propagation_ladder(max_step=max_step)
+                    if cfg.model == "kepler"
+                ]
+                if not ob_configs:
+                    use_cached_single = False
+                elif not use_kepler:
+                    _log(
+                        "obs {} uses cached Kepler config for stability (override --no-kepler).".format(
+                            ob_idx
+                        )
+                    )
+            ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+                states,
+                [ob],
+                eps_ob,
+                executor,
+                obs_cache=obs_cache_single,
+                obs_times_jd=obs_times_single,
+                sun_bary_km=sun_bary_single,
+                use_cached_ephem=use_cached_single,
+                seed_configs=ob_configs,
+            )
+            for i in range(len(states)):
+                loglikes[i] = _gaussian_loglike(
+                    float(ra_pred[i, 0]), float(dec_pred[i, 0]), ob, sigma
+                )
+            logw = np.log(weights + 1e-300) + loglikes
+            logw -= float(np.max(logw))
+            weights = np.exp(logw)
+            weights = weights / np.sum(weights)
+
+            if shadow_diagnostics:
+                diag_used_levels.append(used_level.copy())
+                diag_max_delta.append(max_delta.copy())
+                diag_step_labels.append(f"obs_{ob_idx}")
+
+            ess = 1.0 / np.sum(weights**2)
+            if ob_idx % log_every_obs == 0 or ob_idx == len(obs) - 1:
                 _log(
-                    "obs {} uses cached Kepler config for stability (override --no-kepler).".format(
-                        ob_idx
+                    "obs {} ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f}".format(
+                        ob_idx,
+                        ess,
+                        int(np.max(used_level)) if len(used_level) else 0,
+                        float(np.max(max_delta)) if len(max_delta) else 0.0,
                     )
                 )
-        ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
-            states,
-            [ob],
-            eps_ob,
-            executor,
-            obs_cache=obs_cache_single,
-            obs_times_jd=obs_times_single,
-            sun_bary_km=sun_bary_single,
-            use_cached_ephem=use_cached_single,
-            seed_configs=ob_configs,
-        )
-        for i in range(len(states)):
-            loglikes[i] = _gaussian_loglike(float(ra_pred[i, 0]), float(dec_pred[i, 0]), ob, sigma)
-        logw = np.log(weights + 1e-300) + loglikes
-        logw -= float(np.max(logw))
-        weights = np.exp(logw)
-        weights = weights / np.sum(weights)
+            if ess < ess_threshold * len(weights):
+                states = _systematic_resample(states, weights, rng)
+                weights = np.full(len(states), 1.0 / len(states), dtype=float)
+                if rejuvenation_scale > 0.0 and len(states) > 1:
+                    cov = np.cov(states.T)
+                    cov = cov * rejuvenation_scale
+                    jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
+                    states = states + jitter
+                _log("resampled ess={:.1f} -> uniform weights".format(ess))
 
-        if shadow_diagnostics:
-            diag_used_levels.append(used_level.copy())
-            diag_max_delta.append(max_delta.copy())
-            diag_step_labels.append(f"obs_{ob_idx}")
-
-        ess = 1.0 / np.sum(weights**2)
-        if ob_idx % log_every_obs == 0 or ob_idx == len(obs) - 1:
-            _log(
-                "obs {} ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f}".format(
-                    ob_idx,
-                    ess,
-                    int(np.max(used_level)) if len(used_level) else 0,
-                    float(np.max(max_delta)) if len(max_delta) else 0.0,
+            if checkpoint_path and (
+                ob_idx % checkpoint_every_obs == 0 or ob_idx == len(obs) - 1
+            ):
+                _save_checkpoint(
+                    states=states,
+                    weights=weights,
+                    next_obs_index=ob_idx + 1,
+                    stage="assimilating",
                 )
-            )
-        if ess < ess_threshold * len(weights):
-            states = _systematic_resample(states, weights, rng)
-            weights = np.full(len(states), 1.0 / len(states), dtype=float)
-            if rejuvenation_scale > 0.0 and len(states) > 1:
-                cov = np.cov(states.T)
-                cov = cov * rejuvenation_scale
-                jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
-                states = states + jitter
-            _log("resampled ess={:.1f} -> uniform weights".format(ess))
-
-        if checkpoint_path and (ob_idx % checkpoint_every_obs == 0 or ob_idx == len(obs) - 1):
+        except Exception as exc:
+            _log("obs {} failed: {}".format(ob_idx, exc))
+            _log(traceback.format_exc())
             _save_checkpoint(
                 states=states,
                 weights=weights,
-                next_obs_index=ob_idx + 1,
-                stage="assimilating",
+                next_obs_index=ob_idx,
+                stage="obs_error",
+                error=str(exc),
             )
+            raise
 
     auto_grow_done = False
     auto_grow_diag: dict | None = None
