@@ -447,6 +447,7 @@ def sequential_fit_replicas(
     auto_min_per_mode: int = 20,
     workers: int | None = None,
     chunk_size: int = 512,
+    target_chunks: int = 1000,
     site_kappas: dict[str, float] | None = None,
     seed: int | None = None,
     admissible_bound: bool = True,
@@ -543,8 +544,9 @@ def sequential_fit_replicas(
     if not use_kepler:
         ladder = [cfg for cfg in ladder if cfg.model != "kepler"]
     worker_count = max(1, int(workers or 1))
-    chunk_size = max(64, int(chunk_size))
+    chunk_size = max(1, int(chunk_size))
     log_every_obs = max(1, int(log_every_obs))
+    target_chunks = max(1, int(target_chunks))
 
     _log(
         "start n_particles={} obs={} use_kepler={} full_physics_final={} auto_grow={} "
@@ -596,7 +598,7 @@ def sequential_fit_replicas(
 
     checkpoint_every_obs = max(1, int(checkpoint_every_obs))
 
-    def _choose_chunk_size(n: int, base_chunk: int, target_chunks: int = 1000) -> int:
+    def _choose_chunk_size(n: int, base_chunk: int, target_chunks: int) -> int:
         if n <= 0:
             return max(1, base_chunk)
         desired = int(math.ceil(n / max(1, target_chunks)))
@@ -622,7 +624,7 @@ def sequential_fit_replicas(
         }
         if executor is None or len(pool_states) <= chunk_size:
             return _score_states_contract_chunk_args((pool_states, ctx))
-        use_chunk = _choose_chunk_size(len(pool_states), chunk_size)
+        use_chunk = _choose_chunk_size(len(pool_states), chunk_size, target_chunks)
         tasks = []
         for start in range(0, len(pool_states), use_chunk):
             tasks.append((pool_states[start : start + use_chunk], ctx))
@@ -660,7 +662,7 @@ def sequential_fit_replicas(
         }
         if executor is None or len(pool_states) <= chunk_size:
             return _score_states_full_chunk_args((pool_states, ctx))
-        use_chunk = _choose_chunk_size(len(pool_states), chunk_size)
+        use_chunk = _choose_chunk_size(len(pool_states), chunk_size, target_chunks)
         tasks = []
         for start in range(0, len(pool_states), use_chunk):
             tasks.append((pool_states[start : start + use_chunk], ctx))
@@ -700,7 +702,7 @@ def sequential_fit_replicas(
         }
         if executor is None or len(pool_states) <= chunk_size:
             return _predict_contract_chunk_args((pool_states, ctx))
-        use_chunk = _choose_chunk_size(len(pool_states), chunk_size)
+        use_chunk = _choose_chunk_size(len(pool_states), chunk_size, target_chunks)
         tasks = []
         for start in range(0, len(pool_states), use_chunk):
             tasks.append((pool_states[start : start + use_chunk], ctx))
@@ -833,6 +835,7 @@ def sequential_fit_replicas(
         seed_configs = [cfg for cfg in ladder if cfg.model == "kepler"]
         if not seed_configs:
             seed_use_cached = False
+            seed_configs = ladder
         elif not use_kepler:
             _log("seed scoring uses cached Kepler config for stability (override --no-kepler).")
 
@@ -1087,6 +1090,14 @@ def sequential_fit_replicas(
                 loglikes[i] = _gaussian_loglike(
                     float(ra_pred[i, 0]), float(dec_pred[i, 0]), ob, sigma
                 )
+            finite_mask = np.isfinite(loglikes)
+            if not np.all(finite_mask):
+                _log(
+                    "obs {} loglikes non-finite count={}".format(
+                        ob_idx, int(np.sum(~finite_mask))
+                    )
+                )
+                loglikes = np.where(finite_mask, loglikes, -1e30)
             logw = np.log(weights + 1e-300) + loglikes
             logw -= float(np.max(logw))
             weights = np.exp(logw)
@@ -1099,12 +1110,31 @@ def sequential_fit_replicas(
 
             ess = 1.0 / np.sum(weights**2)
             if ob_idx % log_every_obs == 0 or ob_idx == len(obs) - 1:
+                finite_ll = loglikes[np.isfinite(loglikes)]
+                if finite_ll.size:
+                    ll_min, ll_med, ll_max = np.percentile(finite_ll, [0.0, 50.0, 100.0])
+                else:
+                    ll_min = ll_med = ll_max = float("nan")
+                w_min = float(np.min(weights)) if weights.size else float("nan")
+                w_med = float(np.median(weights)) if weights.size else float("nan")
+                w_max = float(np.max(weights)) if weights.size else float("nan")
                 _log(
                     "obs {} ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f}".format(
                         ob_idx,
                         ess,
                         int(np.max(used_level)) if len(used_level) else 0,
                         float(np.max(max_delta)) if len(max_delta) else 0.0,
+                    )
+                )
+                _log(
+                    "obs {} loglike[min/med/max]=[{:.3f}/{:.3f}/{:.3f}] weight[min/med/max]=[{:.3e}/{:.3e}/{:.3e}]".format(
+                        ob_idx,
+                        float(ll_min),
+                        float(ll_med),
+                        float(ll_max),
+                        w_min,
+                        w_med,
+                        w_max,
                     )
                 )
             if ess < ess_threshold * len(weights):

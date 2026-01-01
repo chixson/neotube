@@ -575,6 +575,12 @@ def main() -> int:
         help="Chunk size for fit-SMC parallel scoring.",
     )
     parser.add_argument(
+        "--fit-smc-target-chunks",
+        type=int,
+        default=1000,
+        help="Target number of chunks for fit-SMC parallel scoring.",
+    )
+    parser.add_argument(
         "--fit-smc-log-every",
         type=int,
         default=1,
@@ -981,6 +987,7 @@ def main() -> int:
             auto_min_per_decade=int(args.fit_smc_min_per_decade),
             workers=int(args.fit_smc_workers),
             chunk_size=int(args.fit_smc_chunk_size),
+            target_chunks=int(args.fit_smc_target_chunks),
             log_every_obs=int(args.fit_smc_log_every),
             verbose=not args.fit_smc_quiet,
             checkpoint_path=(
