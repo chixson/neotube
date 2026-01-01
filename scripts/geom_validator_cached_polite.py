@@ -144,6 +144,7 @@ except Exception:
 try:
     from astropy.time import Time, TimeDelta  # type: ignore
     from astropy.coordinates import (  # type: ignore
+        AltAz,
         EarthLocation,
         GCRS,
         ICRS,
@@ -151,6 +152,7 @@ try:
         CartesianDifferential,
         CartesianRepresentation,
     )
+    from astropy.utils import iers  # type: ignore
     from astropy import units as u  # type: ignore
     from astroquery.jplhorizons import Horizons as AQ_Horizons  # type: ignore
 
@@ -596,6 +598,41 @@ def aberrate_relativistic(n: np.ndarray, v_km_s: np.ndarray) -> np.ndarray:
     return s
 
 
+def astropy_apparent_radec(
+    obj_bary_km: np.ndarray,
+    obj_vel_km_s: Optional[np.ndarray],
+    t_em: "Time",
+    t_obs_iso: str,
+    earth_bary_tobs_km: np.ndarray,
+    site_ecef_km: np.ndarray,
+) -> Tuple[float, float]:
+    """
+    Astropy-native apparent direction:
+      ICRS@t_em -> AltAz@t_obs.tdb -> ICRS.
+    """
+    if os.environ.get("NEOTUBE_ENABLE_IERS_AUTO") == "1":
+        iers.conf.auto_download = True
+    t_obs = Time(t_obs_iso, scale="utc")
+    t_obs_tdb = t_obs.tdb
+
+    obj_geoc_km = obj_bary_km - earth_bary_tobs_km
+    rep = CartesianRepresentation(obj_geoc_km * u.km)
+    if obj_vel_km_s is not None:
+        rep = rep.with_differentials(CartesianDifferential(obj_vel_km_s * u.km / u.s))
+    sc_obj_icrs = SkyCoord(rep, frame=ICRS(), obstime=t_em)
+
+    site_loc = EarthLocation.from_geocentric(
+        site_ecef_km[0] * u.km,
+        site_ecef_km[1] * u.km,
+        site_ecef_km[2] * u.km,
+    )
+    altaz = AltAz(obstime=t_obs_tdb, location=site_loc, pressure=0.0 * u.bar)
+    sc_obj_altaz = sc_obj_icrs.transform_to(altaz)
+    # ICRS does not accept obstime; use GCRS at t_obs_tdb then transform to ICRS.
+    sc_app_icrs = sc_obj_altaz.transform_to(GCRS(obstime=t_obs_tdb)).transform_to(ICRS())
+    return float(sc_app_icrs.ra.deg), float(sc_app_icrs.dec.deg)
+
+
 def shapiro_delay_sun(
     obj_pos_bary_km: np.ndarray, obs_pos_bary_km: np.ndarray, sun_pos_bary_km: np.ndarray
 ) -> float:
@@ -957,6 +994,8 @@ def run_validator(
     results = []
     pred_ra = []
     pred_dec = []
+    # pred_ra_b/pred_dec_b = astropy-native apparent (path B), enabled by NEOTUBE_COMPARE_PATHS=1.
+    compare_paths = os.environ.get("NEOTUBE_COMPARE_PATHS") == "1"
     debug_vectors = os.environ.get("NEOTUBE_DEBUG_VECTORS") == "1"
     debug_done = False
     for i, ob in enumerate(obs_list):
@@ -980,6 +1019,23 @@ def run_validator(
         )
         pred_ra.append(ra_pred)
         pred_dec.append(dec_pred)
+        pred_ra_b = None
+        pred_dec_b = None
+        if compare_paths and _HAVE_ASTROPY and site_ecef is not None:
+            try:
+                t_obs = Time(epoch, scale="utc")
+                t_em = t_obs.tdb - TimeDelta(float(dbg.tau_s), format="sec")
+                obj_vec = horizons_vectors_cached(
+                    jpl_cmd, t_em.iso, center="@ssb", refplane="frame", limiter=limiter
+                )
+                obj_bary = obj_vec[:3].copy()
+                obj_vel = obj_vec[3:].copy()
+                pred_ra_b, pred_dec_b = astropy_apparent_radec(
+                    obj_bary, obj_vel, t_em, epoch, earth_bary, site_ecef
+                )
+            except Exception:
+                pred_ra_b = None
+                pred_dec_b = None
         if debug_vectors and not debug_done:
             debug_done = True
             obj_bary_forward = np.array(dbg.obj_bary_km, dtype=float)
@@ -1114,6 +1170,8 @@ def run_validator(
                 "obs_dec": ob["dec_deg"],
                 "pred_ra": ra_pred,
                 "pred_dec": dec_pred,
+                "pred_ra_b": pred_ra_b,
+                "pred_dec_b": pred_dec_b,
                 "km_diff_forward_inverse": float(km_diff),
                 "ra_500": ra_500,
                 "dec_500": dec_500,
@@ -1136,6 +1194,8 @@ def run_validator(
             "obs_dec",
             "pred_ra",
             "pred_dec",
+            "pred_ra_b",
+            "pred_dec_b",
             "km_diff_forward_inverse",
             "ra_500",
             "dec_500",
@@ -1157,6 +1217,8 @@ def run_validator(
                     r["obs_dec"],
                     r["pred_ra"],
                     r["pred_dec"],
+                    r["pred_ra_b"],
+                    r["pred_dec_b"],
                     r["km_diff_forward_inverse"],
                     r["ra_500"],
                     r["dec_500"],
