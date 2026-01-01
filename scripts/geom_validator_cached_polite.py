@@ -144,7 +144,6 @@ except Exception:
 try:
     from astropy.time import Time, TimeDelta  # type: ignore
     from astropy.coordinates import (  # type: ignore
-        AltAz,
         EarthLocation,
         GCRS,
         ICRS,
@@ -578,6 +577,25 @@ def aberrate_direction_first_order(topovec: np.ndarray, obs_vel_km_s: np.ndarray
     return s
 
 
+def aberrate_relativistic(n: np.ndarray, v_km_s: np.ndarray) -> np.ndarray:
+    """
+    Exact SR aberration for a light direction n (unit vector) and observer velocity v_km_s.
+    """
+    n = n / (np.linalg.norm(n) + 1e-30)
+    beta = v_km_s / C_KM_S
+    beta2 = float(np.dot(beta, beta))
+    if beta2 == 0.0:
+        return n
+    gamma = 1.0 / math.sqrt(1.0 - beta2)
+    nb = float(np.dot(n, beta))
+    coef = (gamma - 1.0) * nb / beta2
+    numer = n + coef * beta + gamma * beta
+    denom = gamma * (1.0 + nb)
+    s = numer / (denom + 1e-30)
+    s = s / (np.linalg.norm(s) + 1e-30)
+    return s
+
+
 def shapiro_delay_sun(
     obj_pos_bary_km: np.ndarray, obs_pos_bary_km: np.ndarray, sun_pos_bary_km: np.ndarray
 ) -> float:
@@ -642,34 +660,18 @@ def predict_apparent_radec_for_obs(
             last_tau = tau
             t_guess = t_new
         r_topo = obj_bary[:3] - site_bary_km
-        if site_ecef_km is not None and earth_bary_km is not None:
-            obj_geoc_icrs_km = obj_bary[:3] - earth_bary_km
-            rep = CartesianRepresentation(obj_geoc_icrs_km * u.km)
-            if obj_vel is not None:
-                rep = rep.with_differentials(CartesianDifferential(obj_vel * u.km / u.s))
-            sc_obj_icrs = SkyCoord(rep, frame=ICRS(), obstime=t_guess)
-            site_loc = EarthLocation.from_geocentric(
-                site_ecef_km[0] * u.km,
-                site_ecef_km[1] * u.km,
-                site_ecef_km[2] * u.km,
-            )
-            altaz = AltAz(obstime=t_obs_tdb, location=site_loc, pressure=0.0 * u.bar)
-            sc_obj_altaz = sc_obj_icrs.transform_to(altaz)
-            sc_app_icrs = sc_obj_altaz.transform_to(ICRS())
-            ra_deg = float(sc_app_icrs.ra.deg)
-            dec_deg = float(sc_app_icrs.dec.deg)
-            unit_vec_icrs = sc_app_icrs.cartesian.xyz.value
-            s_ab = unit_vec_icrs / (np.linalg.norm(unit_vec_icrs) + 1e-30)
-        else:
-            s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
-            if os.environ.get("NEOTUBE_DEBUG_NO_ABERRATION") == "1":
-                s_ab = s_unit
+        s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
+        if os.environ.get("NEOTUBE_DEBUG_USE_ABERRATION") == "1":
+            if os.environ.get("NEOTUBE_DEBUG_ABERR_REL") == "1":
+                s_ab = aberrate_relativistic(s_unit, site_vel_bary_km_s)
             else:
                 if os.environ.get("NEOTUBE_DEBUG_ABERR_SIGN") == "1":
                     s_ab = aberrate_direction_first_order(s_unit, -site_vel_bary_km_s)
                 else:
                     s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
-            ra_deg, dec_deg = unit_to_radec(s_ab)
+        else:
+            s_ab = s_unit
+        ra_deg, dec_deg = unit_to_radec(s_ab)
         debug = PredictDebug(
             iterations=it + 1,
             tau_s=float(last_tau if last_tau is not None else 0.0),
@@ -695,13 +697,16 @@ def predict_apparent_radec_for_obs(
         t_guess = t_new
     r_topo = obj_bary[:3] - site_bary_km
     s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
-    if os.environ.get("NEOTUBE_DEBUG_NO_ABERRATION") == "1":
-        s_ab = s_unit
-    else:
-        if os.environ.get("NEOTUBE_DEBUG_ABERR_SIGN") == "1":
-            s_ab = aberrate_direction_first_order(s_unit, -site_vel_bary_km_s)
+    if os.environ.get("NEOTUBE_DEBUG_USE_ABERRATION") == "1":
+        if os.environ.get("NEOTUBE_DEBUG_ABERR_REL") == "1":
+            s_ab = aberrate_relativistic(s_unit, site_vel_bary_km_s)
         else:
-            s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
+            if os.environ.get("NEOTUBE_DEBUG_ABERR_SIGN") == "1":
+                s_ab = aberrate_direction_first_order(s_unit, -site_vel_bary_km_s)
+            else:
+                s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
+    else:
+        s_ab = s_unit
     ra_deg, dec_deg = unit_to_radec(s_ab)
     debug = PredictDebug(
         iterations=it + 1,
