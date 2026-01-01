@@ -144,6 +144,7 @@ except Exception:
 try:
     from astropy.time import Time, TimeDelta  # type: ignore
     from astropy.coordinates import (  # type: ignore
+        AltAz,
         EarthLocation,
         GCRS,
         ICRS,
@@ -157,6 +158,9 @@ try:
     _HAVE_ASTROPY = True
 except Exception:
     _HAVE_ASTROPY = False
+
+# Debug guard for velocity diagnostics
+_DEBUG_VEL_PRINTED = False
 
 # Constants
 AU_KM = 149597870.7
@@ -638,9 +642,34 @@ def predict_apparent_radec_for_obs(
             last_tau = tau
             t_guess = t_new
         r_topo = obj_bary[:3] - site_bary_km
-        s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
-        s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
-        ra_deg, dec_deg = unit_to_radec(s_ab)
+        if site_ecef_km is not None and earth_bary_km is not None:
+            obj_geoc_icrs_km = obj_bary[:3] - earth_bary_km
+            rep = CartesianRepresentation(obj_geoc_icrs_km * u.km)
+            if obj_vel is not None:
+                rep = rep.with_differentials(CartesianDifferential(obj_vel * u.km / u.s))
+            sc_obj_icrs = SkyCoord(rep, frame=ICRS(), obstime=t_guess)
+            site_loc = EarthLocation.from_geocentric(
+                site_ecef_km[0] * u.km,
+                site_ecef_km[1] * u.km,
+                site_ecef_km[2] * u.km,
+            )
+            altaz = AltAz(obstime=t_obs_tdb, location=site_loc, pressure=0.0 * u.bar)
+            sc_obj_altaz = sc_obj_icrs.transform_to(altaz)
+            sc_app_icrs = sc_obj_altaz.transform_to(ICRS())
+            ra_deg = float(sc_app_icrs.ra.deg)
+            dec_deg = float(sc_app_icrs.dec.deg)
+            unit_vec_icrs = sc_app_icrs.cartesian.xyz.value
+            s_ab = unit_vec_icrs / (np.linalg.norm(unit_vec_icrs) + 1e-30)
+        else:
+            s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
+            if os.environ.get("NEOTUBE_DEBUG_NO_ABERRATION") == "1":
+                s_ab = s_unit
+            else:
+                if os.environ.get("NEOTUBE_DEBUG_ABERR_SIGN") == "1":
+                    s_ab = aberrate_direction_first_order(s_unit, -site_vel_bary_km_s)
+                else:
+                    s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
+            ra_deg, dec_deg = unit_to_radec(s_ab)
         debug = PredictDebug(
             iterations=it + 1,
             tau_s=float(last_tau if last_tau is not None else 0.0),
@@ -666,7 +695,13 @@ def predict_apparent_radec_for_obs(
         t_guess = t_new
     r_topo = obj_bary[:3] - site_bary_km
     s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
-    s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
+    if os.environ.get("NEOTUBE_DEBUG_NO_ABERRATION") == "1":
+        s_ab = s_unit
+    else:
+        if os.environ.get("NEOTUBE_DEBUG_ABERR_SIGN") == "1":
+            s_ab = aberrate_direction_first_order(s_unit, -site_vel_bary_km_s)
+        else:
+            s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
     ra_deg, dec_deg = unit_to_radec(s_ab)
     debug = PredictDebug(
         iterations=it + 1,
@@ -759,6 +794,7 @@ def site_bary_and_vel_from_mpc_site(
     if _HAVE_ASTROPY:
         try:
             debug_vectors = os.environ.get("NEOTUBE_DEBUG_VECTORS") == "1"
+            debug_vel = os.environ.get("NEOTUBE_DEBUG_VEL") == "1"
             t_obs = Time(obs_time_iso, scale="utc")
             t_obs_tdb = t_obs.tdb
             loc = EarthLocation.from_geocentric(ecef[0] * u.km, ecef[1] * u.km, ecef[2] * u.km)
@@ -789,6 +825,29 @@ def site_bary_and_vel_from_mpc_site(
                     "diff_m=",
                     float(np.linalg.norm(diff_vec)) * 1000.0,
                 )
+            if debug_vel:
+                global _DEBUG_VEL_PRINTED
+                if not _DEBUG_VEL_PRINTED:
+                    dt = parse_iso_utc(obs_time_iso)
+                    jd_ut1 = utc_to_jd(dt)
+                    gmst = gmst_from_jd_ut1(jd_ut1)
+                    site_eci_manual = ecef_to_eci(ecef, gmst)
+                    omega = np.array([0.0, 0.0, OMEGA_EARTH])
+                    v_site_manual = np.cross(omega, site_eci_manual)
+                    site_vel_bary_from_gcrs = earth_vel_km_s + v_site
+                    site_vel_manual = earth_vel_km_s + v_site_manual
+                    print("[DEBUG_VEL] site_vel_bary_from_gcrs_km_s=", site_vel_bary_from_gcrs.tolist())
+                    print("[DEBUG_VEL] site_vel_manual_km_s=", site_vel_manual.tolist())
+                    print("[DEBUG_VEL] earth_vel_km_s=", earth_vel_km_s.tolist())
+                    print(
+                        "[DEBUG_VEL] |site_vel_bary|_km_s=",
+                        float(np.linalg.norm(site_vel_bary_from_gcrs)),
+                    )
+                    print(
+                        "[DEBUG_VEL] beta_mag=",
+                        float(np.linalg.norm(site_vel_bary_from_gcrs) / C_KM_S),
+                    )
+                    _DEBUG_VEL_PRINTED = True
             site_bary = earth_bary_km + site_gcrs
             site_vel_bary = earth_vel_km_s + v_site
             return site_bary, site_vel_bary
@@ -922,6 +981,10 @@ def run_validator(
             r_topo = np.array(dbg.r_topo_km, dtype=float)
             s_unit = np.array(dbg.unit_topovec, dtype=float)
             site_eci = site_bary - earth_bary
+            def _ang_arcsec(u1, u2):
+                dot = float(np.dot(u1, u2))
+                dot = max(-1.0, min(1.0, dot))
+                return math.degrees(math.acos(dot)) * 3600.0
             print(
                 "[DEBUG] obj_bary_km=",
                 obj_bary_forward.tolist(),
@@ -935,6 +998,18 @@ def run_validator(
                 r_topo.tolist(),
                 "s_unit=",
                 s_unit.tolist(),
+            )
+            beta = site_vel / C_KM_S
+            nb = float(np.dot(s_unit, beta))
+            s_manual = s_unit + beta - nb * s_unit
+            s_manual /= np.linalg.norm(s_manual) + 1e-30
+            s_flip = s_unit - beta + nb * s_unit
+            s_flip /= np.linalg.norm(s_flip) + 1e-30
+            print(
+                "[DEBUG] ang_no_aberr_arcsec=",
+                _ang_arcsec(s_unit, s_manual),
+                "ang_flip_aberr_arcsec=",
+                _ang_arcsec(s_unit, s_flip),
             )
             u_our_geoc = (obj_bary_forward - earth_bary) / (
                 np.linalg.norm(obj_bary_forward - earth_bary) + 1e-30
@@ -960,6 +1035,7 @@ def run_validator(
             if _HAVE_ASTROPY:
                 try:
                     t_obs = Time(epoch, scale="utc")
+                    topo_gcrs_unit = None
                     if site_ecef is not None:
                         t_em = t_obs.tdb - TimeDelta(float(dbg.tau_s), format="sec")
                         site_loc = EarthLocation.from_geocentric(
@@ -996,6 +1072,12 @@ def run_validator(
                             "dot(u_topo_ours,hz_topo)=",
                             dot_topo,
                         )
+                        if topo_gcrs_unit is not None:
+                            dot_topo_gcrs = float(np.dot(topo_gcrs_unit, hz_unit))
+                            print(
+                                "[DEBUG] dot(u_topo_gcrs,hz_topo)=",
+                                dot_topo_gcrs,
+                            )
                 except Exception:
                     pass
         s_unit = np.array(dbg.unit_topovec, dtype=float)
