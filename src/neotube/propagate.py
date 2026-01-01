@@ -1073,6 +1073,26 @@ def _rhs(t: float, y: np.ndarray, perturber_table: PerturberTable) -> np.ndarray
     return np.concatenate((y[3:], acc))
 
 
+def _acceleration_barycentric(
+    r_bary: np.ndarray, perturber_table: PerturberTable, t: float
+) -> np.ndarray:
+    """Compute barycentric acceleration on a test particle."""
+    if not perturber_table.bodies:
+        return np.zeros(3, dtype=float)
+    positions = perturber_table.position_vectors(t)
+    diffs = positions - r_bary
+    norms = np.linalg.norm(diffs, axis=1)
+    coeff = perturber_table.gms / (norms**3 + 1e-18)
+    return np.sum((coeff[:, np.newaxis] * diffs), axis=0)
+
+
+def _rhs_barycentric(t: float, y: np.ndarray, perturber_table: PerturberTable) -> np.ndarray:
+    """Ordinary differential equation for barycentric motion."""
+    r = y[:3]
+    acc = _acceleration_barycentric(r, perturber_table, t)
+    return np.concatenate((y[3:], acc))
+
+
 def propagate_state(
     state: np.ndarray,
     epoch: Time,
@@ -1080,8 +1100,14 @@ def propagate_state(
     *,
     perturbers: Sequence[str] = ("earth", "mars", "jupiter"),
     max_step: float = 300.0,
+    barycentric: bool | None = None,
 ) -> np.ndarray:
-    """Propagate a single heliocentric state to multiple epochs."""
+    """Propagate a single heliocentric state to multiple epochs.
+
+    When perturbers are provided, the integration is performed in barycentric
+    coordinates internally (Sun and planets as massive bodies), then converted
+    back to heliocentric output states.
+    """
     targets = list(targets)
     if not targets:
         return np.empty((0, 6), dtype=float)
@@ -1095,7 +1121,10 @@ def propagate_state(
     if np.any(zero_mask):
         results[zero_mask] = state
 
-    def _solve(offsets_subset: np.ndarray) -> np.ndarray:
+    if barycentric is None:
+        barycentric = bool(perturbers)
+
+    def _solve_heliocentric(offsets_subset: np.ndarray) -> np.ndarray:
         if offsets_subset.size == 0:
             return np.empty((0, 6), dtype=float)
         t_end = float(offsets_subset.min() if offsets_subset.min() < 0 else offsets_subset.max())
@@ -1161,15 +1190,86 @@ def propagate_state(
             raise RuntimeError(f"Propagation to targets failed: {sol.message}")
         return sol.y.T
 
+    def _solve_barycentric(offsets_subset: np.ndarray) -> np.ndarray:
+        if offsets_subset.size == 0:
+            return np.empty((0, 6), dtype=float)
+        t_end = float(offsets_subset.min() if offsets_subset.min() < 0 else offsets_subset.max())
+        t_eval = np.sort(offsets_subset)
+        if t_end < 0:
+            t_eval = t_eval[::-1]
+
+        if t_end < 0:
+            table_times = np.linspace(
+                t_end,
+                0.0,
+                max(2, int(ceil(abs(t_end) / max(abs(max_step), 1.0))) + 1),
+                dtype=float,
+            )
+        else:
+            table_times = np.linspace(
+                0.0,
+                t_end,
+                max(2, int(ceil(abs(t_end) / max(abs(max_step), 1.0))) + 1),
+                dtype=float,
+            )
+        times = epoch + TimeDelta(table_times * u.s)
+
+        bodies = ["sun"]
+        position_list = []
+        gms = [GM_SUN]
+        sun_pos_km, sun_vel_km_s = _body_posvel_km("sun", times)
+        position_list.append(sun_pos_km)
+        for body in perturbers:
+            gm = PLANET_GMS.get(body.lower())
+            if gm is None:
+                continue
+            body_pos, _ = _body_posvel_km(body, times)
+            bodies.append(body.lower())
+            position_list.append(body_pos)
+            gms.append(gm)
+
+        stacked_positions = np.stack(position_list, axis=0)
+        pert_table = PerturberTable(
+            times=table_times,
+            bodies=bodies,
+            gms=np.array(gms, dtype=float),
+            positions=stacked_positions,
+        )
+
+        sun_pos_epoch, sun_vel_epoch = _body_posvel_km_single("sun", epoch)
+        state_bary = state.copy()
+        state_bary[:3] = state_bary[:3] + sun_pos_epoch
+        state_bary[3:] = state_bary[3:] + sun_vel_epoch
+
+        sol = solve_ivp(
+            lambda t, y: _rhs_barycentric(t, y, pert_table),
+            (0.0, t_end),
+            state_bary,
+            t_eval=t_eval,
+            max_step=abs(max_step),
+            rtol=1e-9,
+            atol=1e-12,
+            method="DOP853",
+        )
+        if not sol.success:
+            raise RuntimeError(f"Propagation to targets failed: {sol.message}")
+
+        # Convert barycentric solution back to heliocentric at each t_eval time.
+        sun_pos_eval, sun_vel_eval = _body_posvel_km("sun", epoch + TimeDelta(t_eval * u.s))
+        out = sol.y.T.copy()
+        out[:, :3] -= sun_pos_eval
+        out[:, 3:] -= sun_vel_eval
+        return out
+
     if np.any(pos_mask):
         pos_offsets = offsets[pos_mask]
-        pos_states = _solve(pos_offsets)
+        pos_states = _solve_barycentric(pos_offsets) if barycentric else _solve_heliocentric(pos_offsets)
         order_pos = np.argsort(pos_offsets)
         results[np.where(pos_mask)[0][order_pos]] = pos_states
 
     if np.any(neg_mask):
         neg_offsets = offsets[neg_mask]
-        neg_states = _solve(neg_offsets)
+        neg_states = _solve_barycentric(neg_offsets) if barycentric else _solve_heliocentric(neg_offsets)
         order_neg = np.argsort(neg_offsets)[::-1]
         results[np.where(neg_mask)[0][order_neg]] = neg_states
 

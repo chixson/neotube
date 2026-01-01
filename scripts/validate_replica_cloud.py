@@ -8,6 +8,7 @@ import argparse
 import csv
 import json
 import math
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +53,31 @@ def _load_replicas_csv(path: Path) -> np.ndarray:
                 ]
             )
     return np.array(states, dtype=float)
+
+
+def _predict_chunk(args: tuple) -> tuple[np.ndarray, np.ndarray]:
+    states_chunk, epoch, obs, perturbers, max_step, use_kepler, full_physics = args
+    ra_out = np.zeros((len(states_chunk), len(obs)), dtype=float)
+    dec_out = np.zeros((len(states_chunk), len(obs)), dtype=float)
+    for i, st in enumerate(states_chunk):
+        try:
+            ra_i, dec_i = predict_radec_from_epoch(
+                st,
+                epoch,
+                obs,
+                perturbers,
+                max_step,
+                use_kepler=use_kepler,
+                allow_unknown_site=True,
+                light_time_iters=2,
+                full_physics=full_physics,
+            )
+            ra_out[i, :] = ra_i
+            dec_out[i, :] = dec_i
+        except Exception:
+            ra_out[i, :] = np.nan
+            dec_out[i, :] = np.nan
+    return ra_out, dec_out
 
 
 def _load_epoch(meta_path: Path) -> Time:
@@ -333,6 +359,8 @@ def main() -> None:
     p.add_argument("--no-full-physics", action="store_true")
     p.add_argument("--perturbers", nargs="*", default=["earth", "mars", "jupiter"])
     p.add_argument("--max-step", type=float, default=3600.0)
+    p.add_argument("--workers", type=int, default=1)
+    p.add_argument("--chunk-size", type=int, default=0)
     p.add_argument("--horizons-target", type=str, default=None)
     p.add_argument("--horizons-id-type", type=str, default=None)
     p.add_argument(
@@ -395,20 +423,44 @@ def main() -> None:
     if not args.cloud_only:
         pred_ra = np.zeros((len(states), len(obs)), dtype=float)
         pred_dec = np.zeros((len(states), len(obs)), dtype=float)
-        for i, st in enumerate(states):
-            ra_i, dec_i = predict_radec_from_epoch(
-                st,
-                epoch,
-                obs,
-                tuple(args.perturbers),
-                args.max_step,
-                use_kepler=args.use_kepler,
-                allow_unknown_site=True,
-                light_time_iters=2,
-                full_physics=not args.no_full_physics,
-            )
-            pred_ra[i, :] = ra_i
-            pred_dec[i, :] = dec_i
+        if args.workers <= 1 or len(states) == 0:
+            for i, st in enumerate(states):
+                ra_i, dec_i = predict_radec_from_epoch(
+                    st,
+                    epoch,
+                    obs,
+                    tuple(args.perturbers),
+                    args.max_step,
+                    use_kepler=args.use_kepler,
+                    allow_unknown_site=True,
+                    light_time_iters=2,
+                    full_physics=not args.no_full_physics,
+                )
+                pred_ra[i, :] = ra_i
+                pred_dec[i, :] = dec_i
+        else:
+            chunk = args.chunk_size
+            if chunk <= 0:
+                chunk = max(1, int(math.ceil(len(states) / max(1, args.workers * 4))))
+            tasks = []
+            for start in range(0, len(states), chunk):
+                tasks.append(
+                    (
+                        states[start : start + chunk],
+                        epoch,
+                        obs,
+                        tuple(args.perturbers),
+                        args.max_step,
+                        args.use_kepler,
+                        not args.no_full_physics,
+                    )
+                )
+            offset = 0
+            with ProcessPoolExecutor(max_workers=args.workers) as executor:
+                for ra_chunk, dec_chunk in executor.map(_predict_chunk, tasks):
+                    pred_ra[offset : offset + len(ra_chunk), :] = ra_chunk
+                    pred_dec[offset : offset + len(dec_chunk), :] = dec_chunk
+                    offset += len(ra_chunk)
 
         ra_res = ((pred_ra - obs_ra[None, :] + 180.0) % 360.0 - 180.0) * 3600.0
         dec_res = (pred_dec - obs_dec[None, :]) * 3600.0

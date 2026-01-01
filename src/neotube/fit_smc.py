@@ -46,6 +46,7 @@ DAY_S = 86400.0
 _SCORE_CONTEXT: dict[str, object] = {}
 _SCORE_FULL_CONTEXT: dict[str, object] = {}
 _PREDICT_CONTEXT: dict[str, object] = {}
+_WORKER_ERROR_COUNT = 0
 
 try:
     from scipy.stats import qmc  # type: ignore
@@ -69,17 +70,13 @@ def _smc_worker_init(enable_faulthandler: bool) -> None:
     except Exception:
         pass
 
-
-def _q1_only_ladder(ladder: Sequence[PropagationConfig]) -> list[PropagationConfig]:
-    """Return a ladder that always produces canonical Q1 (no aberration/refraction)."""
-    return [
-        replace(cfg, full_physics=False, include_refraction=False)
-        for cfg in ladder
-    ]
-
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    try:
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    except Exception:
+        pass
 
     try:
         import numba as _nb
@@ -88,6 +85,39 @@ def _q1_only_ladder(ladder: Sequence[PropagationConfig]) -> list[PropagationConf
             _nb.set_num_threads(1)
         except Exception:
             pass
+    except Exception:
+        pass
+
+    try:
+        import numpy as _np
+
+        _np.seterr(divide="raise", over="raise", invalid="raise", under="ignore")
+    except Exception:
+        pass
+
+    try:
+        import signal as _sig
+
+        try:
+            faulthandler.register(_sig.SIGSEGV, all_threads=True, chain=False)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _q1_only_ladder(ladder: Sequence[PropagationConfig]) -> list[PropagationConfig]:
+    """Return a ladder that always produces canonical Q1 (no aberration/refraction)."""
+    return [replace(cfg, full_physics=False, include_refraction=False) for cfg in ladder]
+
+
+def _set_native_thread_env() -> None:
+    """Limit native library thread counts in the parent before spawning workers."""
+    try:
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
     except Exception:
         pass
 
@@ -118,22 +148,36 @@ def _score_states_full_chunk_args(args: tuple[np.ndarray, dict[str, object]]) ->
     obs = ctx["obs"]
     loglikes_local = np.zeros(len(states), dtype=float)
     for i, state in enumerate(states):
-        ra_pred, dec_pred = predict_radec_from_epoch(
-            state,
-            ctx["epoch"],
-            obs,
-            ctx["perturbers"],
-            ctx["max_step"],
-            use_kepler=ctx["use_kepler"],
-            allow_unknown_site=ctx["allow_unknown_site"],
-            light_time_iters=ctx["light_time_iters"],
-            full_physics=True,
-            obs_cache=ctx["obs_cache"],
-        )
-        ll = 0.0
-        for ra, dec, ob in zip(ra_pred, dec_pred, obs):
-            ll += _gaussian_loglike(float(ra), float(dec), ob, _sigma_arcsec(ob, ctx["site_kappas"]))
-        loglikes_local[i] = ll
+        try:
+            ra_pred, dec_pred = predict_radec_from_epoch(
+                state,
+                ctx["epoch"],
+                obs,
+                ctx["perturbers"],
+                ctx["max_step"],
+                use_kepler=ctx["use_kepler"],
+                allow_unknown_site=ctx["allow_unknown_site"],
+                light_time_iters=ctx["light_time_iters"],
+                full_physics=True,
+                obs_cache=ctx["obs_cache"],
+            )
+            ll = 0.0
+            for ra, dec, ob in zip(ra_pred, dec_pred, obs):
+                ll += _gaussian_loglike(
+                    float(ra),
+                    float(dec),
+                    ob,
+                    _sigma_arcsec(ob, ctx["site_kappas"]),
+                )
+            loglikes_local[i] = ll
+        except Exception as exc:
+            pid = os.getpid()
+            print(
+                f"[fit_smc worker pid={pid}] full scoring failed idx={i}: {exc}",
+                flush=True,
+            )
+            print(traceback.format_exc(), flush=True)
+            loglikes_local[i] = float("-inf")
     return loglikes_local
 
 
@@ -149,18 +193,33 @@ def _predict_contract_chunk_args(
         )
     if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
         print("[astropy-trace] predict_radec_with_contract start", flush=True)
-    result = predict_radec_with_contract(
-        states,
-        ctx["epoch"],
-        ctx["obs_chunk"],
-        epsilon_ast_arcsec=ctx["eps_arcsec"],
-        allow_unknown_site=ctx["allow_unknown_site"],
-        configs=ctx["ladder"],
-        obs_cache=ctx.get("obs_cache"),
-        obs_times_jd=ctx.get("obs_times_jd"),
-        sun_bary_km=ctx.get("sun_bary_km"),
-        use_cached_ephem=bool(ctx.get("use_cached_ephem")),
-    )
+    n_obs = len(ctx["obs_chunk"])
+    try:
+        result = predict_radec_with_contract(
+            states,
+            ctx["epoch"],
+            ctx["obs_chunk"],
+            epsilon_ast_arcsec=ctx["eps_arcsec"],
+            allow_unknown_site=ctx["allow_unknown_site"],
+            configs=ctx["ladder"],
+            obs_cache=ctx.get("obs_cache"),
+            obs_times_jd=ctx.get("obs_times_jd"),
+            sun_bary_km=ctx.get("sun_bary_km"),
+            use_cached_ephem=bool(ctx.get("use_cached_ephem")),
+        )
+    except Exception as exc:
+        global _WORKER_ERROR_COUNT
+        _WORKER_ERROR_COUNT += 1
+        if _WORKER_ERROR_COUNT <= 3:
+            pid = os.getpid()
+            msg = f"[fit_smc worker pid={pid}] predict_radec_with_contract failed: {exc}"
+            print(msg, flush=True)
+            print(traceback.format_exc(), flush=True)
+        ra = np.full((len(states), n_obs), np.nan, dtype=float)
+        dec = np.full((len(states), n_obs), np.nan, dtype=float)
+        used_level = np.zeros(len(states), dtype=int)
+        max_delta = np.zeros(len(states), dtype=float)
+        result = (ra, dec, used_level, max_delta)
     if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
         print("[astropy-trace] predict_radec_with_contract end", flush=True)
     if os.environ.get("NEOTUBE_TRACE_SEED", "0") == "1":
@@ -227,9 +286,26 @@ def _epsilon_arcsec_for_obs(
 
 
 def _gaussian_loglike(ra_pred: float, dec_pred: float, ob: Observation, sigma_arcsec: float) -> float:
+    if not (np.isfinite(ra_pred) and np.isfinite(dec_pred)):
+        return float("-inf")
     dra, ddec = _tangent_residuals(ra_pred, dec_pred, ob)
     res2 = (dra / sigma_arcsec) ** 2 + (ddec / sigma_arcsec) ** 2
     return float(-0.5 * res2)
+
+
+def _sanitize_loglikes(
+    loglikes: np.ndarray, *, label: str, log_fn: callable | None
+) -> np.ndarray:
+    finite_mask = np.isfinite(loglikes)
+    if not np.any(finite_mask):
+        if log_fn is not None:
+            log_fn(f"{label} loglikes all non-finite; aborting")
+        raise RuntimeError(f"{label} loglikes all non-finite")
+    if not np.all(finite_mask):
+        if log_fn is not None:
+            log_fn(f"{label} loglikes non-finite count={int(np.sum(~finite_mask))}")
+        loglikes = np.where(finite_mask, loglikes, -1e30)
+    return loglikes
 
 
 def _systematic_resample(states: np.ndarray, weights: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -458,6 +534,8 @@ def sequential_fit_replicas(
     checkpoint_path: str | None = None,
     resume: bool = False,
     checkpoint_every_obs: int = 1,
+    smc_iter_dir: str | None = None,
+    smc_iter_every_obs: int = 1,
     halt_before_seed_score: bool = False,
     seed_score_limit: int | None = None,
     seed_score_log_every: int = 10,
@@ -476,6 +554,10 @@ def sequential_fit_replicas(
         os.environ.setdefault("MKL_NUM_THREADS", "1")
         os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
         os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+    if smc_iter_dir is None and checkpoint_path:
+        ckpt_path = Path(checkpoint_path).expanduser().resolve()
+        smc_iter_dir = str(ckpt_path.with_name(f"{ckpt_path.stem}_iters"))
 
     t_start = time.perf_counter()
 
@@ -520,6 +602,43 @@ def sequential_fit_replicas(
             **payload,
         )
 
+    def _dump_smc_iter(
+        ob_idx: int,
+        states: np.ndarray,
+        weights: np.ndarray,
+        loglikes: np.ndarray,
+        obs_cache_single: ObsCache,
+    ) -> None:
+        if not smc_iter_dir:
+            return
+        dump_dir = Path(smc_iter_dir).expanduser().resolve()
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        out = dump_dir / f"smc_iter_{ob_idx:04d}.npz"
+        obs_bary = obs_cache_single.earth_bary_km[0] + obs_cache_single.site_pos_km[0]
+        obs_bary_vel = obs_cache_single.earth_bary_vel_km_s[0] + obs_cache_single.site_vel_km_s[0]
+        rel_pos = states[:, :3] - obs_bary[None, :]
+        rel_vel = states[:, 3:] - obs_bary_vel[None, :]
+        rho = np.linalg.norm(rel_pos, axis=1)
+        rho_safe = np.where(rho > 0.0, rho, np.nan)
+        rhodot = np.sum(rel_vel * rel_pos, axis=1) / rho_safe
+        ess = 1.0 / np.sum(weights**2)
+        unique_states = -1
+        if len(states) <= 50000:
+            unique_states = np.unique(np.round(states, 12), axis=0).shape[0]
+        summary = dict(
+            iter=int(ob_idx),
+            t=time.time(),
+            ess=float(ess),
+            mean_rho=float(np.nanmean(rho)),
+            std_rho=float(np.nanstd(rho)),
+            mean_rhodot=float(np.nanmean(rhodot)),
+            std_rhodot=float(np.nanstd(rhodot)),
+            n_unique_states=int(unique_states),
+            min_loglike=float(np.nanmin(loglikes)) if loglikes.size else float("nan"),
+            max_loglike=float(np.nanmax(loglikes)) if loglikes.size else float("nan"),
+        )
+        np.savez_compressed(out, states=states, weights=weights, summary=summary)
+
     def _load_checkpoint() -> tuple[np.ndarray, np.ndarray, int, str, dict[str, object] | None]:
         if not checkpoint_path:
             raise RuntimeError("checkpoint_path is required for resume.")
@@ -547,6 +666,7 @@ def sequential_fit_replicas(
     chunk_size = max(1, int(chunk_size))
     log_every_obs = max(1, int(log_every_obs))
     target_chunks = max(1, int(target_chunks))
+    smc_iter_every_obs = max(1, int(smc_iter_every_obs))
 
     _log(
         "start n_particles={} obs={} use_kepler={} full_physics_final={} auto_grow={} "
@@ -564,6 +684,7 @@ def sequential_fit_replicas(
     executor: Executor | None = None
     if worker_count > 1:
         try:
+            _set_native_thread_env()
             mp_ctx = None
             if mp_start_method:
                 mp_ctx = mp.get_context(mp_start_method)
@@ -773,6 +894,7 @@ def sequential_fit_replicas(
                 loglikes[i] += _gaussian_loglike(
                     float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma
                 )
+        loglikes = _sanitize_loglikes(loglikes, label="seed", log_fn=_log)
         loglikes -= float(np.max(loglikes))
         weights = np.exp(loglikes)
         weights = weights / np.sum(weights)
@@ -1152,6 +1274,11 @@ def sequential_fit_replicas(
                     states = states + jitter
                 _log("resampled ess={:.1f} -> uniform weights".format(ess))
 
+            if smc_iter_dir and (
+                ob_idx % smc_iter_every_obs == 0 or ob_idx == len(obs) - 1
+            ):
+                _dump_smc_iter(ob_idx, states, weights, loglikes, obs_cache_single)
+
             if checkpoint_path and (
                 ob_idx % checkpoint_every_obs == 0 or ob_idx == len(obs) - 1
             ):
@@ -1342,6 +1469,7 @@ def sequential_fit_replicas(
         final_exec = executor
         if final_exec is None and worker_count > 1:
             try:
+                _set_native_thread_env()
                 mp_ctx = None
                 if mp_start_method:
                     mp_ctx = mp.get_context(mp_start_method)
@@ -1382,6 +1510,7 @@ def sequential_fit_replicas(
                 None,
             )
             loglikes = _score_full_parallel(states, obs_cache_all, None)
+            loglikes = _sanitize_loglikes(loglikes, label="final", log_fn=_log)
         else:
             ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
                 states,
@@ -1390,6 +1519,7 @@ def sequential_fit_replicas(
                 final_exec,
             )
             loglikes = _score_full_parallel(states, obs_cache_all, final_exec)
+            loglikes = _sanitize_loglikes(loglikes, label="final", log_fn=_log)
             if final_exec is not executor:
                 final_exec.shutdown(wait=True)
         if shadow_diagnostics:
