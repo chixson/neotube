@@ -29,6 +29,7 @@ import os
 from astroquery.jplhorizons import Horizons
 
 from .sites import get_site_location, get_site_ephemeris
+from . import geometry
 
 try:
     import numba as nb
@@ -214,45 +215,22 @@ def shapiro_delay_sun(
 
 
 def aberrate_direction_first_order(topovec: np.ndarray, obs_vel_km_s: np.ndarray) -> np.ndarray:
-    """Apply first-order special-relativistic aberration to a topocentric direction."""
-    c_km_s = 299792.458
-    n = topovec / (np.linalg.norm(topovec) + 1e-30)
-    beta = obs_vel_km_s / c_km_s
-    nb_dot = float(np.dot(n, beta))
-    s = n + beta - nb_dot * n
-    return s / (np.linalg.norm(s) + 1e-30)
+    """Delegate to canonical geometry.aberrate_direction_first_order.
+
+    Keep the same semantics as previous implementation; this wrapper ensures
+    the repo uses the single canonical implementation in geometry.py.
+    """
+    return geometry.aberrate_direction_first_order(topovec, obs_vel_km_s)
 
 
 def bennett_refraction(zenith_rad: float) -> float:
-    """Bennett refraction approximation (radians)."""
-    z_deg = np.degrees(zenith_rad)
-    if z_deg >= 89.999:
-        return 0.0
-    r_arcmin = 1.02 / np.tan(np.radians(z_deg + 10.3 / (z_deg + 5.11)))
-    return float(np.radians(r_arcmin / 60.0))
+    """Delegate to canonical geometry.bennett_refraction."""
+    return geometry.bennett_refraction(zenith_rad)
 
 
 def _apply_bennett_refraction(topounit: np.ndarray, site_pos_km: np.ndarray) -> np.ndarray:
-    site_norm = float(np.linalg.norm(site_pos_km))
-    if site_norm <= 0.0:
-        return topounit
-    if site_norm < 5000.0 or site_norm > 7000.0:
-        return topounit
-    z_hat = site_pos_km / site_norm
-    cos_z = float(np.clip(np.dot(topounit, z_hat), -1.0, 1.0))
-    z = float(np.arccos(cos_z))
-    if not np.isfinite(z) or z <= 0.0:
-        return topounit
-    delta = bennett_refraction(z)
-    if delta <= 0.0 or delta >= z:
-        return topounit
-    perp = topounit - cos_z * z_hat
-    perp_norm = float(np.linalg.norm(perp))
-    if perp_norm <= 0.0:
-        return topounit
-    e_perp = perp / perp_norm
-    z_prime = z - delta
-    return e_perp * np.sin(z_prime) + z_hat * np.cos(z_prime)
+    """Delegate to canonical geometry.apply_bennett_refraction."""
+    return geometry.apply_bennett_refraction(topounit, site_pos_km)
 
 
 def default_propagation_ladder(max_step: float = 3600.0) -> list[PropagationConfig]:
@@ -1275,21 +1253,39 @@ def predict_radec_from_epoch(
             obj_bary = state[:3] + earth_bary * 0.0
 
         topovec = obj_bary - obs_bary
+        use_geometry_q = (
+            ob.site is not None
+            and ob.observer_pos_km is None
+            and not include_refraction
+        )
+        if use_geometry_q:
+            try:
+                q = geometry.compute_q1_q45(
+                    np.asarray(obj_bary, dtype=float).reshape((1, 3)),
+                    None,
+                    ob.site,
+                    t_emit,
+                    t_obs_tdb,
+                    lambda t: _body_posvel_km_single("earth", t),
+                )
+                if full_physics:
+                    ra_vals[idx] = float(q["q45"][0])
+                    dec_vals[idx] = float(q["q45"][1])
+                else:
+                    ra_vals[idx] = float(q["q1"][0])
+                    dec_vals[idx] = float(q["q1"][1])
+                continue
+            except Exception:
+                use_geometry_q = False
+
         if full_physics:
-            topounit = aberrate_direction_first_order(topovec, obs_bary_vel)
+            topounit = geometry.aberrate_direction_first_order(topovec, obs_bary_vel)
             if include_refraction:
-                topounit = _apply_bennett_refraction(topounit, site_pos)
-            xy = np.hypot(topounit[0], topounit[1])
-            ra_vals[idx] = (
-                np.degrees(np.arctan2(topounit[1], topounit[0])) + 360.0
-            ) % 360.0
-            dec_vals[idx] = np.degrees(np.arctan2(topounit[2], xy))
+                topounit = geometry.apply_bennett_refraction(topounit, site_pos)
+            ra_vals[idx], dec_vals[idx] = geometry.unit_to_radec(topounit)
         else:
-            xy = np.hypot(topovec[0], topovec[1])
-            ra_vals[idx] = (
-                np.degrees(np.arctan2(topovec[1], topovec[0])) + 360.0
-            ) % 360.0
-            dec_vals[idx] = np.degrees(np.arctan2(topovec[2], xy))
+            topounit = topovec / (np.linalg.norm(topovec) + 1e-30)
+            ra_vals[idx], dec_vals[idx] = geometry.unit_to_radec(topounit)
 
     return ra_vals, dec_vals
 

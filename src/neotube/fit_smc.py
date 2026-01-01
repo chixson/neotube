@@ -10,7 +10,7 @@ from concurrent.futures import Executor, ThreadPoolExecutor, ProcessPoolExecutor
 import faulthandler
 import multiprocessing as mp
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
 import numpy as np
@@ -68,6 +68,14 @@ def _smc_worker_init(enable_faulthandler: bool) -> None:
             faulthandler.enable(all_threads=True, file=sys.stderr)
     except Exception:
         pass
+
+
+def _q1_only_ladder(ladder: Sequence[PropagationConfig]) -> list[PropagationConfig]:
+    """Return a ladder that always produces canonical Q1 (no aberration/refraction)."""
+    return [
+        replace(cfg, full_physics=False, include_refraction=False)
+        for cfg in ladder
+    ]
 
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -531,7 +539,7 @@ def sequential_fit_replicas(
     obs3 = obs[:3]
     epoch = obs3[1].time
     rng = np.random.default_rng(seed)
-    ladder = default_propagation_ladder(max_step=max_step)
+    ladder = _q1_only_ladder(default_propagation_ladder(max_step=max_step))
     if not use_kepler:
         ladder = [cfg for cfg in ladder if cfg.model != "kepler"]
     worker_count = max(1, int(workers or 1))
@@ -822,11 +830,7 @@ def sequential_fit_replicas(
     seed_use_cached = worker_count > 1
     seed_configs = ladder
     if seed_use_cached:
-        seed_configs = [
-            cfg
-            for cfg in default_propagation_ladder(max_step=max_step)
-            if cfg.model == "kepler"
-        ]
+        seed_configs = [cfg for cfg in ladder if cfg.model == "kepler"]
         if not seed_configs:
             seed_use_cached = False
         elif not use_kepler:

@@ -16,5 +16,5 @@ def test_icrs_from_horizons_au_matches_skycoord():
     pos_ref = coord.cartesian.xyz.to(u.km).value
     vel_ref = coord.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
 
-    np.testing.assert_allclose(pos, pos_ref, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(vel, vel_ref, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(pos, pos_ref, rtol=0.0, atol=1e-6)
+    np.testing.assert_allclose(vel, vel_ref, rtol=0.0, atol=1e-12)

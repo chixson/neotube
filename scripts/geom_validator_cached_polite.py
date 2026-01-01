@@ -68,6 +68,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+try:
+    from neotube import geometry as nt_geometry
+except Exception:
+    nt_geometry = None
+
 # Try to import NEOTube polite requester; if unavailable, fall back to local implementation.
 try:
     from neotube.cli import request_with_backoff, GlobalRateLimiter  # type: ignore
@@ -728,17 +733,56 @@ def predict_apparent_radec_for_obs(
             t_guess = t_new
         r_topo = obj_bary[:3] - site_bary_km
         s_unit = r_topo / (np.linalg.norm(r_topo) + 1e-30)
-        if os.environ.get("NEOTUBE_DEBUG_USE_ABERRATION") == "1":
-            if os.environ.get("NEOTUBE_DEBUG_ABERR_REL") == "1":
-                s_ab = aberrate_relativistic(s_unit, site_vel_bary_km_s)
-            else:
-                if os.environ.get("NEOTUBE_DEBUG_ABERR_SIGN") == "1":
-                    s_ab = aberrate_direction_first_order(s_unit, -site_vel_bary_km_s)
+        use_aberration = os.environ.get("NEOTUBE_DEBUG_USE_ABERRATION") == "1"
+        use_rel = os.environ.get("NEOTUBE_DEBUG_ABERR_REL") == "1"
+        use_flip = os.environ.get("NEOTUBE_DEBUG_ABERR_SIGN") == "1"
+        use_geometry = (
+            nt_geometry is not None
+            and site_ecef_km is not None
+            and earth_bary_km is not None
+            and earth_vel_km_s is not None
+            and not use_rel
+            and not use_flip
+        )
+        if use_geometry:
+            t_em = t_obs_tdb - TimeDelta(float(last_tau if last_tau is not None else tau), format="sec")
+            def _earth_bary(_t):
+                return earth_bary_km, earth_vel_km_s
+            try:
+                try:
+                    site_bary_geom, _site_vel_geom = nt_geometry.site_ecef_to_barycentric(
+                        site_ecef_km, t_obs, _earth_bary
+                    )
+                    r_topo = obj_bary[:3] - site_bary_geom
+                except Exception:
+                    pass
+                q = nt_geometry.compute_q1_q45(
+                    np.asarray(obj_bary[:3], dtype=float).reshape((1, 3)),
+                    None,
+                    site_ecef_km,
+                    t_em,
+                    t_obs,
+                    _earth_bary,
+                )
+                if use_aberration:
+                    ra_deg, dec_deg = q["q45"]
                 else:
-                    s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
-        else:
-            s_ab = s_unit
-        ra_deg, dec_deg = unit_to_radec(s_ab)
+                    ra_deg, dec_deg = q["q1"]
+                s_ab = nt_geometry.radec_to_unit(ra_deg, dec_deg).reshape(3,)
+            except Exception:
+                use_geometry = False
+        if not use_geometry:
+            if use_aberration:
+                if use_rel:
+                    s_ab = aberrate_relativistic(s_unit, site_vel_bary_km_s)
+                else:
+                    if use_flip:
+                        s_ab = aberrate_direction_first_order(s_unit, -site_vel_bary_km_s)
+                    else:
+                        s_ab = aberrate_direction_first_order(s_unit, site_vel_bary_km_s)
+            else:
+                s_ab = s_unit
+            ra_deg, dec_deg = unit_to_radec(s_ab)
         debug = PredictDebug(
             iterations=it + 1,
             tau_s=float(last_tau if last_tau is not None else 0.0),

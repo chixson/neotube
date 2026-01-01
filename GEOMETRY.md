@@ -136,6 +136,21 @@ Important code rules in the repo:
   apparent-inertial, Q1 for astrometric). Q2 is a special "of-date" product — treat
   comparisons to it explicitly and transform into TETE.
 
+### Canonical geometry API (new)
+
+Use the unified helpers in `src/neotube/geometry.py` instead of re-implementing math:
+
+* `light_time_iterate(...)` — vectorized geometric light-time iteration.
+* `mpc_site_to_ecef_km(...)` — MPC site code -> ECEF km.
+* `site_ecef_to_barycentric(...)` — ECEF -> barycentric (Earth bary + site GCRS).
+* `aberrate_direction_first_order(...)`, `bennett_refraction(...)`,
+  `apply_bennett_refraction(...)`.
+* `astropy_apparent_radec(...)` — Path B wrapper (ICRS@t_em -> AltAz@t_obs -> ICRS/TETE).
+* `compute_q1_q45(...)` — convenience function returning Q1 and Q45 RA/Dec.
+
+These are now the canonical, shared implementations; new code should call them rather
+than duplicating geometry logic in scripts or fit code.
+
 ## 5 — Recipes (exact code snippets)
 
 ### A — Canonical Path A (astrometric/Q1 by default; optional aberration => Q45)
@@ -259,4 +274,3 @@ Notes:
 * If you must produce "apparent-of-date" RA/Dec for pointing: transform your inertial
   apparent vector to TETE and compare to Q2; you will need to match Horizons’ exact
   precession/nutation model to close the remaining few arcseconds.
-
