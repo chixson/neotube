@@ -1,0 +1,14 @@
+{
+  "target": "1",
+  "perturbers": [
+    "earth",
+    "mars",
+    "jupiter"
+  ],
+  "sigma_arcsec": null,
+  "obs_file": "runs/ceres/obs.csv",
+  "seed_method": "attributable",
+  "likelihood": "studentt",
+  "nu": 4.0,
+  "allow_unknown_site": false
+}

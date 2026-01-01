@@ -226,6 +226,7 @@ def main() -> int:
         residuals_rows.append(
             {
                 "time_utc": obs.time.isot,
+                "site": obs.site or "UNK",
                 "ra_obs_deg": obs.ra_deg,
                 "dec_obs_deg": obs.dec_deg,
                 "ra_pred_deg": ra_pred,
@@ -285,6 +286,7 @@ def main() -> int:
             fh,
             fieldnames=[
                 "time_utc",
+                "site",
                 "ra_obs_deg",
                 "dec_obs_deg",
                 "ra_pred_deg",

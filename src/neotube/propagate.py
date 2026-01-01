@@ -160,6 +160,7 @@ class PropagationConfig:
     max_step: float = 3600.0
     light_time_iters: int = 2
     full_physics: bool = False
+    include_aberration: bool = False
     include_refraction: bool = False
     adaptive_step: bool = True
     step_scale: float = 0.05
@@ -241,6 +242,7 @@ def default_propagation_ladder(max_step: float = 3600.0) -> list[PropagationConf
             perturbers=(),
             max_step=max_step,
             full_physics=False,
+            include_aberration=False,
             adaptive_step=False,
         ),
         PropagationConfig(
@@ -248,6 +250,7 @@ def default_propagation_ladder(max_step: float = 3600.0) -> list[PropagationConf
             perturbers=(),
             max_step=max_step,
             full_physics=True,
+            include_aberration=False,
             adaptive_step=False,
         ),
         PropagationConfig(
@@ -255,6 +258,7 @@ def default_propagation_ladder(max_step: float = 3600.0) -> list[PropagationConf
             perturbers=("earth", "mars", "jupiter"),
             max_step=max_step,
             full_physics=False,
+            include_aberration=False,
             adaptive_step=True,
         ),
         PropagationConfig(
@@ -262,6 +266,7 @@ def default_propagation_ladder(max_step: float = 3600.0) -> list[PropagationConf
             perturbers=("earth", "mars", "jupiter"),
             max_step=max_step,
             full_physics=True,
+            include_aberration=False,
             adaptive_step=True,
         ),
         PropagationConfig(
@@ -269,6 +274,7 @@ def default_propagation_ladder(max_step: float = 3600.0) -> list[PropagationConf
             perturbers=("mercury", "venus", "earth", "mars", "jupiter", "saturn", "uranus", "neptune"),
             max_step=max_step / 6.0,
             full_physics=True,
+            include_aberration=False,
             adaptive_step=True,
             step_scale=0.02,
         ),
@@ -389,6 +395,7 @@ def _predict_with_config(
             max_step=max_step,
             light_time_iters=config.light_time_iters,
             full_physics=config.full_physics,
+            include_aberration=config.include_aberration,
             include_refraction=config.include_refraction,
             require_kepler=True,
         )
@@ -402,6 +409,7 @@ def _predict_with_config(
         allow_unknown_site=allow_unknown_site,
         light_time_iters=config.light_time_iters,
         full_physics=config.full_physics,
+        include_aberration=config.include_aberration,
         include_refraction=config.include_refraction,
         obs_cache=obs_cache,
     )
@@ -1196,10 +1204,14 @@ def predict_radec_from_epoch(
     allow_unknown_site: bool = True,
     light_time_iters: int = 2,
     full_physics: bool = False,
+    include_aberration: bool = False,
     include_refraction: bool = False,
     obs_cache: ObsCache | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute astrometric topocentric RA/Dec (ICRS) from a heliocentric state with light-time."""
+    """Compute topocentric RA/Dec (ICRS) from a heliocentric state with light-time.
+
+    full_physics enables Shapiro delay; include_aberration toggles Q45-style aberration.
+    """
     if not obs:
         return np.empty(0, dtype=float), np.empty(0, dtype=float)
 
@@ -1269,8 +1281,12 @@ def predict_radec_from_epoch(
                     lambda t: _body_posvel_km_single("earth", t),
                 )
                 if full_physics:
-                    ra_vals[idx] = float(q["q45"][0])
-                    dec_vals[idx] = float(q["q45"][1])
+                    if include_aberration:
+                        ra_vals[idx] = float(q["q45"][0])
+                        dec_vals[idx] = float(q["q45"][1])
+                    else:
+                        ra_vals[idx] = float(q["q1"][0])
+                        dec_vals[idx] = float(q["q1"][1])
                 else:
                     ra_vals[idx] = float(q["q1"][0])
                     dec_vals[idx] = float(q["q1"][1])
@@ -1279,7 +1295,10 @@ def predict_radec_from_epoch(
                 use_geometry_q = False
 
         if full_physics:
-            topounit = geometry.aberrate_direction_first_order(topovec, obs_bary_vel)
+            if include_aberration:
+                topounit = geometry.aberrate_direction_first_order(topovec, obs_bary_vel)
+            else:
+                topounit = topovec / (np.linalg.norm(topovec) + 1e-30)
             if include_refraction:
                 topounit = geometry.apply_bennett_refraction(topounit, site_pos)
             ra_vals[idx], dec_vals[idx] = geometry.unit_to_radec(topounit)
@@ -1315,10 +1334,14 @@ def predict_radec_from_epoch_cached(
     max_step: float = 3600.0,
     light_time_iters: int = 2,
     full_physics: bool = False,
+    include_aberration: bool = False,
     include_refraction: bool = False,
     require_kepler: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Astropy-free RA/Dec prediction using cached ephemeris arrays."""
+    """Astropy-free RA/Dec prediction using cached ephemeris arrays.
+
+    full_physics enables Shapiro delay; include_aberration toggles Q45-style aberration.
+    """
     if not obs_times_jd.size:
         return np.empty(0, dtype=float), np.empty(0, dtype=float)
     if require_kepler is False:
@@ -1371,7 +1394,10 @@ def predict_radec_from_epoch_cached(
 
         topovec = obj_bary - obs_bary
         if full_physics:
-            topounit = aberrate_direction_first_order(topovec, obs_bary_vel)
+            if include_aberration:
+                topounit = aberrate_direction_first_order(topovec, obs_bary_vel)
+            else:
+                topounit = topovec / (np.linalg.norm(topovec) + 1e-30)
             if include_refraction:
                 topounit = _apply_bennett_refraction(topounit, site_pos)
             xy = np.hypot(topounit[0], topounit[1])
@@ -1396,9 +1422,13 @@ def predict_radec_with_geometry(
     allow_unknown_site: bool = True,
     light_time_iters: int = 2,
     full_physics: bool = False,
+    include_aberration: bool = False,
     include_refraction: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Compute RA/Dec plus heliocentric r, topocentric delta, and phase angle (rad)."""
+    """Compute RA/Dec plus heliocentric r, topocentric delta, and phase angle (rad).
+
+    full_physics enables Shapiro delay; include_aberration toggles Q45-style aberration.
+    """
     if not obs:
         empty = np.empty(0, dtype=float)
         return empty, empty, empty, empty, empty
@@ -1466,7 +1496,10 @@ def predict_radec_with_geometry(
         obs_bary_vel = earth_bary_vel + site_vel
         topovec = obj_bary - obs_bary
         if full_physics:
-            topounit = aberrate_direction_first_order(topovec, obs_bary_vel)
+            if include_aberration:
+                topounit = aberrate_direction_first_order(topovec, obs_bary_vel)
+            else:
+                topounit = topovec / (np.linalg.norm(topovec) + 1e-30)
             if include_refraction:
                 topounit = _apply_bennett_refraction(topounit, site_pos)
             xy = np.hypot(topounit[0], topounit[1])
@@ -1671,9 +1704,13 @@ def predict_radec_batch(
     light_time_mode: str = "auto",
     light_time_iters: int = 2,
     full_physics: bool = False,
+    include_aberration: bool = False,
     include_refraction: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Vectorized astrometric topocentric RA/Dec (ICRS) for many heliocentric states/times."""
+    """Vectorized topocentric RA/Dec (ICRS) for many heliocentric states/times.
+
+    full_physics enables Shapiro delay; include_aberration toggles Q45-style aberration.
+    """
     if len(epochs) == 0:
         return np.empty(0, dtype=float), np.empty(0, dtype=float)
 
@@ -1779,7 +1816,10 @@ def predict_radec_batch(
             if obj_bary_exact is None:
                 obj_bary_exact = obj_bary_lt[idx]
             topovec = obj_bary_exact - obs_b
-            topounit = aberrate_direction_first_order(topovec, obs_b_vel)
+            if include_aberration:
+                topounit = aberrate_direction_first_order(topovec, obs_b_vel)
+            else:
+                topounit = topovec / (np.linalg.norm(topovec) + 1e-30)
             if include_refraction:
                 topounit = _apply_bennett_refraction(topounit, obs_pos_km[idx])
             xy = np.hypot(topounit[0], topounit[1])

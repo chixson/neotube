@@ -1,0 +1,346 @@
+[fit_smc 2026-01-01 02:27:02 +     0.0s] start n_particles=2000 obs=10 use_kepler=False full_physics_final=True auto_grow=False workers=50 chunk_size=2
+[fit_smc 2026-01-01 02:27:02 +     0.0s] creating ProcessPoolExecutor mp_start_method=spawn
+[fit_smc 2026-01-01 02:27:49 +    47.4s] seeded 2000 states (valid=1540)
+[fit_smc 2026-01-01 02:27:49 +    47.4s] seed scoring start (n=2000)
+[fit_smc 2026-01-01 02:27:59 +    56.7s] seed score chunks 10/1000
+[fit_smc 2026-01-01 02:27:59 +    57.1s] seed score chunks 20/1000
+[fit_smc 2026-01-01 02:27:59 +    57.2s] seed score chunks 30/1000
+[fit_smc 2026-01-01 02:27:59 +    57.2s] seed score chunks 40/1000
+[fit_smc 2026-01-01 02:27:59 +    57.2s] seed score chunks 50/1000
+[fit_smc 2026-01-01 02:27:59 +    57.2s] seed score chunks 60/1000
+[fit_smc 2026-01-01 02:27:59 +    57.3s] seed score chunks 70/1000
+[fit_smc 2026-01-01 02:27:59 +    57.4s] seed score chunks 80/1000
+[fit_smc 2026-01-01 02:27:59 +    57.5s] seed score chunks 90/1000
+[fit_smc 2026-01-01 02:28:00 +    57.6s] seed score chunks 100/1000
+[fit_smc 2026-01-01 02:28:00 +    57.6s] seed score chunks 110/1000
+[fit_smc 2026-01-01 02:28:00 +    57.7s] seed score chunks 120/1000
+[fit_smc 2026-01-01 02:28:00 +    57.8s] seed score chunks 130/1000
+[fit_smc 2026-01-01 02:28:00 +    57.9s] seed score chunks 140/1000
+[fit_smc 2026-01-01 02:28:00 +    57.9s] seed score chunks 150/1000
+[fit_smc 2026-01-01 02:28:00 +    58.0s] seed score chunks 160/1000
+[fit_smc 2026-01-01 02:28:00 +    58.1s] seed score chunks 170/1000
+[fit_smc 2026-01-01 02:28:00 +    58.2s] seed score chunks 180/1000
+[fit_smc 2026-01-01 02:28:00 +    58.3s] seed score chunks 190/1000
+[fit_smc 2026-01-01 02:28:00 +    58.4s] seed score chunks 200/1000
+[fit_smc 2026-01-01 02:28:00 +    58.4s] seed score chunks 210/1000
+[fit_smc 2026-01-01 02:28:00 +    58.5s] seed score chunks 220/1000
+[fit_smc 2026-01-01 02:28:01 +    58.6s] seed score chunks 230/1000
+[fit_smc 2026-01-01 02:28:01 +    58.6s] seed score chunks 240/1000
+[fit_smc 2026-01-01 02:28:01 +    58.7s] seed score chunks 250/1000
+[fit_smc 2026-01-01 02:28:01 +    58.7s] seed score chunks 260/1000
+[fit_smc 2026-01-01 02:28:01 +    58.8s] seed score chunks 270/1000
+[fit_smc 2026-01-01 02:28:01 +    58.9s] seed score chunks 280/1000
+[fit_smc 2026-01-01 02:28:01 +    59.0s] seed score chunks 290/1000
+[fit_smc 2026-01-01 02:28:01 +    59.0s] seed score chunks 300/1000
+[fit_smc 2026-01-01 02:28:01 +    59.1s] seed score chunks 310/1000
+[fit_smc 2026-01-01 02:28:01 +    59.2s] seed score chunks 320/1000
+[fit_smc 2026-01-01 02:28:01 +    59.3s] seed score chunks 330/1000
+[fit_smc 2026-01-01 02:28:01 +    59.4s] seed score chunks 340/1000
+[fit_smc 2026-01-01 02:28:01 +    59.4s] seed score chunks 350/1000
+[fit_smc 2026-01-01 02:28:01 +    59.4s] seed score chunks 360/1000
+[fit_smc 2026-01-01 02:28:02 +    59.5s] seed score chunks 370/1000
+[fit_smc 2026-01-01 02:28:02 +    59.6s] seed score chunks 380/1000
+[fit_smc 2026-01-01 02:28:02 +    59.7s] seed score chunks 390/1000
+[fit_smc 2026-01-01 02:28:02 +    59.7s] seed score chunks 400/1000
+[fit_smc 2026-01-01 02:28:02 +    59.8s] seed score chunks 410/1000
+[fit_smc 2026-01-01 02:28:02 +    59.9s] seed score chunks 420/1000
+[fit_smc 2026-01-01 02:28:02 +    59.9s] seed score chunks 430/1000
+[fit_smc 2026-01-01 02:28:02 +    60.1s] seed score chunks 440/1000
+[fit_smc 2026-01-01 02:28:02 +    60.1s] seed score chunks 450/1000
+[fit_smc 2026-01-01 02:28:02 +    60.2s] seed score chunks 460/1000
+[fit_smc 2026-01-01 02:28:02 +    60.2s] seed score chunks 470/1000
+[fit_smc 2026-01-01 02:28:02 +    60.3s] seed score chunks 480/1000
+[fit_smc 2026-01-01 02:28:02 +    60.4s] seed score chunks 490/1000
+[fit_smc 2026-01-01 02:28:02 +    60.4s] seed score chunks 500/1000
+[fit_smc 2026-01-01 02:28:03 +    60.5s] seed score chunks 510/1000
+[fit_smc 2026-01-01 02:28:03 +    60.6s] seed score chunks 520/1000
+[fit_smc 2026-01-01 02:28:03 +    60.7s] seed score chunks 530/1000
+[fit_smc 2026-01-01 02:28:03 +    60.7s] seed score chunks 540/1000
+[fit_smc 2026-01-01 02:28:03 +    60.8s] seed score chunks 550/1000
+[fit_smc 2026-01-01 02:28:03 +    60.9s] seed score chunks 560/1000
+[fit_smc 2026-01-01 02:28:03 +    60.9s] seed score chunks 570/1000
+[fit_smc 2026-01-01 02:28:03 +    61.0s] seed score chunks 580/1000
+[fit_smc 2026-01-01 02:28:03 +    61.1s] seed score chunks 590/1000
+[fit_smc 2026-01-01 02:28:03 +    61.1s] seed score chunks 600/1000
+[fit_smc 2026-01-01 02:28:03 +    61.2s] seed score chunks 610/1000
+[fit_smc 2026-01-01 02:28:03 +    61.3s] seed score chunks 620/1000
+[fit_smc 2026-01-01 02:28:03 +    61.4s] seed score chunks 630/1000
+[fit_smc 2026-01-01 02:28:03 +    61.4s] seed score chunks 640/1000
+[fit_smc 2026-01-01 02:28:04 +    61.5s] seed score chunks 650/1000
+[fit_smc 2026-01-01 02:28:04 +    61.6s] seed score chunks 660/1000
+[fit_smc 2026-01-01 02:28:04 +    61.6s] seed score chunks 670/1000
+[fit_smc 2026-01-01 02:28:04 +    61.7s] seed score chunks 680/1000
+[fit_smc 2026-01-01 02:28:04 +    61.8s] seed score chunks 690/1000
+[fit_smc 2026-01-01 02:28:04 +    61.8s] seed score chunks 700/1000
+[fit_smc 2026-01-01 02:28:04 +    61.9s] seed score chunks 710/1000
+[fit_smc 2026-01-01 02:28:04 +    62.0s] seed score chunks 720/1000
+[fit_smc 2026-01-01 02:28:04 +    62.1s] seed score chunks 730/1000
+[fit_smc 2026-01-01 02:28:04 +    62.1s] seed score chunks 740/1000
+[fit_smc 2026-01-01 02:28:04 +    62.2s] seed score chunks 750/1000
+[fit_smc 2026-01-01 02:28:04 +    62.3s] seed score chunks 760/1000
+[fit_smc 2026-01-01 02:28:04 +    62.3s] seed score chunks 770/1000
+[fit_smc 2026-01-01 02:28:04 +    62.5s] seed score chunks 780/1000
+[fit_smc 2026-01-01 02:28:05 +    62.5s] seed score chunks 790/1000
+[fit_smc 2026-01-01 02:28:05 +    62.6s] seed score chunks 800/1000
+[fit_smc 2026-01-01 02:28:05 +    62.6s] seed score chunks 810/1000
+[fit_smc 2026-01-01 02:28:05 +    62.7s] seed score chunks 820/1000
+[fit_smc 2026-01-01 02:28:05 +    62.8s] seed score chunks 830/1000
+[fit_smc 2026-01-01 02:28:05 +    62.8s] seed score chunks 840/1000
+[fit_smc 2026-01-01 02:28:05 +    62.9s] seed score chunks 850/1000
+[fit_smc 2026-01-01 02:28:05 +    63.0s] seed score chunks 860/1000
+[fit_smc 2026-01-01 02:28:05 +    63.0s] seed score chunks 870/1000
+[fit_smc 2026-01-01 02:28:05 +    63.1s] seed score chunks 880/1000
+[fit_smc 2026-01-01 02:28:05 +    63.2s] seed score chunks 890/1000
+[fit_smc 2026-01-01 02:28:05 +    63.3s] seed score chunks 900/1000
+[fit_smc 2026-01-01 02:28:05 +    63.3s] seed score chunks 910/1000
+[fit_smc 2026-01-01 02:28:05 +    63.4s] seed score chunks 920/1000
+[fit_smc 2026-01-01 02:28:06 +    63.5s] seed score chunks 930/1000
+[fit_smc 2026-01-01 02:28:06 +    63.6s] seed score chunks 940/1000
+[fit_smc 2026-01-01 02:28:06 +    63.6s] seed score chunks 950/1000
+[fit_smc 2026-01-01 02:28:06 +    63.7s] seed score chunks 960/1000
+[fit_smc 2026-01-01 02:28:06 +    63.7s] seed score chunks 970/1000
+[fit_smc 2026-01-01 02:28:06 +    63.9s] seed score chunks 980/1000
+[fit_smc 2026-01-01 02:28:06 +    63.9s] seed score chunks 990/1000
+[fit_smc 2026-01-01 02:28:06 +    63.9s] seed score chunks 1000/1000
+[fit_smc 2026-01-01 02:28:06 +    63.9s] seed scoring done ess=2.0 used_level_max=0 shadow_max_arcsec=0.0043 (n=2000)
+[fit_smc 2026-01-01 02:28:06 +    63.9s] seed scoring complete; starting assimilation from obs index 3
+[fit_smc 2026-01-01 02:28:06 +    63.9s] entering obs loop at index 3
+[fit_smc 2026-01-01 02:28:06 +    63.9s] obs 3 start (n=2000)
+[fit_smc 2026-01-01 02:28:06 +    63.9s] obs 3 uses cached Kepler config for stability (override --no-kepler).
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:656: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:662: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:656: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:662: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:656: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:662: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:656: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:662: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:656: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:662: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+[fit_smc 2026-01-01 02:28:11 +    68.9s] obs 3 ess=2.0 used_level_max=0 shadow_max_arcsec=0.0043
+[fit_smc 2026-01-01 02:28:11 +    68.9s] obs 3 loglike[min/med/max]=[-797959924477.025/-5575932.531/-207.158] weight[min/med/max]=[0.000e+00/0.000e+00/5.000e-01]
+[fit_smc 2026-01-01 02:28:11 +    68.9s] resampled ess=2.0 -> uniform weights
+[fit_smc 2026-01-01 02:28:11 +    68.9s] obs 4 start (n=2000)
+[fit_smc 2026-01-01 02:28:11 +    68.9s] obs 4 uses cached Kepler config for stability (override --no-kepler).
+[fit_smc 2026-01-01 02:28:12 +    70.3s] obs 4 ess=2.3 used_level_max=0 shadow_max_arcsec=0.0043
+[fit_smc 2026-01-01 02:28:12 +    70.3s] obs 4 loglike[min/med/max]=[-816.853/-221.823/-0.540] weight[min/med/max]=[0.000e+00/4.472e-97/5.655e-01]
+[fit_smc 2026-01-01 02:28:12 +    70.3s] resampled ess=2.3 -> uniform weights
+[fit_smc 2026-01-01 02:28:12 +    70.3s] obs 5 start (n=2000)
+[fit_smc 2026-01-01 02:28:12 +    70.3s] obs 5 uses cached Kepler config for stability (override --no-kepler).
+[fit_smc 2026-01-01 02:28:14 +    71.9s] obs 5 ess=89.0 used_level_max=0 shadow_max_arcsec=0.0043
+[fit_smc 2026-01-01 02:28:14 +    71.9s] obs 5 loglike[min/med/max]=[-518.657/-28.029/-0.016] weight[min/med/max]=[1.277e-227/1.525e-14/2.234e-02]
+[fit_smc 2026-01-01 02:28:14 +    71.9s] resampled ess=89.0 -> uniform weights
+[fit_smc 2026-01-01 02:28:14 +    71.9s] obs 6 start (n=2000)
+[fit_smc 2026-01-01 02:28:14 +    71.9s] obs 6 uses cached Kepler config for stability (override --no-kepler).
+[fit_smc 2026-01-01 02:28:16 +    73.5s] obs 6 ess=3.3 used_level_max=0 shadow_max_arcsec=0.0031
+[fit_smc 2026-01-01 02:28:16 +    73.5s] obs 6 loglike[min/med/max]=[-2059.487/-348.643/-0.907] weight[min/med/max]=[0.000e+00/4.986e-152/5.215e-01]
+[fit_smc 2026-01-01 02:28:16 +    73.5s] resampled ess=3.3 -> uniform weights
+[fit_smc 2026-01-01 02:28:16 +    73.5s] obs 7 start (n=2000)
+[fit_smc 2026-01-01 02:28:16 +    73.5s] obs 7 uses cached Kepler config for stability (override --no-kepler).
+[fit_smc 2026-01-01 02:28:17 +    75.0s] obs 7 ess=27.6 used_level_max=0 shadow_max_arcsec=0.0043
+[fit_smc 2026-01-01 02:28:17 +    75.0s] obs 7 loglike[min/med/max]=[-1083.863/-104.265/-0.130] weight[min/med/max]=[0.000e+00/3.793e-47/6.371e-02]
+[fit_smc 2026-01-01 02:28:17 +    75.0s] resampled ess=27.6 -> uniform weights
+[fit_smc 2026-01-01 02:28:17 +    75.0s] obs 8 start (n=2000)
+[fit_smc 2026-01-01 02:28:17 +    75.0s] obs 8 uses cached Kepler config for stability (override --no-kepler).
+[fit_smc 2026-01-01 02:28:18 +    76.4s] obs 8 ess=5.9 used_level_max=0 shadow_max_arcsec=0.0031
+[fit_smc 2026-01-01 02:28:18 +    76.4s] obs 8 loglike[min/med/max]=[-21009.228/-1689.612/-2.315] weight[min/med/max]=[0.000e+00/0.000e+00/2.111e-01]
+[fit_smc 2026-01-01 02:28:18 +    76.4s] resampled ess=5.9 -> uniform weights
+[fit_smc 2026-01-01 02:28:18 +    76.4s] obs 9 start (n=2000)
+[fit_smc 2026-01-01 02:28:18 +    76.4s] obs 9 uses cached Kepler config for stability (override --no-kepler).
+[fit_smc 2026-01-01 02:28:20 +    77.9s] obs 9 ess=1.0 used_level_max=0 shadow_max_arcsec=0.0043
+[fit_smc 2026-01-01 02:28:20 +    77.9s] obs 9 loglike[min/med/max]=[-259437166.313/-194752608.745/-146939043.386] weight[min/med/max]=[0.000e+00/0.000e+00/1.000e+00]
+[fit_smc 2026-01-01 02:28:20 +    77.9s] resampled ess=1.0 -> uniform weights
+[fit_smc 2026-01-01 02:28:20 +    77.9s] full-physics final scoring start n=2000
+[fit_smc 2026-01-01 02:28:20 +    77.9s] full-physics final scoring uses ProcessPoolExecutor workers=50
