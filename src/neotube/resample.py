@@ -7,6 +7,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from .rng import make_rng
 
 STATE_COLS = ("x_km", "y_km", "z_km", "vx_km_s", "vy_km_s", "vz_km_s")
 
@@ -114,7 +115,7 @@ def resample_replicas(
     else:
         raise ValueError("replicas must contain 'logw' or 'w'")
 
-    rng = np.random.default_rng(int(seed))
+    rng = make_rng(seed)
     wnorm = _normalize_weights(logw)
 
     x = replicas.loc[:, STATE_COLS].to_numpy(np.float64)
@@ -146,4 +147,3 @@ def resample_replicas(
     out["logw"] = -math.log(n)
     out["w"] = 1.0 / n
     return out
-

@@ -16,6 +16,7 @@ from .propagate import predict_radec_batch
 from .fit_cli import load_observations
 from .fit_smc import sequential_fit_replicas
 from .sites import get_site_ephemeris
+from .rng import make_rng
 from .ranging import (
     _ranging_reference_observation,
     add_local_spread_parallel,
@@ -878,6 +879,7 @@ def main() -> int:
         help="degrees-of-freedom for multivariate-t.",
     )
     args = parser.parse_args()
+    rng = make_rng(args.seed)
     if args.ranging_multiobs_indices:
         try:
             args.ranging_multiobs_indices = [
@@ -1010,7 +1012,6 @@ def main() -> int:
         )
         weights = cloud.weights
         weights = weights / np.sum(weights)
-        rng = np.random.default_rng(int(args.seed))
         idx = rng.choice(len(weights), size=args.n, replace=True, p=weights)
         replicas = cloud.states[idx].T
         fit_smc_meta = cloud.metadata
@@ -1056,7 +1057,7 @@ def main() -> int:
             return np.searchsorted(cdf, positions)
 
         def smc_cartesian() -> np.ndarray:
-            rng = np.random.default_rng(int(args.seed))
+            rng_local = rng
             cov = np.array(posterior.cov, dtype=float) * (float(posterior.fit_scale) ** 2)
             cov *= float(args.smc_prior_scale) ** 2
             mean = np.array(posterior.state, dtype=float)
@@ -1101,25 +1102,25 @@ def main() -> int:
                 weights /= np.sum(weights)
                 ess = 1.0 / np.sum(weights**2)
                 if ess < float(args.smc_ess_frac) * len(parts):
-                    idx = systematic_resample(weights, rng)
+                    idx = systematic_resample(weights, rng_local)
                     parts = parts[idx]
                     loglikes = loglikes[idx]
                     weights = np.ones(len(parts), dtype=float) / len(parts)
                 for _ in range(int(args.smc_mcmc_steps)):
                     for i in range(len(parts)):
                         cur = parts[i]
-                        prop = cur + rng.normal(scale=prop_scale, size=cur.shape)
-                    props = parts + rng.normal(scale=prop_scale, size=parts.shape)
+                        prop = cur + rng_local.normal(scale=prop_scale, size=cur.shape)
+                    props = parts + rng_local.normal(scale=prop_scale, size=parts.shape)
                     ll_props = score_states_serial(props)
                     logp_cur = np.array([logprior(p) for p in parts]) + b1 * loglikes
                     logp_prop = np.array([logprior(p) for p in props]) + b1 * ll_props
-                    accept = np.log(rng.random(size=len(parts))) < (logp_prop - logp_cur)
+                    accept = np.log(rng_local.random(size=len(parts))) < (logp_prop - logp_cur)
                     parts[accept] = props[accept]
                     loglikes[accept] = ll_props[accept]
             return parts
 
         def smc_attributable() -> np.ndarray:
-            rng = np.random.default_rng(int(args.seed))
+            rng_local = rng
             attrib = build_attributable(observations, posterior.epoch)
             obs_ref = _ranging_reference_observation(observations, posterior.epoch)
             obs_eval = observations
@@ -1128,8 +1129,10 @@ def main() -> int:
             n = int(args.n)
             log_rho_min = np.log(max(1e-12, float(args.rho_min_au)))
             log_rho_max = np.log(max(float(args.rho_min_au), float(args.rho_max_au)))
-            rhos = np.exp(rng.uniform(log_rho_min, log_rho_max, size=n)) * 149597870.7
-            rhodots = rng.uniform(-float(args.rhodot_max_kms), float(args.rhodot_max_kms), size=n)
+            rhos = np.exp(rng_local.uniform(log_rho_min, log_rho_max, size=n)) * 149597870.7
+            rhodots = rng_local.uniform(
+                -float(args.rhodot_max_kms), float(args.rhodot_max_kms), size=n
+            )
             n_workers = max(1, int(args.n_workers))
             if args.chunk_size is not None:
                 block_size = int(args.chunk_size)
@@ -1377,7 +1380,6 @@ def main() -> int:
                 n_post = int(round(pool_n * mix_frac))
                 n_range = max(0, pool_n - n_post)
 
-                rng = np.random.default_rng(int(args.seed))
                 post_states = sample_replicas(
                     posterior, n_post, seed=args.seed, method=args.method, nu=nu_val
                 ).T
@@ -1435,9 +1437,7 @@ def main() -> int:
                         seed=args.seed,
                     ).T
                 else:
-                    idx = np.random.default_rng(int(args.seed)).choice(
-                        len(states), size=args.n, replace=True, p=weights
-                    )
+                    idx = rng.choice(len(states), size=args.n, replace=True, p=weights)
                     replicas = states[idx].T
         else:
             replicas = sample_replicas(posterior, args.n, seed=args.seed, method=args.method, nu=nu_val)
@@ -1459,7 +1459,6 @@ def main() -> int:
             seed=int(args.seed) if args.seed is not None else None,
         )
         pool_states = np.vstack([base_states, jittered])
-        rng = np.random.default_rng(int(args.seed))
         if args.range_jitter_reweight:
             observations = observations if args.ranged else load_observations(args.obs, None)
             sigma_vec = []
@@ -1523,7 +1522,6 @@ def main() -> int:
             seed=int(args.seed) if args.seed is not None else None,
         )
         combined = np.vstack([states, jittered])
-        rng = np.random.default_rng(int(args.seed))
         if combined.shape[0] >= args.n:
             idxs = rng.choice(combined.shape[0], size=args.n, replace=False)
         else:

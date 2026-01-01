@@ -39,6 +39,7 @@ from .ranging import (
     build_state_from_ranging,
     s_and_sdot,
 )
+from .rng import make_rng
 
 AU_KM = 149597870.7
 DAY_S = 86400.0
@@ -308,17 +309,21 @@ def _sanitize_loglikes(
     return loglikes
 
 
-def _systematic_resample(states: np.ndarray, weights: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+def _systematic_resample(
+    states: np.ndarray, weights: np.ndarray, rng: np.random.Generator
+) -> tuple[np.ndarray, np.ndarray]:
     n = len(weights)
     positions = (rng.random() + np.arange(n)) / n
     cumulative = np.cumsum(weights)
     out = np.empty_like(states)
+    idx = np.empty(n, dtype=int)
     i = 0
     for j, pos in enumerate(positions):
         while pos > cumulative[i]:
             i += 1
         out[j] = states[i]
-    return out
+        idx[j] = i
+    return out, idx
 
 
 def _stratified_log_rho_samples(
@@ -639,6 +644,20 @@ def sequential_fit_replicas(
         )
         np.savez_compressed(out, states=states, weights=weights, summary=summary)
 
+    def _debug_proposal_stats(states: np.ndarray, name: str = "pre", n_print: int = 5) -> None:
+        if states.size == 0:
+            _log("[proposal debug] {}: empty states".format(name))
+            return
+        stds = np.std(states, axis=0)
+        uniques = np.unique(np.round(states, 12), axis=0).shape[0]
+        _log(
+            "[proposal debug] {}: std per-dim (first 6) {} unique={}/{}".format(
+                name, np.array2string(stds[:6], precision=6), uniques, len(states)
+            )
+        )
+        sample_rows = states[:n_print]
+        _log("[proposal debug] {}: sample rows:\n{}".format(name, sample_rows))
+
     def _load_checkpoint() -> tuple[np.ndarray, np.ndarray, int, str, dict[str, object] | None]:
         if not checkpoint_path:
             raise RuntimeError("checkpoint_path is required for resume.")
@@ -658,7 +677,8 @@ def sequential_fit_replicas(
     obs = sorted(observations, key=lambda ob: ob.time)
     obs3 = obs[:3]
     epoch = obs3[1].time
-    rng = np.random.default_rng(seed)
+    rng = make_rng(seed)
+    assert hasattr(rng, "integers"), "rng must be a Generator from np.random.default_rng"
     ladder = _q1_only_ladder(default_propagation_ladder(max_step=max_step))
     if not use_kepler:
         ladder = [cfg for cfg in ladder if cfg.model != "kepler"]
@@ -667,6 +687,7 @@ def sequential_fit_replicas(
     log_every_obs = max(1, int(log_every_obs))
     target_chunks = max(1, int(target_chunks))
     smc_iter_every_obs = max(1, int(smc_iter_every_obs))
+    debug_proposals = os.environ.get("NEOTUBE_SMC_DEBUG_PROPOSALS") == "1"
 
     _log(
         "start n_particles={} obs={} use_kepler={} full_physics_final={} auto_grow={} "
@@ -1098,6 +1119,8 @@ def sequential_fit_replicas(
             if states.size == 0:
                 raise RuntimeError("No valid initial particles after energy filter.")
             _log("seeded {} states (valid={})".format(len(states), int(np.sum(valid))))
+            if debug_proposals:
+                _debug_proposal_stats(states, "seed-proposals")
         except Exception as exc:
             _log("seed generation failed: {}".format(exc))
             _log(traceback.format_exc())
@@ -1260,8 +1283,19 @@ def sequential_fit_replicas(
                     )
                 )
             if ess < ess_threshold * len(weights):
-                states = _systematic_resample(states, weights, rng)
+                if debug_proposals:
+                    _debug_proposal_stats(states, "pre-resample")
+                states, resample_idx = _systematic_resample(states, weights, rng)
                 weights = np.full(len(states), 1.0 / len(states), dtype=float)
+                if debug_proposals:
+                    _debug_proposal_stats(states, "post-resample")
+                    unique_idx, counts = np.unique(resample_idx, return_counts=True)
+                    top = sorted(
+                        zip(unique_idx, counts), key=lambda x: -x[1]
+                    )[:10]
+                    _log(
+                        "[proposal debug] resample counts (top 10): {}".format(top)
+                    )
                 if rejuvenation_scale > 0.0 and len(states) > 1:
                     # TODO: Replace floor jitter with MH rejuvenation to avoid bias.
                     pos_floor_km = 1_000.0
@@ -1272,6 +1306,8 @@ def sequential_fit_replicas(
                     cov[3:, 3:] += np.eye(3) * (vel_floor_km_s**2)
                     jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
                     states = states + jitter
+                if debug_proposals:
+                    _debug_proposal_stats(states, "post-mutate")
                 _log("resampled ess={:.1f} -> uniform weights".format(ess))
 
             if smc_iter_dir and (

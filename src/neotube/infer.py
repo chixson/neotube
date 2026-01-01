@@ -17,6 +17,7 @@ from scipy.signal import fftconvolve
 
 from .fit import OrbitPosterior, load_posterior_json
 from .propagate import ReplicaCloud, propagate_replicas, predict_radec
+from .rng import make_rng
 
 
 def _logaddexp(a: float, b: float) -> float:
@@ -386,7 +387,7 @@ def infer_cutouts(
     if not exposures:
         raise ValueError("No usable cutouts found in cutouts_index.csv (status=ok, cutout_path present).")
 
-    rng = np.random.default_rng(seed)
+    rng = make_rng(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = out_dir / "evidence.csv"
     replicas_out_path = out_dir / "replicas_weighted.csv"

@@ -18,6 +18,7 @@ from .fit import _predict_batch, _site_offset, _site_offset_cached
 from .propagate import _site_states, GM_SUN, _prepare_obs_cache, _body_posvel_km_single
 from .sites import get_site_ephemeris, get_site_kind
 from .models import Observation
+from .rng import make_rng
 
 AU_KM = 149597870.7
 DAY_S = 86400.0
@@ -81,6 +82,8 @@ def add_tangent_jitter(
     if fit_scale is None:
         fit_scale = float(getattr(posterior, "fit_scale", 1.0))
 
+    rng = make_rng(seed)
+
     if isinstance(obs, (str, Path)):
         from neotube.fit_cli import load_observations
 
@@ -108,8 +111,6 @@ def add_tangent_jitter(
             obs_idx = rng.integers(0, obs_count, size=len(states))
         sigma_eff_arcsec = sigma_arcsec * fit_scale * site_kappas_arr[obs_idx]
         sigma_rad_states = np.deg2rad(sigma_eff_arcsec / 3600.0)
-
-    rng = np.random.default_rng(seed)
     out = []
     for i, st in enumerate(states):
         r = st[:3].astype(float)
@@ -162,6 +163,8 @@ def add_local_multit_jitter(
         site_kappas = getattr(posterior, "site_kappas", {}) or {}
     if fit_scale is None:
         fit_scale = float(getattr(posterior, "fit_scale", 1.0))
+
+    rng = make_rng(seed)
 
     if isinstance(obs, (str, Path)):
         obs = load_observations(Path(obs), None)
@@ -236,7 +239,7 @@ def add_attributable_jitter(
     else:
         dt_seconds = DAY_S
 
-    rng = np.random.default_rng(seed)
+    rng = make_rng(seed)
     obs_count = len(obs)
     if obs_count == 0:
         site_offsets = np.zeros((states.shape[0], 3), dtype=float)
@@ -419,7 +422,7 @@ def add_range_jitter(
         return np.empty((0, 6), dtype=float)
     obs0 = obs[0]
 
-    rng = np.random.default_rng(None if seed is None else int(seed))
+    rng = make_rng(seed)
     log_rho_min = math.log(max(1e-12, rho_min_au))
     log_rho_max = math.log(max(rho_min_au, rho_max_au))
 
@@ -631,7 +634,7 @@ def stratified_resample(
     nu: float | None = None,
     seed: int | None = None,
 ) -> np.ndarray:
-    rng = np.random.default_rng(seed)
+    rng = make_rng(seed)
     weights = np.asarray(weights, dtype=float)
     weights = weights / np.sum(weights)
     nrep = int(nrep)
@@ -1611,7 +1614,7 @@ def sample_ranged_replicas(
     rhodot_iso_sigma_kms: float = 40.0,
     rhodot_vinf_max_kms: float | None = None,
 ) -> dict[str, np.ndarray]:
-    rng = np.random.default_rng(int(seed))
+    rng = make_rng(seed)
     obs_ref = _ranging_reference_observation(observations, epoch)
     if multiobs_indices:
         obs_eval = [observations[i] for i in multiobs_indices]

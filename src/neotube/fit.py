@@ -25,6 +25,7 @@ from .propagate import (
     _body_posvel_km_single,
 )
 from .sites import get_site_ephemeris, get_site_kind, get_site_location, load_observatories
+from .rng import make_rng
 
 _MISSING_SITE_REFRESHED: set[str] = set()
 
@@ -579,7 +580,7 @@ def _mad_scale(residuals: np.ndarray, sigma_vec: np.ndarray) -> float:
 def sample_multivariate_t(
     mean: np.ndarray, cov: np.ndarray, n: int, nu: float = 4.0, seed: Optional[int] = None
 ) -> np.ndarray:
-    rng = np.random.default_rng(None if seed is None else int(seed))
+    rng = make_rng(seed)
     cov = 0.5 * (cov + cov.T)
     try:
         L = np.linalg.cholesky(cov)
@@ -609,7 +610,7 @@ def sample_replicas(
     if method in ("multit", "multivariate-t"):
         return sample_multivariate_t(mean, cov_inflated, n, nu=nu, seed=seed)
     if method == "gaussian":
-        rng = np.random.default_rng(None if seed is None else int(seed))
+        rng = make_rng(seed)
         try:
             L = np.linalg.cholesky(cov_inflated)
         except np.linalg.LinAlgError:
