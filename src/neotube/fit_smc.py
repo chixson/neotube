@@ -658,6 +658,76 @@ def sequential_fit_replicas(
         sample_rows = states[:n_print]
         _log("[proposal debug] {}: sample rows:\n{}".format(name, sample_rows))
 
+    def _percentiles(arr: np.ndarray) -> np.ndarray:
+        return np.percentile(arr, [0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100])
+
+    def _summarize_loglikes_and_weights(
+        loglikes: np.ndarray, *, label: str
+    ) -> tuple[dict[str, object], np.ndarray]:
+        ll = np.asarray(loglikes, dtype=float)
+        finite_mask = np.isfinite(ll)
+        n_finite = int(np.sum(finite_mask))
+        if n_finite == 0:
+            _log(f"[ll diag {label}] finite loglikes=0/{len(ll)}")
+            return {"finite": 0}, np.zeros_like(ll)
+        ll_finite = ll[finite_mask]
+        ll_max = float(np.nanmax(ll_finite))
+        denom = ll_max + float(np.log(np.sum(np.exp(ll_finite - ll_max))))
+        weights = np.zeros_like(ll, dtype=float)
+        weights[finite_mask] = np.exp(ll_finite - denom)
+        pct_ll = _percentiles(ll_finite)
+        pct_w = _percentiles(weights[finite_mask])
+        sorted_idx = np.argsort(-ll_finite)
+        topk = min(10, len(sorted_idx))
+        top_idx = sorted_idx[:topk]
+        top_ll = ll_finite[top_idx]
+        top_w = weights[finite_mask][top_idx]
+        top_mass = float(np.sum(top_w))
+        ll_range = float(pct_ll[-1] - pct_ll[5])
+        _log(
+            "[ll diag {}] ll min/med/max: {:.3f}/{:.3f}/{:.3f} range(max-med)={:.3f} "
+            "topk mass={:.6f} finite={}/{}".format(
+                label,
+                float(pct_ll[0]),
+                float(pct_ll[5]),
+                float(pct_ll[-1]),
+                ll_range,
+                top_mass,
+                n_finite,
+                len(ll),
+            )
+        )
+        return (
+            {
+                "ll_min_max": (float(pct_ll[0]), float(pct_ll[-1])),
+                "ll_percentiles": pct_ll.tolist(),
+                "w_percentiles": pct_w.tolist(),
+                "topk_idx": top_idx.tolist(),
+                "topk_ll": top_ll.tolist(),
+                "topk_weights": top_w.tolist(),
+                "topk_mass": top_mass,
+                "ll_range": ll_range,
+                "finite": n_finite,
+            },
+            weights,
+        )
+
+    def _residual_stats(ra_pred: np.ndarray, dec_pred: np.ndarray, ob: Observation) -> dict[str, object]:
+        ra_arr = np.asarray(ra_pred, dtype=float)
+        dec_arr = np.asarray(dec_pred, dtype=float)
+        delta_ra = ((ob.ra_deg - ra_arr + 180.0) % 360.0) - 180.0
+        dra_arcsec = delta_ra * np.cos(np.radians(dec_arr)) * 3600.0
+        ddec_arcsec = (ob.dec_deg - dec_arr) * 3600.0
+        ang_err = np.sqrt(dra_arcsec * dra_arcsec + ddec_arcsec * ddec_arcsec)
+        ang_pct = _percentiles(ang_err)
+        return {
+            "ang_arcsec_min": float(np.nanmin(ang_err)),
+            "ang_arcsec_med": float(np.nanmedian(ang_err)),
+            "ang_arcsec_mean": float(np.nanmean(ang_err)),
+            "ang_arcsec_max": float(np.nanmax(ang_err)),
+            "ang_percentiles": ang_pct.tolist(),
+        }
+
     def _load_checkpoint() -> tuple[np.ndarray, np.ndarray, int, str, dict[str, object] | None]:
         if not checkpoint_path:
             raise RuntimeError("checkpoint_path is required for resume.")
@@ -688,6 +758,7 @@ def sequential_fit_replicas(
     target_chunks = max(1, int(target_chunks))
     smc_iter_every_obs = max(1, int(smc_iter_every_obs))
     debug_proposals = os.environ.get("NEOTUBE_SMC_DEBUG_PROPOSALS") == "1"
+    debug_likelihood = os.environ.get("NEOTUBE_SMC_DEBUG_LIKELIHOOD") == "1"
 
     _log(
         "start n_particles={} obs={} use_kepler={} full_physics_final={} auto_grow={} "
@@ -1220,6 +1291,94 @@ def sequential_fit_replicas(
                             ob_idx
                         )
                     )
+            if debug_proposals and ob_idx == 3:
+                _log("[epoch-dbg] === epoch debug start ===")
+                sample_idx = list(range(min(5, len(states))))
+                for k in sample_idx:
+                    s = states[k]
+                    state_epoch = None
+                    try:
+                        state_epoch = getattr(s, "epoch", None)
+                    except Exception:
+                        state_epoch = None
+                    _log(
+                        "[epoch-dbg] particle={} state_epoch={} type={}".format(
+                            k, state_epoch, type(s)
+                        )
+                    )
+                    try:
+                        pos = np.asarray(s[:3], dtype=float)
+                        vel = np.asarray(s[3:6], dtype=float)
+                        _log(
+                            "[epoch-dbg] particle={} pos_head={} vel_head={}".format(
+                                k, pos.tolist(), vel.tolist()
+                            )
+                        )
+                    except Exception:
+                        _log(
+                            "[epoch-dbg] particle={} pos/vel not accessible (type {})".format(
+                                k, type(s)
+                            )
+                        )
+                    try:
+                        ra_smc, dec_smc = predict_radec_from_epoch(
+                            s,
+                            ob.time,
+                            [ob],
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            allow_unknown_site=allow_unknown_site,
+                            light_time_iters=light_time_iters,
+                            full_physics=True,
+                            include_refraction=False,
+                        )
+                        _log(
+                            "[epoch-dbg] particle={} smc_pred (ra,dec)=({}, {})".format(
+                                k, float(ra_smc[0]), float(dec_smc[0])
+                            )
+                        )
+                    except Exception as exc:
+                        _log(
+                            "[epoch-dbg] particle={} smc_pred failed: {}".format(
+                                k, exc
+                            )
+                        )
+                    try:
+                        t0 = epoch
+                        t1 = ob.time
+                        st_prop = propagate_state(
+                            s,
+                            t0,
+                            t1,
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            method="nbody",
+                        )
+                        ra_prop, dec_prop = predict_radec_from_epoch(
+                            st_prop,
+                            t1,
+                            [ob],
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            allow_unknown_site=allow_unknown_site,
+                            light_time_iters=light_time_iters,
+                            full_physics=True,
+                            include_refraction=False,
+                        )
+                        _log(
+                            "[epoch-dbg] particle={} propagated_pred (ra,dec)=({}, {})".format(
+                                k, float(ra_prop[0]), float(dec_prop[0])
+                            )
+                        )
+                    except Exception as exc:
+                        _log(
+                            "[epoch-dbg] particle={} manual propagate/predict failed: {}".format(
+                                k, exc
+                            )
+                        )
+                _log("[epoch-dbg] === epoch debug end ===")
             ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
                 states,
                 [ob],
@@ -1243,6 +1402,64 @@ def sequential_fit_replicas(
                     )
                 )
                 loglikes = np.where(finite_mask, loglikes, -1e30)
+            if debug_likelihood:
+                _summarize_loglikes_and_weights(loglikes, label=f"obs{ob_idx}")
+                res_stats = _residual_stats(ra_pred[:, 0], dec_pred[:, 0], ob)
+                _log(
+                    "[resid diag obs{}] ang_arcsec min/med/mean/max: {:.3f}/{:.3f}/{:.3f}/{:.3f}".format(
+                        ob_idx,
+                        res_stats["ang_arcsec_min"],
+                        res_stats["ang_arcsec_med"],
+                        res_stats["ang_arcsec_mean"],
+                        res_stats["ang_arcsec_max"],
+                    )
+                )
+            if debug_proposals and ob_idx == 3:
+                import pathlib
+                import time as _time
+
+                dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                tnow = int(_time.time())
+                try:
+                    resids = []
+                    for k in range(len(states)):
+                        s = states[k]
+                        ra_tmp, dec_tmp = predict_radec_from_epoch(
+                            s,
+                            ob.time,
+                            [ob],
+                            perturbers=("earth", "mars", "jupiter"),
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            allow_unknown_site=allow_unknown_site,
+                            light_time_iters=light_time_iters,
+                            full_physics=True,
+                            include_refraction=False,
+                        )
+                        dra = (float(ra_tmp[0]) - float(ob.ra_deg))
+                        dra = (dra + 180.0) % 360.0 - 180.0
+                        ddec = float(dec_tmp[0]) - float(ob.dec_deg)
+                        ang = ((dra * 3600.0) ** 2 + (ddec * 3600.0) ** 2) ** 0.5
+                        resids.append(ang)
+                    resids = np.asarray(resids, dtype=float)
+                    np.savez(
+                        dump_dir / f"obs{ob_idx}_resids_before_norm_{tnow}.npz",
+                        resids=resids,
+                        med=float(np.nanmedian(resids)),
+                        mean=float(np.nanmean(resids)),
+                        max=float(np.nanmax(resids)),
+                    )
+                    _log(
+                        "[smc debug] obs{} resid med/mean/max: {:.3f}/{:.3f}/{:.3f}".format(
+                            ob_idx,
+                            float(np.nanmedian(resids)),
+                            float(np.nanmean(resids)),
+                            float(np.nanmax(resids)),
+                        )
+                    )
+                except Exception:
+                    _log(f"[smc debug] obs{ob_idx} resid dump failed")
             logw = np.log(weights + 1e-300) + loglikes
             logw -= float(np.max(logw))
             weights = np.exp(logw)
@@ -1285,6 +1502,45 @@ def sequential_fit_replicas(
             if ess < ess_threshold * len(weights):
                 if debug_proposals:
                     _debug_proposal_stats(states, "pre-resample")
+                if debug_proposals and ob_idx == 3:
+                    import pathlib
+                    import time as _time
+
+                    dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                    dump_dir.mkdir(parents=True, exist_ok=True)
+                    tnow = int(_time.time())
+
+                    def _state_summary(state_arr: np.ndarray) -> dict[str, object]:
+                        try:
+                            pos = state_arr[:, :3]
+                            rho = np.linalg.norm(pos, axis=1)
+                        except Exception:
+                            pos = None
+                            rho = None
+                        return dict(
+                            n=len(state_arr),
+                            pos_head=(pos[:3].tolist() if pos is not None else None),
+                            rho_stats=(
+                                None
+                                if rho is None
+                                else (
+                                    float(np.nanmin(rho)),
+                                    float(np.nanmedian(rho)),
+                                    float(np.nanmax(rho)),
+                                )
+                            ),
+                        )
+
+                    pre_summary = _state_summary(states)
+                    _log(
+                        "[smc debug] obs{} pre-resample summary: {}".format(
+                            ob_idx, pre_summary
+                        )
+                    )
+                    np.savez(
+                        dump_dir / f"obs{ob_idx}_pre_resample_{tnow}.npz",
+                        states=states,
+                    )
                 states, resample_idx = _systematic_resample(states, weights, rng)
                 weights = np.full(len(states), 1.0 / len(states), dtype=float)
                 if debug_proposals:
@@ -1296,6 +1552,22 @@ def sequential_fit_replicas(
                     _log(
                         "[proposal debug] resample counts (top 10): {}".format(top)
                     )
+                if debug_proposals and ob_idx == 3:
+                    import pathlib
+                    import time as _time
+
+                    dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                    tnow = int(_time.time())
+                    _log(
+                        "[smc debug] obs{} post-resample: unique_idx_top={}".format(
+                            ob_idx, top if "top" in locals() else "NA"
+                        )
+                    )
+                    np.savez(
+                        dump_dir / f"obs{ob_idx}_post_resample_{tnow}.npz",
+                        states=states,
+                        resample_idx=resample_idx,
+                    )
                 if rejuvenation_scale > 0.0 and len(states) > 1:
                     # TODO: Replace floor jitter with MH rejuvenation to avoid bias.
                     pos_floor_km = 1_000.0
@@ -1305,9 +1577,86 @@ def sequential_fit_replicas(
                     cov[:3, :3] += np.eye(3) * (pos_floor_km**2)
                     cov[3:, 3:] += np.eye(3) * (vel_floor_km_s**2)
                     jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
+                    if debug_proposals and ob_idx == 3:
+                        import pathlib
+                        import time as _time
+
+                        dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                        dump_dir.mkdir(parents=True, exist_ok=True)
+                        tnow = int(_time.time())
+                        try:
+                            cov_diag = np.diag(cov)
+                        except Exception:
+                            try:
+                                cov_diag = np.var(states, axis=0)
+                            except Exception:
+                                cov_diag = None
+                        _log(
+                            "[smc debug] obs{} mutation cov diag (first 10): {}".format(
+                                ob_idx,
+                                cov_diag[:10].tolist() if cov_diag is not None else None,
+                            )
+                        )
+                        try:
+                            _log(
+                                "[smc debug] obs{} jitter mean/std (first 10 dims): {} {}".format(
+                                    ob_idx,
+                                    np.mean(jitter, axis=0)[:10].tolist(),
+                                    np.std(jitter, axis=0)[:10].tolist(),
+                                )
+                            )
+                        except Exception:
+                            _log(f"[smc debug] obs{ob_idx} jitter: not present")
+                        np.savez(
+                            dump_dir / f"obs{ob_idx}_pre_mutation_{tnow}.npz",
+                            states=states,
+                            cov_diag=cov_diag,
+                        )
                     states = states + jitter
                 if debug_proposals:
                     _debug_proposal_stats(states, "post-mutate")
+                if debug_proposals and ob_idx == 3:
+                    import pathlib
+                    import time as _time
+
+                    dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                    tnow = int(_time.time())
+                    try:
+                        np.savez(
+                            dump_dir / f"obs{ob_idx}_post_mutation_{tnow}.npz",
+                            states=states,
+                            jitter=jitter if "jitter" in locals() else None,
+                        )
+                    except Exception:
+                        np.savez(
+                            dump_dir / f"obs{ob_idx}_post_mutation_{tnow}.npz",
+                            states=states,
+                        )
+                    try:
+                        sample_idx = list(range(min(5, len(states))))
+                        preds = []
+                        for k in sample_idx:
+                            s = states[k]
+                            ra_tmp, dec_tmp = predict_radec_from_epoch(
+                                s,
+                                ob.time,
+                                [ob],
+                                perturbers=("earth", "mars", "jupiter"),
+                                max_step=max_step,
+                                use_kepler=use_kepler,
+                                allow_unknown_site=allow_unknown_site,
+                                light_time_iters=light_time_iters,
+                                full_physics=True,
+                                include_refraction=False,
+                            )
+                            preds.append((float(ra_tmp[0]), float(dec_tmp[0])))
+                        _log(
+                            "[smc debug] obs{} post-mutate sample preds: {}".format(
+                                ob_idx, preds
+                            )
+                        )
+                    except Exception:
+                        _log(f"[smc debug] obs{ob_idx} post-mutate prediction failed")
                 _log("resampled ess={:.1f} -> uniform weights".format(ess))
 
             if smc_iter_dir and (
