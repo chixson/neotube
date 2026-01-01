@@ -605,6 +605,9 @@ def astropy_apparent_radec(
     t_obs_iso: str,
     earth_bary_tobs_km: np.ndarray,
     site_ecef_km: np.ndarray,
+    *,
+    variant: str = "validated",
+    limiter: Optional[GlobalRateLimiter] = None,
 ) -> Tuple[float, float]:
     """
     Astropy-native apparent direction:
@@ -615,7 +618,15 @@ def astropy_apparent_radec(
     t_obs = Time(t_obs_iso, scale="utc")
     t_obs_tdb = t_obs.tdb
 
-    obj_geoc_km = obj_bary_km - earth_bary_tobs_km
+    if variant == "validated":
+        obj_geoc_km = obj_bary_km - earth_bary_tobs_km
+    elif variant == "em":
+        earth_at_em = horizons_vectors_cached(
+            "399", t_em.iso, center="@ssb", refplane="frame", limiter=limiter
+        )
+        obj_geoc_km = obj_bary_km - earth_at_em[:3]
+    else:
+        raise ValueError(f"Unknown variant: {variant}")
     rep = CartesianRepresentation(obj_geoc_km * u.km)
     if obj_vel_km_s is not None:
         rep = rep.with_differentials(CartesianDifferential(obj_vel_km_s * u.km / u.s))
@@ -626,10 +637,29 @@ def astropy_apparent_radec(
         site_ecef_km[1] * u.km,
         site_ecef_km[2] * u.km,
     )
-    altaz = AltAz(obstime=t_obs_tdb, location=site_loc, pressure=0.0 * u.bar)
-    sc_obj_altaz = sc_obj_icrs.transform_to(altaz)
-    # ICRS does not accept obstime; use GCRS at t_obs_tdb then transform to ICRS.
-    sc_app_icrs = sc_obj_altaz.transform_to(GCRS(obstime=t_obs_tdb)).transform_to(ICRS())
+    if os.environ.get("NEOTUBE_PATH_B_FLOW", "altaz") == "gcrs":
+        site_gcrs = site_loc.get_gcrs(obstime=t_obs_tdb)
+        try:
+            site_vel = site_gcrs.cartesian.differentials["s"]
+        except Exception:
+            site_vel = None
+        if site_vel is not None:
+            gcrs_frame = GCRS(
+                obstime=t_obs_tdb,
+                obsgeoloc=site_gcrs.cartesian.xyz,
+                obsgeovel=site_vel.d_xyz,
+            )
+        else:
+            gcrs_frame = GCRS(obstime=t_obs_tdb, obsgeoloc=site_gcrs.cartesian.xyz)
+        sc_obj_gcrs = sc_obj_icrs.transform_to(gcrs_frame)
+        topo_vec = sc_obj_gcrs.cartesian.xyz - site_gcrs.cartesian.xyz
+        sc_topo = SkyCoord(CartesianRepresentation(topo_vec), frame=GCRS(obstime=t_obs_tdb))
+        sc_app_icrs = sc_topo.transform_to(ICRS())
+    else:
+        altaz = AltAz(obstime=t_obs_tdb, location=site_loc, pressure=0.0 * u.bar)
+        sc_obj_altaz = sc_obj_icrs.transform_to(altaz)
+        # ICRS does not accept obstime; use GCRS at t_obs_tdb then transform to ICRS.
+        sc_app_icrs = sc_obj_altaz.transform_to(GCRS(obstime=t_obs_tdb)).transform_to(ICRS())
     return float(sc_app_icrs.ra.deg), float(sc_app_icrs.dec.deg)
 
 
@@ -1030,8 +1060,16 @@ def run_validator(
                 )
                 obj_bary = obj_vec[:3].copy()
                 obj_vel = obj_vec[3:].copy()
+                variant = os.environ.get("NEOTUBE_PATH_B_VARIANT", "validated").strip()
                 pred_ra_b, pred_dec_b = astropy_apparent_radec(
-                    obj_bary, obj_vel, t_em, epoch, earth_bary, site_ecef
+                    obj_bary,
+                    obj_vel,
+                    t_em,
+                    epoch,
+                    earth_bary,
+                    site_ecef,
+                    variant=variant,
+                    limiter=limiter,
                 )
             except Exception:
                 pred_ra_b = None
