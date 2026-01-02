@@ -42,6 +42,9 @@ iers.conf.iers_degraded_accuracy = "warn"
 
 USE_FULL_PHYSICS = True
 MAX_WORKERS = 50
+MIXTURE_WEIGHT_GAUSS = 0.95
+MIXTURE_T_NU = 3.0
+MIXTURE_T_SCALE = 3.0
 
 
 def _chunksize(n_items, n_workers):
@@ -160,6 +163,14 @@ def angle_diff(a, b):
     return (a - b + np.pi) % (2 * np.pi) - np.pi
 
 
+def cos_dec_for_ra_div(dec, min_abs=1e-6):
+    """Return a safe cos(dec) value for dividing RA tangent components."""
+    c = float(np.cos(dec))
+    if abs(c) < min_abs:
+        return min_abs if c >= 0.0 else -min_abs
+    return c
+
+
 def radec_from_vector(vec):
     x, y, z = vec
     r = np.linalg.norm(vec)
@@ -171,7 +182,9 @@ def radec_from_vector(vec):
 # ------------------------------
 # Light-time / emission time solvers
 # ------------------------------
-def solve_emission_time_for_obs(t_obs, rho_km, hat_u, site, tol=1e-8, maxit=30):
+def solve_emission_time_for_obs(
+    t_obs, rho_km, hat_u, site, tol=1e-8, maxit=30, max_step_s=3600.0
+):
     """Newton solve for t_em so that photons emitted from r = r_obs(t_em)+rho*hat_u arrive at t_obs."""
     t_em = Time(t_obs.tdb + (-rho_km / C) * u.s)
     for _ in range(maxit):
@@ -184,7 +197,10 @@ def solve_emission_time_for_obs(t_obs, rho_km, hat_u, site, tol=1e-8, maxit=30):
         if abs(F) < tol:
             break
         dFdt = -1.0 + (np.dot(dvec, v_obs_tem) / (C * D))
+        if abs(dFdt) < 1e-12:
+            break
         dt = F / dFdt
+        dt = float(np.clip(dt, -max_step_s, max_step_s))
         t_em = Time(t_em.tdb + (-dt) * u.s)
     return t_em, r_obs_tem, v_obs_tem
 
@@ -205,7 +221,9 @@ def _propagate_state_to_time(r1, v1, t0, t1, propagate_fn):
             raise RuntimeError(f"Propagation failed: {exc}") from exc
 
 
-def solve_emission_time_and_propagate(obs2, r1, v1, t_em1, site, propagate_fn, tol=1e-8, maxit=30):
+def solve_emission_time_and_propagate(
+    obs2, r1, v1, t_em1, site, propagate_fn, tol=1e-8, maxit=30, max_step_s=3600.0
+):
     """Solve for t_em2 and propagate target from (r1,v1) at t_em1 to t_em2."""
     r_obs_tobs2, _ = observer_posvel(site, obs2)
     D0 = np.linalg.norm(r_obs_tobs2 - r1)
@@ -221,7 +239,10 @@ def solve_emission_time_and_propagate(obs2, r1, v1, t_em1, site, propagate_fn, t
         if abs(F) < tol:
             break
         dFdt = -1.0 + (np.dot(dvec, v_t) / (C * D))
+        if abs(dFdt) < 1e-12:
+            break
         dt = F / dFdt
+        dt = float(np.clip(dt, -max_step_s, max_step_s))
         t_em = Time(t_em.tdb + (-dt) * u.s)
     return t_em, r_t, v_t
 
@@ -370,9 +391,9 @@ def _sample_variant_a_one(payload):
     sigma_v = 50.0
     prior_Ppsi_inv = np.diag([1e-8, 1.0 / (sigma_v**2), 1.0 / (sigma_v**2)])
 
-    dtheta = rng.multivariate_normal(np.zeros(2), S1)
-    alpha_s = obs1_ra + dtheta[0]
-    delta_s = obs1_dec + dtheta[1]
+    dtheta_tan = rng.multivariate_normal(np.zeros(2), S1)
+    alpha_s = obs1_ra + dtheta_tan[0] / cos_dec_for_ra_div(obs1_dec)
+    delta_s = obs1_dec + dtheta_tan[1]
     Gamma = (alpha_s, delta_s)
     rho_min = 1e3
     rho_max = 1e10
@@ -394,7 +415,12 @@ def _sample_variant_a_one(payload):
         )
     except Exception:
         return None
-    psi_star = rng.multivariate_normal(hat_psi, Sigma_psi)
+    if rng.random() < MIXTURE_WEIGHT_GAUSS:
+        psi_star = rng.multivariate_normal(hat_psi, Sigma_psi)
+    else:
+        z = rng.multivariate_normal(np.zeros_like(hat_psi), Sigma_psi)
+        g = rng.gamma(MIXTURE_T_NU / 2.0, 2.0 / MIXTURE_T_NU)
+        psi_star = hat_psi + MIXTURE_T_SCALE * z / np.sqrt(g / MIXTURE_T_NU)
     theta_star = np.concatenate(([logrho], psi_star))
     eval_fn = propagate_state if use_full_physics and propagate_state is not None else propagate_state_kepler
     try:
@@ -702,9 +728,21 @@ if __name__ == "__main__":
     parser.add_argument(
         "--obs2-index", type=int, default=None, help="Index among rows for chosen object"
     )
-    parser.add_argument("--site", default=None, help="Observer site code (optional)")
-    parser.add_argument("--site1", default=None, help="Observer site for obs1 (optional)")
-    parser.add_argument("--site2", default=None, help="Observer site for obs2 (optional)")
+    parser.add_argument(
+        "--site",
+        default=None,
+        help="Fallback observer site code when obs.csv has no site column (optional)",
+    )
+    parser.add_argument(
+        "--site1",
+        default=None,
+        help="Fallback observer site for obs1 when obs.csv has no site value (optional)",
+    )
+    parser.add_argument(
+        "--site2",
+        default=None,
+        help="Fallback observer site for obs2 when obs.csv has no site value (optional)",
+    )
     parser.add_argument("--N", type=int, default=200, help="Number of samples per variant")
     parser.add_argument("--workers", type=int, default=None, help="Max parallel workers (default: CPU count up to 50)")
     physics_group = parser.add_mutually_exclusive_group()
@@ -781,24 +819,16 @@ if __name__ == "__main__":
     )
 
     site_default = args.site if args.site is not None else "500"
-    site1 = (
-        args.site1
-        if args.site1 is not None
-        else (
-            row1[colmap["site"]]
-            if colmap["site"] and colmap["site"] in row1 and not pd.isna(row1[colmap["site"]])
-            else site_default
-        )
-    )
-    site2 = (
-        args.site2
-        if args.site2 is not None
-        else (
-            row2[colmap["site"]]
-            if colmap["site"] and colmap["site"] in row2 and not pd.isna(row2[colmap["site"]])
-            else site_default
-        )
-    )
+
+    def _pick_site(row, arg_site):
+        if colmap["site"] and colmap["site"] in row and not pd.isna(row[colmap["site"]]):
+            return row[colmap["site"]]
+        if arg_site is not None:
+            return arg_site
+        return site_default
+
+    site1 = _pick_site(row1, args.site1)
+    site2 = _pick_site(row2, args.site2)
 
     obs1 = obs1_time
     obs1.meta = {"sigma_ra_arcsec": obs1_sigma_ra, "sigma_dec_arcsec": obs1_sigma_dec}
