@@ -13,6 +13,8 @@ import argparse
 import os
 import functools
 import math
+import json
+import time
 import numpy as np
 import scipy.linalg as la
 from scipy.optimize import least_squares
@@ -49,9 +51,9 @@ iers.conf.iers_degraded_accuracy = "warn"
 
 USE_FULL_PHYSICS = True
 MAX_WORKERS = 50
-MIXTURE_WEIGHT_GAUSS = 0.95
+MIXTURE_WEIGHT_GAUSS = 0.99
 MIXTURE_T_NU = 3.0
-MIXTURE_T_SCALE = 3.0
+MIXTURE_T_SCALE = 2.0
 GM_SUN = 1.32712440018e11  # km^3/s^2
 GM_EARTH = 398600.4418  # km^3/s^2
 AU_KM = 149597870.7
@@ -467,7 +469,7 @@ def forward_predict_RADEC(Gamma, theta, obs1, obs2, site1, site2, propagate_surr
     )
 
     r_obs_tobs2, _ = observer_posvel(site2, obs2)
-    dvec = r_obs_tobs2 - r2
+    dvec = r2 - r_obs_tobs2
     ra_pred, dec_pred = _radec_from_vector_nb(dvec)
     return ra_pred, dec_pred, t_em1, t_em2, r1, v1, r2, v2
 
@@ -665,7 +667,7 @@ def _sample_variant_a_one(payload):
         psi_use = hat_psi
         state_use = state_cur
         accepted = False
-        accepted_comp = "G"
+        accepted_comp = None
 
     t_em1, t_em2, r1, v1, r2, v2, ra_pred, dec_pred = state_use
     eps = 0.5 * np.dot(v1, v1) - GM_SUN / np.linalg.norm(r1)
@@ -758,13 +760,14 @@ def sample_variant_A(
             for out in fut.result():
                 if out is None:
                     continue
-                if out.get("proposal_component") == "G":
+                comp = out.get("proposal_component")
+                if comp == "G":
                     n_prop_g += 1
-                elif out.get("proposal_component") == "T":
+                elif comp == "T":
                     n_prop_t += 1
-                if out.get("accepted_component") == "G":
+                if out.get("accepted") and comp == "G":
                     n_acc_g += 1
-                elif out.get("accepted_component") == "T":
+                elif out.get("accepted") and comp == "T":
                     n_acc_t += 1
                 if out.get("is_unbound_proposed"):
                     n_unbound_prop += 1
@@ -924,22 +927,58 @@ def optimize_joint_and_sample(
 # ------------------------------
 # JPL Horizons fetch
 # ------------------------------
-def fetch_jpl_state(body_id, times, center="@sun", id_type="smallbody"):
+def fetch_jpl_state(
+    body_id,
+    times,
+    center="@sun",
+    id_type="smallbody",
+    cache_path=None,
+    max_retries=5,
+    backoff=2.0,
+):
     results = {}
-    for t in times:
+    cache = {}
+    if cache_path is not None and os.path.exists(cache_path):
         try:
-            obj = Horizons(id=body_id, location=center, epochs=t.tdb.jd, id_type=id_type)
-            vec = obj.vectors()
-            x = float(vec["x"][0]) * u.au.to(u.km)
-            y = float(vec["y"][0]) * u.au.to(u.km)
-            z = float(vec["z"][0]) * u.au.to(u.km)
-            vx = float(vec["vx"][0]) * (u.au / u.day).to(u.km / u.s)
-            vy = float(vec["vy"][0]) * (u.au / u.day).to(u.km / u.s)
-            vz = float(vec["vz"][0]) * (u.au / u.day).to(u.km / u.s)
-            results[round(float(t.tdb.jd), 6)] = (np.array([x, y, z]), np.array([vx, vy, vz]))
-        except Exception as e:
-            results[round(float(t.tdb.jd), 6)] = (None, None)
-            print("Horizons fetch failed for", t, ":", e)
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+        except Exception:
+            cache = {}
+    for t in times:
+        jd_key = f"{round(float(t.tdb.jd), 6):.6f}"
+        if jd_key in cache:
+            entry = cache[jd_key]
+            results[float(jd_key)] = (np.array(entry["r"]), np.array(entry["v"]))
+            continue
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                obj = Horizons(id=body_id, location=center, epochs=t.tdb.jd, id_type=id_type)
+                vec = obj.vectors()
+                x = float(vec["x"][0]) * u.au.to(u.km)
+                y = float(vec["y"][0]) * u.au.to(u.km)
+                z = float(vec["z"][0]) * u.au.to(u.km)
+                vx = float(vec["vx"][0]) * (u.au / u.day).to(u.km / u.s)
+                vy = float(vec["vy"][0]) * (u.au / u.day).to(u.km / u.s)
+                vz = float(vec["vz"][0]) * (u.au / u.day).to(u.km / u.s)
+                r = [x, y, z]
+                v = [vx, vy, vz]
+                results[float(jd_key)] = (np.array(r), np.array(v))
+                cache[jd_key] = {"r": r, "v": v}
+                break
+            except Exception as e:
+                last_exc = e
+                if attempt < max_retries - 1:
+                    time.sleep(backoff ** attempt)
+        else:
+            results[float(jd_key)] = (None, None)
+            print("Horizons fetch failed for", t, ":", last_exc)
+    if cache_path is not None:
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache, f)
+        except Exception:
+            pass
     return results
 
 
@@ -1177,5 +1216,7 @@ if __name__ == "__main__":
         times_set[round(float(s["t_em2"].tdb.jd), 6)] = s["t_em2"]
     times_list = list(times_set.values())
     print("Querying JPL/Horizons for %d unique emission times ..." % len(times_list))
-    jpl_states = fetch_jpl_state(args.object, times_list, center="@sun")
+    cache_dir = os.path.dirname(os.path.abspath(args.csv))
+    cache_path = os.path.join(cache_dir, "horizons_cache.json")
+    jpl_states = fetch_jpl_state(args.object, times_list, center="@sun", cache_path=cache_path)
     summarize_and_plot(samples_A, samples_B, jpl_states, obs2_ra, obs2_dec)
