@@ -5,12 +5,16 @@ from typing import Iterable
 import numpy as np
 
 
+DEFAULT_SEED = 50
+
+
 def make_rng(seed: int | None) -> np.random.Generator:
     """Create a Generator from an optional seed.
 
     Use this everywhere to avoid ad-hoc reseeding and keep RNG creation centralized.
     """
-    return np.random.default_rng(None if seed is None else int(seed))
+    seed_value = DEFAULT_SEED if seed is None else int(seed)
+    return np.random.default_rng(seed_value)
 
 
 def ensure_rng(
