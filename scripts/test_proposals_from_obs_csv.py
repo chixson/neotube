@@ -11,6 +11,7 @@ Dependencies: numpy, scipy, pandas, astropy, astroquery, matplotlib
 
 import argparse
 import os
+import functools
 import numpy as np
 import scipy.linalg as la
 from scipy.optimize import least_squares
@@ -53,6 +54,15 @@ AU_KM = 149597870.7
 
 def _chunksize(n_items, n_workers):
     return max(1, n_items // max(1, n_workers * 4))
+
+
+def worker_init(openblas_threads=1):
+    """Initialize worker process state and limit BLAS threads."""
+    os.environ["OPENBLAS_NUM_THREADS"] = str(openblas_threads)
+    os.environ["OMP_NUM_THREADS"] = str(openblas_threads)
+    os.environ["MKL_NUM_THREADS"] = str(openblas_threads)
+    import astropy.coordinates  # warm caches
+    import neotube.propagate as _prop  # noqa: F401
 
 
 # ------------------------------
@@ -189,10 +199,9 @@ def parse_ra_dec(ra_val, dec_val):
 # ------------------------------
 # Observer / site helpers
 # ------------------------------
-def observer_posvel(site, t):
-    """
-    Return observer position and velocity in km, km/s in ICRS-like frame.
-    """
+@functools.lru_cache(maxsize=4096)
+def _observer_posvel_cached_jd(site, jd):
+    """Cached Earth/Sun barycentric delta for (site, jd) in TDB."""
     from astropy.coordinates import get_body_barycentric_posvel
 
     def _as_vel_kms(obj):
@@ -200,19 +209,27 @@ def observer_posvel(site, t):
             return obj.d_xyz.to(u.km / u.s)
         return obj.xyz.to(u.km / u.s)
 
-    pb_earth = get_body_barycentric_posvel("earth", t.tdb)
-    pb_sun = get_body_barycentric_posvel("sun", t.tdb)
+    t = Time(jd, format="jd", scale="tdb")
+    pb_earth = get_body_barycentric_posvel("earth", t)
+    pb_sun = get_body_barycentric_posvel("sun", t)
     r_earth = np.array((pb_earth[0].xyz - pb_sun[0].xyz).to(u.km)).flatten()
     v_earth = np.array((_as_vel_kms(pb_earth[1]) - _as_vel_kms(pb_sun[1]))).flatten()
+    return r_earth, v_earth
+
+
+def observer_posvel(site, t):
+    """
+    Return observer position and velocity in km, km/s in ICRS-like frame.
+    """
+    jd_key = round(float(t.tdb.jd), 8)
+    r_earth, v_earth = _observer_posvel_cached_jd(site, jd_key)
     if _site_states is not None:
         try:
             pos_geo, vel_geo = _site_states([t], [site], allow_unknown_site=True)
             return r_earth + pos_geo[0], v_earth + vel_geo[0]
         except Exception:
             return r_earth, v_earth
-    r = r_earth
-    v = v_earth
-    return r, v
+    return r_earth, v_earth
 
 
 # ------------------------------
@@ -625,7 +642,9 @@ def sample_variant_A(
     n_acc_t = 0
     n_unbound_prop = 0
     n_unbound_acc = 0
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with ProcessPoolExecutor(
+        max_workers=workers, initializer=worker_init, initargs=(1,)
+    ) as executor:
         for out in executor.map(_sample_variant_a_one, payloads, chunksize=_chunksize(N, workers)):
             if out is not None:
                 if out.get("proposal_component") == "G":
@@ -782,7 +801,9 @@ def optimize_joint_and_sample(
     workers = min(MAX_WORKERS, os.cpu_count() or 1) if workers is None else min(workers, MAX_WORKERS)
     payloads = [(p, obs1, obs2, site1, site2, USE_FULL_PHYSICS) for p in ps]
     samples = []
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with ProcessPoolExecutor(
+        max_workers=workers, initializer=worker_init, initargs=(1,)
+    ) as executor:
         for out in executor.map(_eval_variant_b_one, payloads, chunksize=_chunksize(N, workers)):
             if out is not None:
                 samples.append(out)
