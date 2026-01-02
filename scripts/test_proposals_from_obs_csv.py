@@ -155,6 +155,11 @@ def tangent_basis(alpha_rad, delta_rad):
     return e_alpha, e_delta
 
 
+def angle_diff(a, b):
+    """Return the short signed angle difference a - b in radians in (-pi, pi]."""
+    return (a - b + np.pi) % (2 * np.pi) - np.pi
+
+
 def radec_from_vector(vec):
     x, y, z = vec
     r = np.linalg.norm(vec)
@@ -248,16 +253,23 @@ def forward_predict_RADEC(Gamma, theta, obs1, obs2, site1, site2, propagate_surr
 
 
 # ------------------------------
-# Finite-difference Jacobian for (ra,dec) wrt params
+# Finite-difference Jacobian for (ra,dec) wrt params (optionally tangent-plane RA)
 # ------------------------------
-def jacobian_fd(Gamma, theta, obs1, obs2, site1, site2, propagate_surrogate, eps=None):
+def jacobian_fd(
+    Gamma,
+    theta,
+    obs1,
+    obs2,
+    site1,
+    site2,
+    propagate_surrogate,
+    obs2_dec=None,
+    eps=None,
+):
     p = np.concatenate((np.array(Gamma), np.array(theta)))
     n = p.size
     if eps is None:
         eps = np.maximum(1e-8, np.abs(p) * 1e-7 + 1e-10)
-    base_ra, base_dec, *_ = forward_predict_RADEC(
-        p[0:2], p[2:], obs1, obs2, site1, site2, propagate_surrogate
-    )
     J = np.zeros((2, n))
     for i in range(n):
         dp = p.copy()
@@ -269,8 +281,10 @@ def jacobian_fd(Gamma, theta, obs1, obs2, site1, site2, propagate_surrogate, eps
         ra_m, dec_m, *_ = forward_predict_RADEC(
             dp[0:2], dp[2:], obs1, obs2, site1, site2, propagate_surrogate
         )
-        J[0, i] = (ra_p - ra_m) / (2 * eps[i])
+        J[0, i] = angle_diff(ra_p, ra_m) / (2 * eps[i])
         J[1, i] = (dec_p - dec_m) / (2 * eps[i])
+    if obs2_dec is not None:
+        J[0, :] *= np.cos(obs2_dec)
     return J
 
 
@@ -299,14 +313,14 @@ def optimize_conditional_psi(
         except Exception:
             return np.array([1e6, 1e6])
         res = np.array([
-            (ra_pred - obs2_ra) * np.cos(obs2_dec),
+            angle_diff(ra_pred, obs2_ra) * np.cos(obs2_dec),
             (dec_pred - obs2_dec),
         ])
         Wsqrt = la.cholesky(W2)
         return Wsqrt.dot(res)
 
     dt = max(1.0, (obs2.tdb.jd - obs1.tdb.jd) * 86400.0)
-    dalpha = (obs2_ra - Gamma[0])
+    dalpha = angle_diff(obs2_ra, Gamma[0])
     ddelta = (obs2_dec - Gamma[1])
     d_alpha_dt = dalpha / dt
     d_delta_dt = ddelta / dt
@@ -317,7 +331,16 @@ def optimize_conditional_psi(
     res = least_squares(residuals, psi0, method="trf", xtol=1e-8, ftol=1e-8, gtol=1e-8)
     hat_psi = res.x
     theta_hat = np.concatenate(([logrho], hat_psi))
-    J_full = jacobian_fd(Gamma, theta_hat, obs1, obs2, site1, site2, propagate_surrogate)
+    J_full = jacobian_fd(
+        Gamma,
+        theta_hat,
+        obs1,
+        obs2,
+        site1,
+        site2,
+        propagate_surrogate,
+        obs2_dec=obs2_dec,
+    )
     Jpsi = J_full[:, 3:6]
     Sigma_psi = la.inv(Jpsi.T.dot(W2).dot(Jpsi) + prior_Ppsi_inv)
     return hat_psi, Sigma_psi
@@ -516,7 +539,7 @@ def optimize_joint_and_sample(
         rho_tri = 1.0 * 149597870.7
     logrho0 = np.log(np.clip(rho_tri, 1e3, 1e10))
     dt = max(1.0, (obs2.tdb.jd - obs1.tdb.jd) * 86400.0)
-    dalpha = (obs2_ra - alpha0)
+    dalpha = angle_diff(obs2_ra, alpha0)
     ddelta = (obs2_dec - delta0)
     d_alpha_dt = dalpha / dt
     d_delta_dt = ddelta / dt
@@ -535,8 +558,8 @@ def optimize_joint_and_sample(
             )
         except Exception:
             return np.full(10, 1e6)
-        r1 = np.array([(p[0] - obs1_ra) * np.cos(obs1_dec), (p[1] - obs1_dec)])
-        r2 = np.array([(ra_pred - obs2_ra) * np.cos(obs2_dec), (dec_pred - obs2_dec)])
+        r1 = np.array([angle_diff(p[0], obs1_ra) * np.cos(obs1_dec), (p[1] - obs1_dec)])
+        r2 = np.array([angle_diff(ra_pred, obs2_ra) * np.cos(obs2_dec), (dec_pred - obs2_dec)])
         W1sqrt = la.cholesky(W1)
         W2sqrt = la.cholesky(W2)
         eigvals, eigvecs = la.eigh(prior_inv)
@@ -559,8 +582,9 @@ def optimize_joint_and_sample(
         ra_m, dec_m, *_ = forward_predict_RADEC(
             (dp[0], dp[1]), dp[2:], obs1, obs2, site1, site2, propagate_state_kepler
         )
-        J2[0, i] = (ra_p - ra_m) / (2 * eps[i])
+        J2[0, i] = angle_diff(ra_p, ra_m) / (2 * eps[i])
         J2[1, i] = (dec_p - dec_m) / (2 * eps[i])
+    J2[0, :] *= np.cos(obs2_dec)
     J1 = np.zeros((2, 6))
     J1[0, 0] = np.cos(obs1_dec)
     J1[1, 1] = 1.0
