@@ -12,6 +12,7 @@ Dependencies: numpy, scipy, pandas, astropy, astroquery, matplotlib
 import argparse
 import os
 import functools
+import math
 import numpy as np
 import scipy.linalg as la
 from scipy.optimize import least_squares
@@ -23,7 +24,7 @@ import astropy.units as u
 from astropy.utils import iers
 import matplotlib.pyplot as plt
 from astroquery.jplhorizons import Horizons
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ------------------------------
 # TRY TO IMPORT NEOTUBE HELPERS
@@ -63,6 +64,39 @@ def worker_init(openblas_threads=1):
     os.environ["MKL_NUM_THREADS"] = str(openblas_threads)
     import astropy.coordinates  # warm caches
     import neotube.propagate as _prop  # noqa: F401
+
+
+# ------------------------------
+# Chunked execution helpers (to keep many cores busy)
+# ------------------------------
+def choose_workers_and_chunk(
+    n_samples, max_workers=None, target_per_worker=200, batches_per_worker=4
+):
+    """Pick workers/chunk size so each worker does enough full-physics work."""
+    if max_workers is None:
+        max_workers = min(50, os.cpu_count() or 1)
+    workers = min(max_workers, max(1, n_samples // target_per_worker))
+    total_chunks = max(1, workers * batches_per_worker)
+    chunk_size = max(1, int(math.ceil(n_samples / total_chunks)))
+    return workers, chunk_size
+
+
+def make_chunks(seq, chunk_size):
+    """Yield consecutive chunks from seq."""
+    for i in range(0, len(seq), chunk_size):
+        yield seq[i : i + chunk_size]
+
+
+def _process_chunk_fullphysics(chunk_payload):
+    """Process a chunk of payloads in one worker."""
+    results = []
+    for p in chunk_payload:
+        try:
+            out = _sample_variant_a_one(p)
+        except Exception:
+            out = None
+        results.append(out)
+    return results
 
 
 # ------------------------------
@@ -642,11 +676,16 @@ def sample_variant_A(
     n_acc_t = 0
     n_unbound_prop = 0
     n_unbound_acc = 0
+    workers_sel, chunk_size = choose_workers_and_chunk(N, max_workers=workers)
+    chunked_payloads = list(make_chunks(payloads, chunk_size))
     with ProcessPoolExecutor(
-        max_workers=workers, initializer=worker_init, initargs=(1,)
+        max_workers=workers_sel, initializer=worker_init, initargs=(1,)
     ) as executor:
-        for out in executor.map(_sample_variant_a_one, payloads, chunksize=_chunksize(N, workers)):
-            if out is not None:
+        futures = [executor.submit(_process_chunk_fullphysics, chunk) for chunk in chunked_payloads]
+        for fut in as_completed(futures):
+            for out in fut.result():
+                if out is None:
+                    continue
                 if out.get("proposal_component") == "G":
                     n_prop_g += 1
                 elif out.get("proposal_component") == "T":
