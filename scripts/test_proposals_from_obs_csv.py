@@ -594,8 +594,9 @@ def sample_variant_A(
     obs2_sigma_dec,
     N=200,
     workers=None,
+    seed=50,
 ):
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
     seeds = rng.integers(0, 2**32 - 1, size=N, dtype=np.uint32)
     workers = min(MAX_WORKERS, os.cpu_count() or 1) if workers is None else min(workers, MAX_WORKERS)
     payloads = [
@@ -901,6 +902,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--N", type=int, default=200, help="Number of samples per variant")
     parser.add_argument("--workers", type=int, default=None, help="Max parallel workers (default: CPU count up to 50)")
+    parser.add_argument("--seed", type=int, default=50, help="RNG seed for reproducible sampling")
     physics_group = parser.add_mutually_exclusive_group()
     physics_group.add_argument(
         "--full-physics",
@@ -1016,6 +1018,7 @@ if __name__ == "__main__":
         obs2_sigma_dec,
         N=args.N,
         workers=args.workers,
+        seed=args.seed,
     )
 
     print("Sampling Variant B ...")
