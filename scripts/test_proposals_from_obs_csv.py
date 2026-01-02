@@ -32,6 +32,8 @@ try:
 except Exception:
     _numba = None
 
+import neotube.rng as nrng
+
 # ------------------------------
 # TRY TO IMPORT NEOTUBE HELPERS
 # ------------------------------
@@ -161,7 +163,7 @@ def logpdf_mvt(x, mu, Sigma, nu):
 
 def sample_mvt(hat, Sigma, nu, s=1.0, rng=None):
     """Draw from multivariate Student-t with scale s^2 * Sigma."""
-    rng = np.random.default_rng() if rng is None else rng
+    rng = nrng.ensure_rng(rng)
     z = rng.multivariate_normal(np.zeros_like(hat), Sigma)
     g = rng.gamma(nu / 2.0, 2.0 / nu)
     return hat + s * z / np.sqrt(g / nu)
@@ -624,7 +626,7 @@ def _sample_variant_a_one(payload):
         obs2_sigma_dec,
         use_full_physics,
     ) = payload
-    rng = np.random.default_rng(seed)
+    rng = nrng.make_rng(seed)
     S1 = np.diag([(obs1_sigma_ra / 206265.0) ** 2, (obs1_sigma_dec / 206265.0) ** 2])
     S2 = np.diag([(obs2_sigma_ra / 206265.0) ** 2, (obs2_sigma_dec / 206265.0) ** 2])
     W2 = la.inv(S2)
@@ -769,7 +771,7 @@ def sample_variant_A(
     workers=None,
     seed=50,
 ):
-    rng = np.random.default_rng(seed)
+    rng = nrng.make_rng(seed)
     seeds = rng.integers(0, 2**32 - 1, size=N, dtype=np.uint32)
     workers = min(MAX_WORKERS, os.cpu_count() or 1) if workers is None else min(workers, MAX_WORKERS)
     payloads = [
