@@ -14,6 +14,7 @@ import os
 import numpy as np
 import scipy.linalg as la
 from scipy.optimize import least_squares
+from scipy.special import gammaln, logsumexp
 import pandas as pd
 from astropy.time import Time
 from astropy.coordinates import SkyCoord
@@ -45,10 +46,87 @@ MAX_WORKERS = 50
 MIXTURE_WEIGHT_GAUSS = 0.95
 MIXTURE_T_NU = 3.0
 MIXTURE_T_SCALE = 3.0
+GM_SUN = 1.32712440018e11  # km^3/s^2
+GM_EARTH = 398600.4418  # km^3/s^2
+AU_KM = 149597870.7
 
 
 def _chunksize(n_items, n_workers):
     return max(1, n_items // max(1, n_workers * 4))
+
+
+# ------------------------------
+# Utility: Gaussian / multivariate-t, mixture, rho-dependent prior scale
+# ------------------------------
+def logpdf_gauss(x, mu, Sigma):
+    """Log pdf of multivariate Gaussian N(mu, Sigma)."""
+    k = x.size
+    cf = la.cho_factor(Sigma, lower=True)
+    diff = x - mu
+    sol = la.cho_solve(cf, diff)
+    logdet = 2.0 * np.sum(np.log(np.diag(cf[0])))
+    return -0.5 * (k * np.log(2.0 * np.pi) + logdet + diff.dot(sol))
+
+
+def logpdf_mvt(x, mu, Sigma, nu):
+    """Log pdf of multivariate Student-t with df=nu, location mu, scale Sigma."""
+    k = x.size
+    diff = x - mu
+    invS = np.linalg.inv(Sigma)
+    quad = float(diff.dot(invS).dot(diff))
+    logdet = np.log(np.linalg.det(Sigma))
+    a = gammaln((nu + k) / 2.0) - gammaln(nu / 2.0)
+    b = -0.5 * (k * np.log(nu * np.pi) + logdet)
+    c = - (nu + k) / 2.0 * np.log(1.0 + quad / nu)
+    return float(a + b + c)
+
+
+def sample_mvt(hat, Sigma, nu, s=1.0, rng=None):
+    """Draw from multivariate Student-t with scale s^2 * Sigma."""
+    rng = np.random.default_rng() if rng is None else rng
+    z = rng.multivariate_normal(np.zeros_like(hat), Sigma)
+    g = rng.gamma(nu / 2.0, 2.0 / nu)
+    return hat + s * z / np.sqrt(g / nu)
+
+
+def sample_mixture(
+    hat_psi,
+    Sigma_psi,
+    weight_gauss=MIXTURE_WEIGHT_GAUSS,
+    weight_heavy=1.0 - MIXTURE_WEIGHT_GAUSS,
+    nu=MIXTURE_T_NU,
+    s=MIXTURE_T_SCALE,
+    rng=None,
+):
+    rng = np.random.default_rng() if rng is None else rng
+    if rng.random() < weight_gauss:
+        return rng.multivariate_normal(hat_psi, Sigma_psi), "G"
+    return sample_mvt(hat_psi, Sigma_psi, nu, s=s, rng=rng), "T"
+
+
+def log_proposal_mixture(
+    x,
+    hat_psi,
+    Sigma_psi,
+    weight_gauss=MIXTURE_WEIGHT_GAUSS,
+    weight_heavy=1.0 - MIXTURE_WEIGHT_GAUSS,
+    nu=MIXTURE_T_NU,
+    s=MIXTURE_T_SCALE,
+):
+    """Log proposal density of the mixture (stable via logsumexp)."""
+    log_g = np.log(weight_gauss) + logpdf_gauss(x, hat_psi, Sigma_psi)
+    Sigma_t = (s**2) * Sigma_psi
+    log_h = np.log(weight_heavy) + logpdf_mvt(x, hat_psi, Sigma_t, nu)
+    return float(logsumexp([log_g, log_h]))
+
+
+def sigma_v_from_rhelio(r_helio_km, f=1.5, r_min_km=1e5):
+    """Compute sigma_v (km/s) using heliocentric radius."""
+    r = max(float(r_helio_km), r_min_km)
+    sigma_v = f * np.sqrt(GM_SUN / r)
+    if r < 5.0 * 6378.1363:
+        sigma_v = f * np.sqrt(GM_EARTH / max(r, 1.0))
+    return float(sigma_v)
 
 # ------------------------------
 # CSV parsing helpers
@@ -321,9 +399,9 @@ def optimize_conditional_psi(
     site2,
     propagate_surrogate,
     W2,
-    prior_Ppsi_inv,
     obs2_ra,
     obs2_dec,
+    f_sigma_v=1.5,
 ):
     def residuals(psi):
         theta = np.concatenate(([logrho], psi))
@@ -352,6 +430,16 @@ def optimize_conditional_psi(
     res = least_squares(residuals, psi0, method="trf", xtol=1e-8, ftol=1e-8, gtol=1e-8)
     hat_psi = res.x
     theta_hat = np.concatenate(([logrho], hat_psi))
+    _, _, _, _, r1, _, _, _ = forward_predict_RADEC(
+        Gamma, theta_hat, obs1, obs2, site1, site2, propagate_surrogate
+    )
+    r_helio = np.linalg.norm(r1)
+    sigma_v = sigma_v_from_rhelio(r_helio, f=f_sigma_v)
+    sigma_rdot = sigma_v
+    prior_Ppsi_inv = np.diag(
+        [1.0 / (sigma_rdot**2), 1.0 / (sigma_v**2), 1.0 / (sigma_v**2)]
+    )
+
     J_full = jacobian_fd(
         Gamma,
         theta_hat,
@@ -388,8 +476,6 @@ def _sample_variant_a_one(payload):
     S1 = np.diag([(obs1_sigma_ra / 206265.0) ** 2, (obs1_sigma_dec / 206265.0) ** 2])
     S2 = np.diag([(obs2_sigma_ra / 206265.0) ** 2, (obs2_sigma_dec / 206265.0) ** 2])
     W2 = la.inv(S2)
-    sigma_v = 50.0
-    prior_Ppsi_inv = np.diag([1e-8, 1.0 / (sigma_v**2), 1.0 / (sigma_v**2)])
 
     dtheta_tan = rng.multivariate_normal(np.zeros(2), S1)
     alpha_s = obs1_ra + dtheta_tan[0] / cos_dec_for_ra_div(obs1_dec)
@@ -409,30 +495,73 @@ def _sample_variant_a_one(payload):
             site2,
             propagate_state_kepler,
             W2,
-            prior_Ppsi_inv,
             obs2_ra,
             obs2_dec,
         )
     except Exception:
         return None
-    if rng.random() < MIXTURE_WEIGHT_GAUSS:
-        psi_star = rng.multivariate_normal(hat_psi, Sigma_psi)
-    else:
-        z = rng.multivariate_normal(np.zeros_like(hat_psi), Sigma_psi)
-        g = rng.gamma(MIXTURE_T_NU / 2.0, 2.0 / MIXTURE_T_NU)
-        psi_star = hat_psi + MIXTURE_T_SCALE * z / np.sqrt(g / MIXTURE_T_NU)
-    theta_star = np.concatenate(([logrho], psi_star))
     eval_fn = propagate_state if use_full_physics and propagate_state is not None else propagate_state_kepler
-    try:
+
+    def compute_log_target(psi):
+        theta = np.concatenate(([logrho], psi))
         ra_pred, dec_pred, t_em1, t_em2, r1, v1, r2, v2 = forward_predict_RADEC(
-            Gamma, theta_star, obs1, obs2, site1, site2, eval_fn
+            Gamma, theta, obs1, obs2, site1, site2, eval_fn
         )
+        res = np.array([
+            angle_diff(ra_pred, obs2_ra) * np.cos(obs2_dec),
+            (dec_pred - obs2_dec),
+        ])
+        chi2 = res.T.dot(W2).dot(res)
+        r_helio = np.linalg.norm(r1)
+        sigma_v = sigma_v_from_rhelio(r_helio)
+        sigma_rdot = sigma_v
+        prior_cov = np.diag([sigma_rdot**2, sigma_v**2, sigma_v**2])
+        log_prior = logpdf_gauss(psi, np.zeros_like(psi), prior_cov)
+        log_like = -0.5 * chi2
+        return float(log_like + log_prior), (t_em1, t_em2, r1, v1, r2, v2, ra_pred, dec_pred)
+
+    try:
+        log_target_cur, state_cur = compute_log_target(hat_psi)
     except Exception:
         return None
+
+    psi_star, comp = sample_mixture(hat_psi, Sigma_psi, rng=rng)
+    log_q_forward = log_proposal_mixture(psi_star, hat_psi, Sigma_psi)
+    log_q_reverse = log_proposal_mixture(hat_psi, hat_psi, Sigma_psi)
+
+    try:
+        log_target_star, state_star = compute_log_target(psi_star)
+    except Exception:
+        return None
+
+    log_acc = log_target_star + log_q_reverse - (log_target_cur + log_q_forward)
+    if np.log(rng.random()) < log_acc:
+        psi_use = psi_star
+        state_use = state_star
+        accepted = True
+        accepted_comp = comp
+    else:
+        psi_use = hat_psi
+        state_use = state_cur
+        accepted = False
+        accepted_comp = "G"
+
+    t_em1, t_em2, r1, v1, r2, v2, ra_pred, dec_pred = state_use
+    eps = 0.5 * np.dot(v1, v1) - GM_SUN / np.linalg.norm(r1)
+    is_unbound_proposed = None
+    try:
+        _, _, r1_star, v1_star, _, _, _, _ = state_star
+        eps_star = 0.5 * np.dot(v1_star, v1_star) - GM_SUN / np.linalg.norm(r1_star)
+        is_unbound_proposed = bool(eps_star > 0.0)
+    except Exception:
+        is_unbound_proposed = None
+    is_unbound_accepted = bool(eps > 0.0)
+
+    theta_star = np.concatenate(([logrho], psi_use))
     return {
         "Gamma": Gamma,
         "logrho": logrho,
-        "psi": psi_star,
+        "psi": psi_use,
         "theta": theta_star,
         "ra_pred": ra_pred,
         "dec_pred": dec_pred,
@@ -442,6 +571,11 @@ def _sample_variant_a_one(payload):
         "v1": v1,
         "r2": r2,
         "v2": v2,
+        "proposal_component": comp,
+        "accepted_component": accepted_comp,
+        "accepted": accepted,
+        "is_unbound_proposed": is_unbound_proposed,
+        "is_unbound_accepted": is_unbound_accepted,
     }
 
 
@@ -484,10 +618,32 @@ def sample_variant_A(
         for i in range(N)
     ]
     samples = []
+    n_prop_g = 0
+    n_prop_t = 0
+    n_acc_g = 0
+    n_acc_t = 0
+    n_unbound_prop = 0
+    n_unbound_acc = 0
     with ProcessPoolExecutor(max_workers=workers) as executor:
         for out in executor.map(_sample_variant_a_one, payloads, chunksize=_chunksize(N, workers)):
             if out is not None:
+                if out.get("proposal_component") == "G":
+                    n_prop_g += 1
+                elif out.get("proposal_component") == "T":
+                    n_prop_t += 1
+                if out.get("accepted_component") == "G":
+                    n_acc_g += 1
+                elif out.get("accepted_component") == "T":
+                    n_acc_t += 1
+                if out.get("is_unbound_proposed"):
+                    n_unbound_prop += 1
+                if out.get("is_unbound_accepted"):
+                    n_unbound_acc += 1
                 samples.append(out)
+    print("Variant A proposal diagnostics:")
+    print(" n_proposed_G:", n_prop_g, "n_proposed_T:", n_prop_t)
+    print(" n_accepted_G:", n_acc_g, "n_accepted_T:", n_acc_t)
+    print(" n_unbound_proposed:", n_unbound_prop, "n_unbound_accepted:", n_unbound_acc)
     return samples
 
 
