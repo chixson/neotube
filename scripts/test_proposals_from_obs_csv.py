@@ -1007,20 +1007,26 @@ def angular_sep(ra1, dec1, ra2, dec2):
     return np.arccos(cosang)
 
 
-def summarize_and_plot(samples_A, samples_B, jpl_states, obs2_ra, obs2_dec):
+def summarize_and_plot(samples_A, samples_B, jpl_states, obs1, site1, obs2_ra, obs2_dec):
     def summarize(samples, label):
         ang_res_obs2 = []
         pos_res_em1 = []
         pos_res_em2 = []
+        rho_samples = []
+        rho_jpl_samples = []
         for s in samples:
             ang = angular_sep(s["ra_pred"], s["dec_pred"], obs2_ra, obs2_dec)
             ang_res_obs2.append(ang * 206265.0)
-            key1 = round(float(s["t_em1"].tdb.jd), 6)
-            key2 = round(float(s["t_em2"].tdb.jd), 6)
+            key1 = round(float(s["t_em1"].tdb.jd), HORIZONS_JD_DECIMALS)
+            key2 = round(float(s["t_em2"].tdb.jd), HORIZONS_JD_DECIMALS)
             r1_jpl, _ = jpl_states.get(key1, (None, None))
             r2_jpl, _ = jpl_states.get(key2, (None, None))
             pos_res_em1.append(np.nan if r1_jpl is None else np.linalg.norm(s["r1"] - r1_jpl))
             pos_res_em2.append(np.nan if r2_jpl is None else np.linalg.norm(s["r2"] - r2_jpl))
+            r_obs_em1, _ = observer_posvel(site1, s["t_em1"])
+            rho_samples.append(float(np.linalg.norm(s["r1"] - r_obs_em1)))
+            if r1_jpl is not None:
+                rho_jpl_samples.append(float(np.linalg.norm(r1_jpl - r_obs_em1)))
         print(f"--- {label} ---")
         print(
             "Obs2 angular residual arcsec: mean %.3f med %.3f std %.3f"
@@ -1034,10 +1040,16 @@ def summarize_and_plot(samples_A, samples_B, jpl_states, obs2_ra, obs2_dec):
             "Pos residual @ em2 km: mean %.3f med %.3f std %.3f"
             % (np.nanmean(pos_res_em2), np.nanmedian(pos_res_em2), np.nanstd(pos_res_em2))
         )
-        return np.array(ang_res_obs2), np.array(pos_res_em1), np.array(pos_res_em2)
+        return (
+            np.array(ang_res_obs2),
+            np.array(pos_res_em1),
+            np.array(pos_res_em2),
+            np.array(rho_samples),
+            np.array(rho_jpl_samples),
+        )
 
-    A_ang, A_p1, A_p2 = summarize(samples_A, "Variant A")
-    B_ang, B_p1, B_p2 = summarize(samples_B, "Variant B")
+    A_ang, A_p1, A_p2, A_rho, A_rho_jpl = summarize(samples_A, "Variant A")
+    B_ang, B_p1, B_p2, B_rho, B_rho_jpl = summarize(samples_B, "Variant B")
 
     plt.figure(figsize=(10, 4))
     plt.subplot(1, 2, 1)
@@ -1049,6 +1061,18 @@ def summarize_and_plot(samples_A, samples_B, jpl_states, obs2_ra, obs2_dec):
     plt.hist(A_p2[~np.isnan(A_p2)], bins=40, alpha=0.6, label="A em2 km")
     plt.hist(B_p2[~np.isnan(B_p2)], bins=40, alpha=0.6, label="B em2 km")
     plt.xlabel("pos residual @ em2 (km)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(8, 4))
+    plt.hist(A_rho, bins=40, alpha=0.6, label="A rho")
+    plt.hist(B_rho, bins=40, alpha=0.6, label="B rho")
+    if A_rho_jpl.size:
+        plt.hist(A_rho_jpl, bins=40, alpha=0.4, label="JPL rho (A times)")
+    if B_rho_jpl.size:
+        plt.hist(B_rho_jpl, bins=40, alpha=0.4, label="JPL rho (B times)")
+    plt.xlabel("rho at em1 (km)")
     plt.legend()
     plt.tight_layout()
     plt.show()
@@ -1241,4 +1265,4 @@ if __name__ == "__main__":
     )
     if failed_jds:
         print("Horizons failures:", len(failed_jds))
-    summarize_and_plot(samples_A, samples_B, jpl_states, obs2_ra, obs2_dec)
+    summarize_and_plot(samples_A, samples_B, jpl_states, obs1, site1, obs2_ra, obs2_dec)
