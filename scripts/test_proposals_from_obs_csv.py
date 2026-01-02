@@ -59,6 +59,13 @@ GM_EARTH = 398600.4418  # km^3/s^2
 AU_KM = 149597870.7
 HORIZONS_JD_DECIMALS = 6
 
+# New defaults for rho prior / triangulation proposals and velocity scaling
+WEIGHT_RHO_TRI = 0.02
+WEIGHT_RHO_GAUSS = 0.78
+SIGMA_LOGRHO = 2.0
+SIGMA_LOGRHO_TRI = 1.0
+DEFAULT_F_SIGMA_V = 1.0
+
 
 def _chunksize(n_items, n_workers):
     return max(1, n_items // max(1, n_workers * 4))
@@ -345,6 +352,21 @@ def tangent_basis(alpha_rad, delta_rad):
     return e_alpha, e_delta
 
 
+def triangulate_rho(O1, u1, O2, u2):
+    """Return (rho1, rho2) that minimize distance between two rays."""
+    r = O2 - O1
+    a = float(np.dot(u1, u1))
+    b = float(np.dot(u1, u2))
+    c = float(np.dot(u2, u2))
+    A = np.array([[a, -b], [-b, c]], dtype=float)
+    rhs = np.array([float(np.dot(u1, r)), -float(np.dot(u2, r))], dtype=float)
+    try:
+        rho1, rho2 = np.linalg.solve(A, rhs)
+    except np.linalg.LinAlgError:
+        return None, None
+    return float(rho1), float(rho2)
+
+
 def angle_diff(a, b):
     """Return the short signed angle difference a - b in radians in (-pi, pi]."""
     return (a - b + np.pi) % (2 * np.pi) - np.pi
@@ -613,8 +635,27 @@ def _sample_variant_a_one(payload):
     Gamma = (alpha_s, delta_s)
     rho_min = 1e3
     rho_max = 1e10
+    try:
+        hat_u1 = hat_u_from_radec(obs1_ra, obs1_dec)
+        hat_u2 = hat_u_from_radec(obs2_ra, obs2_dec)
+        r_obs_t1, _ = observer_posvel(site1, obs1)
+        r_obs_t2, _ = observer_posvel(site2, obs2)
+        rho1_tri, _ = triangulate_rho(r_obs_t1, hat_u1, r_obs_t2, hat_u2)
+        rho_tri = rho1_tri
+    except Exception:
+        rho_tri = None
+
     u = rng.random()
-    logrho = np.log(rho_min) + u * (np.log(rho_max) - np.log(rho_min))
+    if rho_tri is not None and u < WEIGHT_RHO_TRI:
+        logrho_center = np.log(np.clip(rho_tri, rho_min, rho_max))
+        logrho = float(rng.normal(loc=logrho_center, scale=SIGMA_LOGRHO_TRI))
+        rho_proposal_component = "tri"
+    elif u < (WEIGHT_RHO_TRI + WEIGHT_RHO_GAUSS):
+        logrho = float(rng.normal(loc=np.log(AU_KM), scale=SIGMA_LOGRHO))
+        rho_proposal_component = "gauss_1au"
+    else:
+        logrho = np.log(rho_min) + rng.random() * (np.log(rho_max) - np.log(rho_min))
+        rho_proposal_component = "loguniform"
     try:
         hat_psi, Sigma_psi = optimize_conditional_psi(
             Gamma,
@@ -627,6 +668,7 @@ def _sample_variant_a_one(payload):
             W2,
             obs2_ra,
             obs2_dec,
+            f_sigma_v=DEFAULT_F_SIGMA_V,
         )
     except Exception:
         return None
@@ -643,7 +685,7 @@ def _sample_variant_a_one(payload):
         ])
         chi2 = res.T.dot(W2).dot(res)
         r_helio = np.linalg.norm(r1)
-        sigma_v = sigma_v_from_rhelio(r_helio)
+        sigma_v = sigma_v_from_rhelio(r_helio, f=DEFAULT_F_SIGMA_V)
         sigma_rdot = sigma_v
         prior_cov = np.diag([sigma_rdot**2, sigma_v**2, sigma_v**2])
         log_prior = logpdf_gauss(psi, np.zeros_like(psi), prior_cov)
@@ -704,6 +746,7 @@ def _sample_variant_a_one(payload):
         "proposal_component": comp,
         "accepted_component": accepted_comp,
         "accepted": accepted,
+        "rho_proposal_component": rho_proposal_component,
         "is_unbound_proposed": is_unbound_proposed,
         "is_unbound_accepted": is_unbound_accepted,
     }
@@ -755,6 +798,9 @@ def sample_variant_A(
     n_acc_t = 0
     n_unbound_prop = 0
     n_unbound_acc = 0
+    n_rho_tri = 0
+    n_rho_gauss = 0
+    n_rho_logu = 0
     workers_sel, chunk_size = choose_workers_and_chunk(
         N, requested_workers=workers, max_workers=MAX_WORKERS
     )
@@ -780,11 +826,19 @@ def sample_variant_A(
                     n_unbound_prop += 1
                 if out.get("is_unbound_accepted"):
                     n_unbound_acc += 1
+                rpc = out.get("rho_proposal_component")
+                if rpc == "tri":
+                    n_rho_tri += 1
+                elif rpc == "gauss_1au":
+                    n_rho_gauss += 1
+                elif rpc == "loguniform":
+                    n_rho_logu += 1
                 samples.append(out)
     print("Variant A proposal diagnostics:")
     print(" n_proposed_G:", n_prop_g, "n_proposed_T:", n_prop_t)
     print(" n_accepted_G:", n_acc_g, "n_accepted_T:", n_acc_t)
     print(" n_unbound_proposed:", n_unbound_prop, "n_unbound_accepted:", n_unbound_acc)
+    print(" rho proposal breakdown: tri:", n_rho_tri, "gauss_1au:", n_rho_gauss, "loguniform:", n_rho_logu)
     return samples
 
 
@@ -1049,17 +1103,21 @@ def summarize_and_plot(samples_A, samples_B, jpl_states, obs1, site1, obs2_ra, o
         )
 
     A_ang, A_p1, A_p2, A_rho, A_rho_jpl = summarize(samples_A, "Variant A")
-    B_ang, B_p1, B_p2, B_rho, B_rho_jpl = summarize(samples_B, "Variant B")
+    B_ang = B_p1 = B_p2 = B_rho = B_rho_jpl = np.array([])
+    if samples_B:
+        B_ang, B_p1, B_p2, B_rho, B_rho_jpl = summarize(samples_B, "Variant B")
 
     plt.figure(figsize=(10, 4))
     plt.subplot(1, 2, 1)
     plt.hist(A_ang, bins=40, alpha=0.6, label="A")
-    plt.hist(B_ang, bins=40, alpha=0.6, label="B")
+    if B_ang.size:
+        plt.hist(B_ang, bins=40, alpha=0.6, label="B")
     plt.xlabel("Obs2 angular residual (arcsec)")
     plt.legend()
     plt.subplot(1, 2, 2)
     plt.hist(A_p2[~np.isnan(A_p2)], bins=40, alpha=0.6, label="A em2 km")
-    plt.hist(B_p2[~np.isnan(B_p2)], bins=40, alpha=0.6, label="B em2 km")
+    if B_p2.size:
+        plt.hist(B_p2[~np.isnan(B_p2)], bins=40, alpha=0.6, label="B em2 km")
     plt.xlabel("pos residual @ em2 (km)")
     plt.legend()
     plt.tight_layout()
@@ -1067,11 +1125,19 @@ def summarize_and_plot(samples_A, samples_B, jpl_states, obs1, site1, obs2_ra, o
 
     plt.figure(figsize=(8, 4))
     plt.hist(A_rho, bins=40, alpha=0.6, label="A rho")
-    plt.hist(B_rho, bins=40, alpha=0.6, label="B rho")
     if A_rho_jpl.size:
         plt.hist(A_rho_jpl, bins=40, alpha=0.4, label="JPL rho (A times)")
-    if B_rho_jpl.size:
-        plt.hist(B_rho_jpl, bins=40, alpha=0.4, label="JPL rho (B times)")
+        median_jpl = float(np.median(A_rho_jpl))
+        plt.axvline(median_jpl, color="k", linestyle="--", linewidth=1.5, label="JPL median rho")
+        plt.annotate(
+            f"JPL median: {median_jpl:,.0f} km",
+            xy=(median_jpl, plt.gca().get_ylim()[1] * 0.9),
+            xytext=(5, 0),
+            textcoords="offset points",
+            fontsize=8,
+            rotation=90,
+            va="top",
+        )
     plt.xlabel("rho at em1 (km)")
     plt.legend()
     plt.tight_layout()
@@ -1232,23 +1298,8 @@ if __name__ == "__main__":
         seed=args.seed,
     )
 
-    print("Sampling Variant B ...")
-    samples_B = optimize_joint_and_sample(
-        obs1,
-        obs2,
-        site1,
-        site2,
-        obs1_ra,
-        obs1_dec,
-        obs2_ra,
-        obs2_dec,
-        obs1_sigma_ra,
-        obs1_sigma_dec,
-        obs2_sigma_ra,
-        obs2_sigma_dec,
-        N=args.N,
-        workers=args.workers,
-    )
+    print("Skipping Variant B (joint Laplace) -- focusing on Variant A only.")
+    samples_B = []
 
     times_set = {}
     for s in samples_A + samples_B:
