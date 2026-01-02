@@ -25,6 +25,10 @@ from astropy.utils import iers
 import matplotlib.pyplot as plt
 from astroquery.jplhorizons import Horizons
 from concurrent.futures import ProcessPoolExecutor, as_completed
+try:
+    import numba as _numba
+except Exception:
+    _numba = None
 
 # ------------------------------
 # TRY TO IMPORT NEOTUBE HELPERS
@@ -295,6 +299,22 @@ def observer_posvel(site, t):
     return r_earth, v_earth
 
 
+def observer_posvel_jd(site, jd_tdb):
+    """Observer position/velocity using a TDB JD float."""
+    jd_key = round(float(jd_tdb), 8)
+    r_earth, v_earth = _observer_posvel_cached_jd(site, jd_key)
+    if _site_states is not None:
+        try:
+            cached = _site_state_cached_jd(site, jd_key)
+            if cached is None:
+                return r_earth, v_earth
+            pos_geo, vel_geo = cached
+            return r_earth + pos_geo, v_earth + vel_geo
+        except Exception:
+            return r_earth, v_earth
+    return r_earth, v_earth
+
+
 # ------------------------------
 # Unit vector / tangent basis
 # ------------------------------
@@ -337,6 +357,23 @@ def radec_from_vector(vec):
     return ra, dec
 
 
+if _numba is not None:
+    _angle_diff_nb = _numba.njit(cache=True)(angle_diff)
+
+    @_numba.njit(cache=True)
+    def _radec_from_vector_nb(vec):
+        x = vec[0]
+        y = vec[1]
+        z = vec[2]
+        r = (x * x + y * y + z * z) ** 0.5
+        dec = np.arcsin(z / r)
+        ra = np.arctan2(y, x) % (2 * np.pi)
+        return ra, dec
+else:
+    _angle_diff_nb = angle_diff
+    _radec_from_vector_nb = radec_from_vector
+
+
 # ------------------------------
 # Light-time / emission time solvers
 # ------------------------------
@@ -344,14 +381,15 @@ def solve_emission_time_for_obs(
     t_obs, rho_km, hat_u, site, tol=1e-8, maxit=30, max_step_s=3600.0
 ):
     """Newton solve for t_em so that photons emitted from r = r_obs(t_em)+rho*hat_u arrive at t_obs."""
-    t_em = Time(t_obs.tdb + (-rho_km / C) * u.s)
+    t_obs_jd = float(t_obs.tdb.jd)
+    t_em_jd = t_obs_jd + (-rho_km / C) / 86400.0
     for _ in range(maxit):
-        r_obs_tobs, _ = observer_posvel(site, t_obs)
-        r_obs_tem, v_obs_tem = observer_posvel(site, t_em)
+        r_obs_tobs, _ = observer_posvel_jd(site, t_obs_jd)
+        r_obs_tem, v_obs_tem = observer_posvel_jd(site, t_em_jd)
         r_target = r_obs_tem + rho_km * hat_u
         dvec = r_obs_tobs - r_target
         D = np.linalg.norm(dvec)
-        F = (t_obs.tdb.jd - t_em.tdb.jd) * 86400.0 - D / C
+        F = (t_obs_jd - t_em_jd) * 86400.0 - D / C
         if abs(F) < tol:
             break
         dFdt = -1.0 + (np.dot(dvec, v_obs_tem) / (C * D))
@@ -359,8 +397,8 @@ def solve_emission_time_for_obs(
             break
         dt = F / dFdt
         dt = float(np.clip(dt, -max_step_s, max_step_s))
-        t_em = Time(t_em.tdb + (-dt) * u.s)
-    return t_em, r_obs_tem, v_obs_tem
+        t_em_jd = t_em_jd + (-dt) / 86400.0
+    return Time(t_em_jd, format="jd", scale="tdb"), r_obs_tem, v_obs_tem
 
 
 def _propagate_state_to_time(r1, v1, t0, t1, propagate_fn):
@@ -383,17 +421,20 @@ def solve_emission_time_and_propagate(
     obs2, r1, v1, t_em1, site, propagate_fn, tol=1e-8, maxit=30, max_step_s=3600.0
 ):
     """Solve for t_em2 and propagate target from (r1,v1) at t_em1 to t_em2."""
-    r_obs_tobs2, _ = observer_posvel(site, obs2)
+    obs2_jd = float(obs2.tdb.jd)
+    r_obs_tobs2, _ = observer_posvel_jd(site, obs2_jd)
     D0 = np.linalg.norm(r_obs_tobs2 - r1)
-    t_em = Time(obs2.tdb + (-D0 / C) * u.s)
+    t_em_jd = obs2_jd + (-D0 / C) / 86400.0
     r_t = r1
     v_t = v1
     for _ in range(maxit):
-        r_t, v_t = _propagate_state_to_time(r1, v1, t_em1, t_em, propagate_fn)
-        r_obs_tobs2, _ = observer_posvel(site, obs2)
+        r_t, v_t = _propagate_state_to_time(
+            r1, v1, t_em1, Time(t_em_jd, format="jd", scale="tdb"), propagate_fn
+        )
+        r_obs_tobs2, _ = observer_posvel_jd(site, obs2_jd)
         dvec = r_obs_tobs2 - r_t
         D = np.linalg.norm(dvec)
-        F = (obs2.tdb.jd - t_em.tdb.jd) * 86400.0 - D / C
+        F = (obs2_jd - t_em_jd) * 86400.0 - D / C
         if abs(F) < tol:
             break
         dFdt = -1.0 + (np.dot(dvec, v_t) / (C * D))
@@ -401,8 +442,8 @@ def solve_emission_time_and_propagate(
             break
         dt = F / dFdt
         dt = float(np.clip(dt, -max_step_s, max_step_s))
-        t_em = Time(t_em.tdb + (-dt) * u.s)
-    return t_em, r_t, v_t
+        t_em_jd = t_em_jd + (-dt) / 86400.0
+    return Time(t_em_jd, format="jd", scale="tdb"), r_t, v_t
 
 
 # ------------------------------
@@ -427,7 +468,7 @@ def forward_predict_RADEC(Gamma, theta, obs1, obs2, site1, site2, propagate_surr
 
     r_obs_tobs2, _ = observer_posvel(site2, obs2)
     dvec = r_obs_tobs2 - r2
-    ra_pred, dec_pred = radec_from_vector(dvec)
+    ra_pred, dec_pred = _radec_from_vector_nb(dvec)
     return ra_pred, dec_pred, t_em1, t_em2, r1, v1, r2, v2
 
 
