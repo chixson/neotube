@@ -96,6 +96,46 @@ def _as_state_obj(state: object, epoch: object):
     return state
 
 
+def _state_physicality(
+    state: object, mu: float = 1.32712440018e11
+) -> tuple[bool, float, float, float, float]:
+    """
+    Return (is_ok, eps, a, e, rnorm) for a state.
+
+    Reject pathological orbits (NaNs, hyperbolic, extreme eccentricity) that
+    can break the Kepler solver or dominate scores with non-finite values.
+    """
+    try:
+        if hasattr(state, "pos") and hasattr(state, "vel"):
+            r = np.asarray(state.pos, dtype=float)
+            v = np.asarray(state.vel, dtype=float)
+        else:
+            arr = np.asarray(state, dtype=float).ravel()
+            if arr.size < 6:
+                return False, float("nan"), float("nan"), float("nan"), float("nan")
+            r = arr[:3]
+            v = arr[3:6]
+        rnorm = float(np.linalg.norm(r))
+        vnorm = float(np.linalg.norm(v))
+        eps = 0.5 * (vnorm**2) - mu / (rnorm + 1e-300)
+        a = float("inf")
+        if eps < 0.0:
+            a = -mu / (2.0 * eps)
+        h = np.cross(v, r)
+        evec = (np.cross(v, h) / mu) - (r / (rnorm + 1e-300))
+        e = float(np.linalg.norm(evec))
+        ok = (
+            np.isfinite(eps)
+            and np.isfinite(e)
+            and eps < 0.0
+            and e < 0.9999
+            and 1e5 < rnorm < 1e10
+        )
+        return bool(ok), float(eps), float(a), float(e), float(rnorm)
+    except Exception:
+        return False, float("nan"), float("nan"), float("nan"), float("nan")
+
+
 def _state_array_from_states(states: Sequence[object]) -> np.ndarray:
     """Return an (N,6) float array for states with best-effort conversion."""
     try:
@@ -249,23 +289,37 @@ def _score_states_full_chunk_args(args: tuple[np.ndarray, dict[str, object]]) ->
                     "SMC scoring: state has no epoch and no ctx['epoch'] available."
                 )
             state_obj = _as_state_obj(state, state_epoch)
+            ok, _, _, _, _ = _state_physicality(state_obj)
+            if not ok:
+                loglikes_local[i] = float("-inf")
+                continue
             ra_pred = np.empty(len(obs), dtype=float)
             dec_pred = np.empty(len(obs), dtype=float)
             for j, ob in enumerate(obs):
-                if ctx["use_kepler"]:
-                    st_at_obs = propagate_state_kepler(
-                        np.asarray(state_obj, dtype=float),
-                        state_epoch,
-                        [ob.time],
-                    )[0]
-                else:
-                    st_at_obs = propagate_state(
-                        np.asarray(state_obj, dtype=float),
-                        state_epoch,
-                        [ob.time],
-                        perturbers=ctx["perturbers"],
-                        max_step=ctx["max_step"],
-                    )[0]
+                try:
+                    if ctx["use_kepler"]:
+                        st_at_obs = propagate_state_kepler(
+                            np.asarray(state_obj, dtype=float),
+                            state_epoch,
+                            [ob.time],
+                        )[0]
+                    else:
+                        st_at_obs = propagate_state(
+                            np.asarray(state_obj, dtype=float),
+                            state_epoch,
+                            [ob.time],
+                            perturbers=ctx["perturbers"],
+                            max_step=ctx["max_step"],
+                        )[0]
+                except Exception as exc:
+                    pid = os.getpid()
+                    print(
+                        f"[fit_smc worker pid={pid}] propagate failed idx={i} obs={j}: {exc}",
+                        flush=True,
+                    )
+                    ra_pred[j] = float("nan")
+                    dec_pred[j] = float("nan")
+                    break
                 ra_tmp, dec_tmp = predict_radec_from_epoch(
                     st_at_obs,
                     ob.time,
@@ -282,6 +336,9 @@ def _score_states_full_chunk_args(args: tuple[np.ndarray, dict[str, object]]) ->
                 dec_pred[j] = float(dec_tmp[0])
             ll = 0.0
             for ra, dec, ob in zip(ra_pred, dec_pred, obs):
+                if not np.isfinite(ra) or not np.isfinite(dec):
+                    ll = float("-inf")
+                    break
                 ll += _gaussian_loglike(
                     float(ra),
                     float(dec),
@@ -633,6 +690,9 @@ def _full_logposterior_for_rho_rhodot(
         )
     except Exception:
         return -1e300, None
+    ok, _, _, _, _ = _state_physicality(state)
+    if not ok:
+        return -1e300, None
     try:
         ra_pred, dec_pred = predict_radec_from_epoch(
             state,
@@ -732,7 +792,8 @@ def _rejuvenate_duplicates_laplace_mh(
             best_rhodot = rhodot_hat
             for _ in range(max(1, n_candidates)):
                 try:
-                    cand = rng.multivariate_normal(mean, cov)
+                    # conservative covariance scaling to avoid pathological jumps
+                    cand = rng.multivariate_normal(mean, cov * 0.2)
                     logrho_c, rhodot_c = float(cand[0]), float(cand[1])
                     rho_c = float(math.exp(logrho_c))
                     ll_c, cand_state = _full_logposterior_for_rho_rhodot(
@@ -758,6 +819,9 @@ def _rejuvenate_duplicates_laplace_mh(
                     continue
 
             if best_state is None:
+                continue
+            ok, _, _, _, _ = _state_physicality(best_state)
+            if not ok:
                 continue
 
             cur_rho = best_rho
@@ -798,6 +862,9 @@ def _rejuvenate_duplicates_laplace_mh(
                 )
                 if cand_state is None:
                     continue
+                ok, _, _, _, _ = _state_physicality(cand_state)
+                if not ok:
+                    continue
                 if math.log(rng.random()) < (cand_ll - cur_ll):
                     cur_ll = cand_ll
                     cur_rho = cand_rho
@@ -805,9 +872,15 @@ def _rejuvenate_duplicates_laplace_mh(
                     best_state = cand_state
 
             try:
+                ok, _, _, _, _ = _state_physicality(best_state)
+                if not ok:
+                    continue
                 states[ridx] = np.asarray(best_state, dtype=float)
             except Exception:
                 try:
+                    ok, _, _, _, _ = _state_physicality(best_state)
+                    if not ok:
+                        continue
                     states[ridx] = np.array(best_state, dtype=float)
                 except Exception:
                     pass
