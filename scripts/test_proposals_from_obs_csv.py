@@ -70,14 +70,21 @@ def worker_init(openblas_threads=1):
 # Chunked execution helpers (to keep many cores busy)
 # ------------------------------
 def choose_workers_and_chunk(
-    n_samples, max_workers=None, target_per_worker=200, batches_per_worker=4
+    n_samples,
+    requested_workers=None,
+    max_workers=None,
+    target_per_worker=200,
+    batches_per_worker=4,
 ):
     """Pick workers/chunk size so each worker does enough full-physics work."""
     if max_workers is None:
         max_workers = min(50, os.cpu_count() or 1)
-    workers = min(max_workers, max(1, n_samples // target_per_worker))
-    total_chunks = max(1, workers * batches_per_worker)
-    chunk_size = max(1, int(math.ceil(n_samples / total_chunks)))
+    if requested_workers and requested_workers > 0:
+        workers = min(max_workers, max(1, min(int(requested_workers), n_samples)))
+    else:
+        workers = min(max_workers, max(1, n_samples // max(1, target_per_worker)))
+    total_chunks = max(1, workers * max(1, batches_per_worker))
+    chunk_size = max(1, int(math.ceil(float(n_samples) / total_chunks)))
     return workers, chunk_size
 
 
@@ -676,7 +683,9 @@ def sample_variant_A(
     n_acc_t = 0
     n_unbound_prop = 0
     n_unbound_acc = 0
-    workers_sel, chunk_size = choose_workers_and_chunk(N, max_workers=workers)
+    workers_sel, chunk_size = choose_workers_and_chunk(
+        N, requested_workers=workers, max_workers=MAX_WORKERS
+    )
     chunked_payloads = list(make_chunks(payloads, chunk_size))
     with ProcessPoolExecutor(
         max_workers=workers_sel, initializer=worker_init, initargs=(1,)
