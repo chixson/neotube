@@ -601,6 +601,7 @@ def _refine_logrho_rhodot(
     *,
     use_kepler: bool = True,
     max_nfev: int = 200,
+    initial_guess: tuple[float, float] | None = None,
 ) -> tuple[float, float, np.ndarray]:
     """Refine (logrho, rhodot) by minimizing angular residuals over obs_chunk."""
 
@@ -648,6 +649,14 @@ def _refine_logrho_rhodot(
     rhodot_lo, rhodot_hi = rhodot_bounds
     logrho0 = math.log(max(1.0, math.sqrt(rho_lo * rho_hi)))
     rhodot0 = 0.0
+    if initial_guess is not None:
+        try:
+            rho0, rhodot0 = float(initial_guess[0]), float(initial_guess[1])
+            rho0 = min(max(rho0, rho_lo), rho_hi)
+            rhodot0 = min(max(rhodot0, rhodot_lo), rhodot_hi)
+            logrho0 = math.log(max(1e-12, rho0))
+        except Exception:
+            pass
     try:
         sol = least_squares(
             _residual_vec,
@@ -666,6 +675,122 @@ def _refine_logrho_rhodot(
         return float(math.exp(xhat[0])), float(xhat[1]), cov
     except Exception:
         return float(math.exp(logrho0)), float(rhodot0), np.diag([1e-2, 1e-2])
+
+
+def _laplace_refine_worker(
+    args: tuple[
+        np.ndarray,
+        Sequence[Observation],
+        Observation,
+        Time,
+        np.ndarray,
+        np.ndarray,
+        tuple[float, float],
+        tuple[float, float],
+        Sequence[str],
+        float,
+        int,
+        int,
+    ]
+) -> dict[str, object]:
+    """Worker wrapper for Laplace refinement (kepler surrogate)."""
+    (
+        parent_state,
+        obs_chunk,
+        obs_ref,
+        epoch,
+        s_seed,
+        sdot_seed,
+        rho_bounds,
+        rhodot_bounds,
+        perturbers,
+        max_step,
+        light_time_iters,
+        max_nfev,
+    ) = args
+    try:
+        rho0 = float(np.linalg.norm(parent_state[:3]))
+        rhodot0 = float(np.dot(parent_state[3:6], s_seed))
+    except Exception:
+        rho0 = math.sqrt(max(1.0, rho_bounds[0] * rho_bounds[1]))
+        rhodot0 = 0.0
+    try:
+        rho_hat, rhodot_hat, cov = _refine_logrho_rhodot(
+            obs_chunk,
+            obs_ref,
+            epoch,
+            s_seed,
+            sdot_seed,
+            rho_bounds,
+            rhodot_bounds,
+            perturbers,
+            max_step,
+            light_time_iters,
+            use_kepler=True,
+            max_nfev=max_nfev,
+            initial_guess=(rho0, rhodot0),
+        )
+        return {"ok": True, "rho_hat": rho_hat, "rhodot_hat": rhodot_hat, "cov": cov}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _parallel_refine_parents(
+    parents: list[int],
+    states: np.ndarray,
+    obs_chunk: Sequence[Observation],
+    obs_ref: Observation,
+    epoch: Time,
+    s_seed: np.ndarray,
+    sdot_seed: np.ndarray,
+    rho_bounds: tuple[float, float],
+    rhodot_bounds: tuple[float, float],
+    perturbers: Sequence[str],
+    max_step: float,
+    light_time_iters: int,
+    max_nfev: int,
+    *,
+    max_workers: int | None = None,
+    timeout_s: float = 60.0,
+) -> dict[int, dict[str, object]]:
+    if not parents:
+        return {}
+    parent_states = _state_array_from_states(states)
+    if max_workers is None:
+        max_workers = max(1, min(len(parents), (os.cpu_count() or 1)))
+    ctx = mp.get_context("spawn")
+    results: dict[int, dict[str, object]] = {}
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=ctx,
+        initializer=_smc_worker_init,
+        initargs=(False,),
+    ) as executor:
+        futures = {}
+        for parent in parents:
+            args = (
+                parent_states[parent],
+                obs_chunk,
+                obs_ref,
+                epoch,
+                s_seed,
+                sdot_seed,
+                rho_bounds,
+                rhodot_bounds,
+                perturbers,
+                max_step,
+                light_time_iters,
+                max_nfev,
+            )
+            futures[executor.submit(_laplace_refine_worker, args)] = parent
+        for fut in futures:
+            parent = futures[fut]
+            try:
+                res = fut.result(timeout=timeout_s)
+            except Exception as exc:
+                res = {"ok": False, "error": str(exc)}
+            results[parent] = res
+    return results
 
 
 def _full_logposterior_for_rho_rhodot(
@@ -755,44 +880,49 @@ def _rejuvenate_duplicates_laplace_mh(
     for j, p in enumerate(resample_idx.tolist()):
         parent_to_indices.setdefault(int(p), []).append(int(j))
 
+    refine_results = _parallel_refine_parents(
+        dup_parents,
+        states,
+        obs_chunk,
+        obs_ref,
+        epoch,
+        s_seed,
+        sdot_seed,
+        rho_bounds,
+        rhodot_bounds,
+        perturbers,
+        max_step,
+        light_time_iters,
+        max_nfev,
+        max_workers=min(len(dup_parents), max(1, (os.cpu_count() or 1))),
+        timeout_s=60.0,
+    )
+
     for parent in dup_parents:
         idxs = parent_to_indices.get(parent, [])
         if len(idxs) <= 1:
             continue
-        for ridx in idxs[1:]:
-            try:
-                rho_hat, rhodot_hat, cov = _refine_logrho_rhodot(
-                    obs_chunk,
-                    obs_ref,
-                    epoch,
-                    s_seed,
-                    sdot_seed,
-                    rho_bounds,
-                    rhodot_bounds,
-                    perturbers,
-                    max_step,
-                    light_time_iters,
-                    use_kepler=True,
-                    max_nfev=max_nfev,
-                )
-            except Exception:
-                continue
-
-            mean = np.array([math.log(max(1e-12, rho_hat)), float(rhodot_hat)])
-            try:
-                cov = np.array(cov, dtype=float)
-                if cov.shape != (2, 2):
-                    cov = np.diag([1e-2, 1e-2])
-            except Exception:
+        refine = refine_results.get(parent, {})
+        if not refine.get("ok"):
+            continue
+        rho_hat = float(refine.get("rho_hat", 0.0) or 0.0)
+        rhodot_hat = float(refine.get("rhodot_hat", 0.0) or 0.0)
+        cov = refine.get("cov", None)
+        mean = np.array([math.log(max(1e-12, rho_hat)), float(rhodot_hat)])
+        try:
+            cov = np.array(cov, dtype=float)
+            if cov.shape != (2, 2):
                 cov = np.diag([1e-2, 1e-2])
+        except Exception:
+            cov = np.diag([1e-2, 1e-2])
 
+        for ridx in idxs[1:]:
             best_ll = -1e300
             best_state = None
             best_rho = rho_hat
             best_rhodot = rhodot_hat
             for _ in range(max(1, n_candidates)):
                 try:
-                    # conservative covariance scaling to avoid pathological jumps
                     cand = rng.multivariate_normal(mean, cov * 0.2)
                     logrho_c, rhodot_c = float(cand[0]), float(cand[1])
                     rho_c = float(math.exp(logrho_c))
