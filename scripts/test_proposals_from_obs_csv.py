@@ -62,11 +62,22 @@ AU_KM = 149597870.7
 HORIZONS_JD_DECIMALS = 6
 
 # New defaults for rho prior / triangulation proposals and velocity scaling
-WEIGHT_RHO_TRI = 0.02
-WEIGHT_RHO_GAUSS = 0.78
-SIGMA_LOGRHO = 2.0
+WEIGHT_RHO_TRI = 0.15
+WEIGHT_FLAT_RHO = 0.10
 SIGMA_LOGRHO_TRI = 1.0
 DEFAULT_F_SIGMA_V = 1.0
+FLAT_V_F = 3.0
+CIRCULAR_WEIGHT_SSO = 0.80
+CIRCULAR_WEIGHT_OTHER = 0.20
+
+SSO_RHO_COMPONENTS = [
+    ("NEO", 0.2 * AU_KM, 0.4, 0.10),
+    ("EarthVicinity", 1.0 * AU_KM, 0.6, 0.30),
+    ("MainBelt", 2.8 * AU_KM, 0.5, 0.35),
+    ("Jupiter", 5.2 * AU_KM, 0.3, 0.05),
+    ("TNO", 30.0 * AU_KM, 0.4, 0.10),
+    ("Comet", 5.0 * AU_KM, 1.5, 0.05),
+]
 
 
 def _chunksize(n_items, n_workers):
@@ -651,13 +662,30 @@ def _sample_variant_a_one(payload):
     if rho_tri is not None and u < WEIGHT_RHO_TRI:
         logrho_center = np.log(np.clip(rho_tri, rho_min, rho_max))
         logrho = float(rng.normal(loc=logrho_center, scale=SIGMA_LOGRHO_TRI))
-        rho_proposal_component = "tri"
-    elif u < (WEIGHT_RHO_TRI + WEIGHT_RHO_GAUSS):
-        logrho = float(rng.normal(loc=np.log(AU_KM), scale=SIGMA_LOGRHO))
-        rho_proposal_component = "gauss_1au"
+        rho_prior_component = "tri"
+    elif u < (WEIGHT_RHO_TRI + WEIGHT_FLAT_RHO):
+        rho = float(rng.random() * (rho_max - rho_min) + rho_min)
+        logrho = np.log(rho)
+        rho_prior_component = "flat_linear"
     else:
-        logrho = np.log(rho_min) + rng.random() * (np.log(rho_max) - np.log(rho_min))
-        rho_proposal_component = "loguniform"
+        names = [c[0] for c in SSO_RHO_COMPONENTS]
+        centers = [c[1] for c in SSO_RHO_COMPONENTS]
+        sigs = [c[2] for c in SSO_RHO_COMPONENTS]
+        comp_weights = np.array([c[3] for c in SSO_RHO_COMPONENTS], dtype=float)
+        comp_weights /= comp_weights.sum()
+        comp_idx = rng.choice(len(SSO_RHO_COMPONENTS), p=comp_weights)
+        center_rho = centers[comp_idx]
+        sigma_log = sigs[comp_idx]
+        logrho = float(rng.normal(loc=np.log(center_rho), scale=sigma_log))
+        logrho = float(np.clip(logrho, np.log(rho_min), np.log(rho_max)))
+        rho_prior_component = f"sso_{names[comp_idx]}"
+
+    if rho_prior_component.startswith("sso_"):
+        circular_w = CIRCULAR_WEIGHT_SSO
+    else:
+        circular_w = CIRCULAR_WEIGHT_OTHER
+    vel_mode = "circular" if rng.random() < circular_w else "flat"
+    f_sigma_v_sample = DEFAULT_F_SIGMA_V if vel_mode == "circular" else FLAT_V_F
     try:
         hat_psi, Sigma_psi = optimize_conditional_psi(
             Gamma,
@@ -670,7 +698,7 @@ def _sample_variant_a_one(payload):
             W2,
             obs2_ra,
             obs2_dec,
-            f_sigma_v=DEFAULT_F_SIGMA_V,
+            f_sigma_v=f_sigma_v_sample,
         )
     except Exception:
         return None
@@ -687,10 +715,16 @@ def _sample_variant_a_one(payload):
         ])
         chi2 = res.T.dot(W2).dot(res)
         r_helio = np.linalg.norm(r1)
-        sigma_v = sigma_v_from_rhelio(r_helio, f=DEFAULT_F_SIGMA_V)
+        sigma_v = sigma_v_from_rhelio(r_helio, f=f_sigma_v_sample)
         sigma_rdot = sigma_v
         prior_cov = np.diag([sigma_rdot**2, sigma_v**2, sigma_v**2])
-        log_prior = logpdf_gauss(psi, np.zeros_like(psi), prior_cov)
+        if vel_mode == "flat":
+            log_g = logpdf_gauss(psi, np.zeros_like(psi), prior_cov)
+            Sigma_t = (3.0**2) * prior_cov
+            log_t = logpdf_mvt(psi, np.zeros_like(psi), Sigma_t, nu=3.0)
+            log_prior = float(logsumexp([np.log(0.8) + log_g, np.log(0.2) + log_t]))
+        else:
+            log_prior = logpdf_gauss(psi, np.zeros_like(psi), prior_cov)
         log_like = -0.5 * chi2
         return float(log_like + log_prior), (t_em1, t_em2, r1, v1, r2, v2, ra_pred, dec_pred)
 
@@ -735,6 +769,8 @@ def _sample_variant_a_one(payload):
     return {
         "Gamma": Gamma,
         "logrho": logrho,
+        "rho_prior_component": rho_prior_component,
+        "vel_mode": vel_mode,
         "psi": psi_use,
         "theta": theta_star,
         "ra_pred": ra_pred,
@@ -801,8 +837,10 @@ def sample_variant_A(
     n_unbound_prop = 0
     n_unbound_acc = 0
     n_rho_tri = 0
-    n_rho_gauss = 0
-    n_rho_logu = 0
+    n_rho_flat = 0
+    sso_counts = {c[0]: 0 for c in SSO_RHO_COMPONENTS}
+    n_vel_circular = 0
+    n_vel_flat = 0
     workers_sel, chunk_size = choose_workers_and_chunk(
         N, requested_workers=workers, max_workers=MAX_WORKERS
     )
@@ -828,19 +866,27 @@ def sample_variant_A(
                     n_unbound_prop += 1
                 if out.get("is_unbound_accepted"):
                     n_unbound_acc += 1
-                rpc = out.get("rho_proposal_component")
+                rpc = out.get("rho_prior_component")
                 if rpc == "tri":
                     n_rho_tri += 1
-                elif rpc == "gauss_1au":
-                    n_rho_gauss += 1
-                elif rpc == "loguniform":
-                    n_rho_logu += 1
+                elif rpc == "flat_linear":
+                    n_rho_flat += 1
+                elif rpc and rpc.startswith("sso_"):
+                    name = rpc.split("sso_")[1]
+                    if name in sso_counts:
+                        sso_counts[name] += 1
+                vm = out.get("vel_mode")
+                if vm == "circular":
+                    n_vel_circular += 1
+                elif vm == "flat":
+                    n_vel_flat += 1
                 samples.append(out)
     print("Variant A proposal diagnostics:")
     print(" n_proposed_G:", n_prop_g, "n_proposed_T:", n_prop_t)
     print(" n_accepted_G:", n_acc_g, "n_accepted_T:", n_acc_t)
     print(" n_unbound_proposed:", n_unbound_prop, "n_unbound_accepted:", n_unbound_acc)
-    print(" rho proposal breakdown: tri:", n_rho_tri, "gauss_1au:", n_rho_gauss, "loguniform:", n_rho_logu)
+    print(" rho prior breakdown: tri:", n_rho_tri, "flat_linear:", n_rho_flat, "sso_counts:", sso_counts)
+    print(" velocity-mode breakdown: circular:", n_vel_circular, "flat:", n_vel_flat)
     return samples
 
 
