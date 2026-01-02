@@ -62,6 +62,13 @@ def worker_init(openblas_threads=1):
     os.environ["OPENBLAS_NUM_THREADS"] = str(openblas_threads)
     os.environ["OMP_NUM_THREADS"] = str(openblas_threads)
     os.environ["MKL_NUM_THREADS"] = str(openblas_threads)
+    from astropy.utils import iers
+    iers.conf.auto_download = False
+    iers.conf.iers_degraded_accuracy = "warn"
+    try:
+        iers.IERS_Auto.open()
+    except Exception:
+        pass
     import astropy.coordinates  # warm caches
     import neotube.propagate as _prop  # noqa: F401
 
@@ -247,15 +254,27 @@ def _observer_posvel_cached_jd(site, jd):
 
     def _as_vel_kms(obj):
         if hasattr(obj, "d_xyz"):
-            return obj.d_xyz.to(u.km / u.s)
-        return obj.xyz.to(u.km / u.s)
+            return obj.d_xyz.to_value(u.km / u.s)
+        return obj.xyz.to_value(u.km / u.s)
 
     t = Time(jd, format="jd", scale="tdb")
     pb_earth = get_body_barycentric_posvel("earth", t)
     pb_sun = get_body_barycentric_posvel("sun", t)
-    r_earth = np.array((pb_earth[0].xyz - pb_sun[0].xyz).to(u.km)).flatten()
-    v_earth = np.array((_as_vel_kms(pb_earth[1]) - _as_vel_kms(pb_sun[1]))).flatten()
+    r_earth = (pb_earth[0].xyz - pb_sun[0].xyz).to_value(u.km).flatten()
+    v_earth = (_as_vel_kms(pb_earth[1]) - _as_vel_kms(pb_sun[1])).flatten()
     return r_earth, v_earth
+
+
+@functools.lru_cache(maxsize=4096)
+def _site_state_cached_jd(site, jd):
+    """Cached site offset for (site, jd) in TDB."""
+    if _site_states is None:
+        return None
+    t = Time(jd, format="jd", scale="tdb")
+    pos_geo, vel_geo = _site_states([t], [site], allow_unknown_site=True)
+    pos = np.asarray(pos_geo[0], dtype=float)
+    vel = np.asarray(vel_geo[0], dtype=float)
+    return pos, vel
 
 
 def observer_posvel(site, t):
@@ -266,8 +285,11 @@ def observer_posvel(site, t):
     r_earth, v_earth = _observer_posvel_cached_jd(site, jd_key)
     if _site_states is not None:
         try:
-            pos_geo, vel_geo = _site_states([t], [site], allow_unknown_site=True)
-            return r_earth + pos_geo[0], v_earth + vel_geo[0]
+            cached = _site_state_cached_jd(site, jd_key)
+            if cached is None:
+                return r_earth, v_earth
+            pos_geo, vel_geo = cached
+            return r_earth + pos_geo, v_earth + vel_geo
         except Exception:
             return r_earth, v_earth
     return r_earth, v_earth
