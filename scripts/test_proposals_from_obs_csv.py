@@ -51,12 +51,13 @@ iers.conf.iers_degraded_accuracy = "warn"
 
 USE_FULL_PHYSICS = True
 MAX_WORKERS = 50
-MIXTURE_WEIGHT_GAUSS = 0.99
+MIXTURE_WEIGHT_GAUSS = 0.95
 MIXTURE_T_NU = 3.0
-MIXTURE_T_SCALE = 2.0
+MIXTURE_T_SCALE = 3.0
 GM_SUN = 1.32712440018e11  # km^3/s^2
 GM_EARTH = 398600.4418  # km^3/s^2
 AU_KM = 149597870.7
+HORIZONS_JD_DECIMALS = 6
 
 
 def _chunksize(n_items, n_workers):
@@ -136,9 +137,15 @@ def logpdf_mvt(x, mu, Sigma, nu):
     """Log pdf of multivariate Student-t with df=nu, location mu, scale Sigma."""
     k = x.size
     diff = x - mu
-    invS = np.linalg.inv(Sigma)
-    quad = float(diff.dot(invS).dot(diff))
-    logdet = np.log(np.linalg.det(Sigma))
+    try:
+        cf = la.cho_factor(Sigma, lower=True)
+        sol = la.cho_solve(cf, diff)
+        quad = float(diff.dot(sol))
+        logdet = 2.0 * np.sum(np.log(np.diag(cf[0])))
+    except Exception:
+        invS = np.linalg.inv(Sigma)
+        quad = float(diff.dot(invS).dot(diff))
+        logdet = np.log(np.linalg.det(Sigma))
     a = gammaln((nu + k) / 2.0) - gammaln(nu / 2.0)
     b = -0.5 * (k * np.log(nu * np.pi) + logdet)
     c = - (nu + k) / 2.0 * np.log(1.0 + quad / nu)
@@ -935,8 +942,10 @@ def fetch_jpl_state(
     cache_path=None,
     max_retries=5,
     backoff=2.0,
+    jd_decimals=HORIZONS_JD_DECIMALS,
 ):
     results = {}
+    failed = []
     cache = {}
     if cache_path is not None and os.path.exists(cache_path):
         try:
@@ -945,10 +954,13 @@ def fetch_jpl_state(
         except Exception:
             cache = {}
     for t in times:
-        jd_key = f"{round(float(t.tdb.jd), 6):.6f}"
+        jd_key = f"{round(float(t.tdb.jd), jd_decimals):.{jd_decimals}f}"
         if jd_key in cache:
             entry = cache[jd_key]
-            results[float(jd_key)] = (np.array(entry["r"]), np.array(entry["v"]))
+            results[float(jd_key)] = (
+                np.array(entry["r"], dtype=float),
+                np.array(entry["v"], dtype=float),
+            )
             continue
         last_exc = None
         for attempt in range(max_retries):
@@ -972,14 +984,17 @@ def fetch_jpl_state(
                     time.sleep(backoff ** attempt)
         else:
             results[float(jd_key)] = (None, None)
+            failed.append(jd_key)
             print("Horizons fetch failed for", t, ":", last_exc)
     if cache_path is not None:
         try:
-            with open(cache_path, "w", encoding="utf-8") as f:
+            tmp_path = cache_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(cache, f)
+            os.replace(tmp_path, cache_path)
         except Exception:
             pass
-    return results
+    return results, failed
 
 
 # ------------------------------
@@ -1074,6 +1089,7 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=200, help="Number of samples per variant")
     parser.add_argument("--workers", type=int, default=None, help="Max parallel workers (default: CPU count up to 50)")
     parser.add_argument("--seed", type=int, default=50, help="RNG seed for reproducible sampling")
+    parser.add_argument("--horizons-cache", default=None, help="Path to Horizons cache JSON")
     physics_group = parser.add_mutually_exclusive_group()
     physics_group.add_argument(
         "--full-physics",
@@ -1216,7 +1232,13 @@ if __name__ == "__main__":
         times_set[round(float(s["t_em2"].tdb.jd), 6)] = s["t_em2"]
     times_list = list(times_set.values())
     print("Querying JPL/Horizons for %d unique emission times ..." % len(times_list))
-    cache_dir = os.path.dirname(os.path.abspath(args.csv))
-    cache_path = os.path.join(cache_dir, "horizons_cache.json")
-    jpl_states = fetch_jpl_state(args.object, times_list, center="@sun", cache_path=cache_path)
+    cache_path = args.horizons_cache
+    if cache_path is None:
+        cache_dir = os.path.dirname(os.path.abspath(args.csv))
+        cache_path = os.path.join(cache_dir, "horizons_cache.json")
+    jpl_states, failed_jds = fetch_jpl_state(
+        args.object, times_list, center="@sun", cache_path=cache_path
+    )
+    if failed_jds:
+        print("Horizons failures:", len(failed_jds))
     summarize_and_plot(samples_A, samples_B, jpl_states, obs2_ra, obs2_dec)
