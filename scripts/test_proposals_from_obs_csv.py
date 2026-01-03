@@ -778,6 +778,129 @@ def _sample_variant_a_one(payload):
         )
     except Exception:
         return None
+
+    # --- Begin diagnostic logging (insert in _sample_variant_a_one after hat_psi, Sigma_psi, Jpsi are available) ---
+    import csv
+    import os
+
+    DEBUG_LOGPATH = os.path.join(
+        os.path.dirname(__file__), "..", "runs", "ceres-ground-test", "debug_nullspace.csv"
+    )
+    DEBUG_LOGPATH = os.path.abspath(DEBUG_LOGPATH)
+    os.makedirs(os.path.dirname(DEBUG_LOGPATH), exist_ok=True)
+
+    def _dump_debug_row(
+        seed,
+        rho_component,
+        vel_mode,
+        psi_prior_mean,
+        hat_psi,
+        Jpsi,
+        Sigma_psi,
+        mu_s=None,
+        sigma_s2=None,
+        s_phys=None,
+        eps_hat=None,
+    ):
+        # compute data residual at hat_psi
+        try:
+            theta_hat = np.concatenate(([logrho], hat_psi))
+            ra_pred_hat, dec_pred_hat, t_em1_hat, t_em2_hat, r1_hat, v1_hat, _, _ = (
+                forward_predict_RADEC(
+                    Gamma, theta_hat, obs1, obs2, site1, site2, propagate_state_kepler
+                )
+            )
+            res_vec = np.array(
+                [angle_diff(ra_pred_hat, obs2_ra) * np.cos(obs2_dec), (dec_pred_hat - obs2_dec)]
+            )
+            Wsqrt = la.cholesky(W2)
+            data_res_norm = float(np.linalg.norm(Wsqrt.dot(res_vec)))
+        except Exception:
+            data_res_norm = float("nan")
+        # prior residual norm
+        try:
+            sigma_v_tmp = sigma_v_from_rhelio(np.linalg.norm(r1_hat), f=DEFAULT_F_SIGMA_V)
+            _ = np.diag([sigma_v_tmp**2, sigma_v_tmp**2, sigma_v_tmp**2])
+            prior_res = hat_psi - psi_prior_mean
+            prior_res_norm = float(np.linalg.norm(prior_res))
+        except Exception:
+            prior_res_norm = float("nan")
+
+        # Jpsi singular values
+        try:
+            Uj, Svals, Vt = np.linalg.svd(Jpsi, full_matrices=True)
+            s1, s2 = float(Svals[0]), float(Svals[1])
+        except Exception:
+            s1, s2 = float("nan"), float("nan")
+
+        # eps at hat_psi
+        try:
+            eps_hat = 0.5 * np.dot(v1_hat, v1_hat) - GM_SUN / np.linalg.norm(r1_hat)
+        except Exception:
+            eps_hat = float("nan")
+
+        header = [
+            "seed",
+            "rho_component",
+            "vel_mode",
+            "psi_prior_mean_dotrho",
+            "psi_prior_mean_ve",
+            "psi_prior_mean_vn",
+            "hat_dotrho",
+            "hat_ve",
+            "hat_vn",
+            "data_res_norm",
+            "prior_res_norm",
+            "prior_over_data_ratio",
+            "Jpsi_s1",
+            "Jpsi_s2",
+            "mu_s",
+            "sigma_s2",
+            "s_phys",
+            "eps_hat",
+        ]
+        newfile = not os.path.exists(DEBUG_LOGPATH)
+        with open(DEBUG_LOGPATH, "a", newline="") as f:
+            w = csv.writer(f)
+            if newfile:
+                w.writerow(header)
+            row = [
+                int(seed),
+                rho_component,
+                vel_mode,
+                float(psi_prior_mean[0]),
+                float(psi_prior_mean[1]),
+                float(psi_prior_mean[2]),
+                float(hat_psi[0]),
+                float(hat_psi[1]),
+                float(hat_psi[2]),
+                data_res_norm,
+                prior_res_norm,
+                (prior_res_norm / max(1e-12, data_res_norm))
+                if (not np.isnan(data_res_norm))
+                else float("nan"),
+                s1,
+                s2,
+                float(mu_s) if mu_s is not None else float("nan"),
+                float(sigma_s2) if sigma_s2 is not None else float("nan"),
+                float(s_phys) if s_phys is not None else float("nan"),
+                float(eps_hat) if eps_hat is not None else float("nan"),
+            ]
+            w.writerow(row)
+
+    _dump_debug_row(
+        seed,
+        rho_prior_component,
+        vel_mode,
+        psi_prior_mean,
+        hat_psi,
+        Jpsi,
+        Sigma_psi,
+        mu_s=locals().get("mu_s"),
+        sigma_s2=locals().get("sigma_s2"),
+        s_phys=locals().get("s_phys"),
+    )
+    # --- End diagnostic logging ---
     eval_fn = propagate_state if use_full_physics and propagate_state is not None else propagate_state_kepler
 
     def compute_log_target(psi):
