@@ -179,6 +179,15 @@ def logpdf_mvt(x, mu, Sigma, nu):
     return float(a + b + c)
 
 
+def logpdf_t_univariate(x, nu, loc=0.0, scale=1.0):
+    """Log pdf of univariate Student-t with df=nu, location loc and scale."""
+    dx = (float(x) - float(loc)) / float(scale)
+    a = gammaln((nu + 1.0) / 2.0) - gammaln(nu / 2.0)
+    b = -0.5 * (np.log(nu * np.pi) + 2.0 * np.log(float(scale)))
+    c = -0.5 * (nu + 1.0) * np.log(1.0 + (dx * dx) / float(nu))
+    return float(a + b + c)
+
+
 def sample_mvt(hat, Sigma, nu, s=1.0, rng=None):
     """Draw from multivariate Student-t with scale s^2 * Sigma."""
     rng = nrng.ensure_rng(rng)
@@ -624,7 +633,7 @@ def optimize_conditional_psi(
     )
     Jpsi = J_full[:, 3:6]
     Sigma_psi = la.inv(Jpsi.T.dot(W2).dot(Jpsi) + prior_Ppsi_inv)
-    return hat_psi, Sigma_psi
+    return hat_psi, Sigma_psi, Jpsi
 
 
 def _sample_variant_a_one(payload):
@@ -696,7 +705,7 @@ def _sample_variant_a_one(payload):
     if not np.isfinite(logrho):
         return None
     try:
-        hat_psi, Sigma_psi = optimize_conditional_psi(
+        hat_psi, Sigma_psi, Jpsi = optimize_conditional_psi(
             Gamma,
             logrho,
             obs1,
@@ -742,9 +751,146 @@ def _sample_variant_a_one(payload):
     except Exception:
         return None
 
-    psi_star, comp = sample_mixture(hat_psi, Sigma_psi, rng=rng)
-    log_q_forward = log_proposal_mixture(psi_star, hat_psi, Sigma_psi)
-    log_q_reverse = log_proposal_mixture(hat_psi, hat_psi, Sigma_psi)
+    # ------------------------------
+    # Nullspace-aware sampling of psi (hat_psi + V_r z + n s)
+    # ------------------------------
+    s_comp = None
+    for attempt in range(3):
+        try:
+            Uj, Svals, Vt = np.linalg.svd(Jpsi, full_matrices=True)
+            V = Vt.T
+            V_r = V[:, :2]
+            n = V[:, 2]
+            U3 = np.column_stack([V_r, n])
+
+            Sigma_w = U3.T.dot(Sigma_psi).dot(U3)
+            A = Sigma_w[:2, :2].copy()
+            b = Sigma_w[:2, 2].copy()
+            c = float(Sigma_w[2, 2])
+            A += 1e-12 * np.eye(2)
+
+            L = la.cho_factor(A, lower=True)
+            z = rng.multivariate_normal(np.zeros(2), A)
+            Ainv_z = la.cho_solve(L, z)
+            Ainv_b = la.cho_solve(L, b)
+            mu_s = float(b.T.dot(Ainv_z))
+            sigma_s2 = max(1e-12, c - float(b.T.dot(Ainv_b)))
+
+            hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
+            try:
+                _, r_obs_em1_tmp, v_obs_em1_tmp = solve_emission_time_for_obs(
+                    obs1, np.exp(logrho), hat_u, site1
+                )
+            except Exception:
+                r_obs_em1_tmp, v_obs_em1_tmp = observer_posvel(site1, obs1)
+            r1_tmp = r_obs_em1_tmp + np.exp(logrho) * hat_u
+            r_helio_tmp = np.linalg.norm(r1_tmp)
+            v_circ = np.sqrt(GM_SUN / max(r_helio_tmp, 1.0))
+
+            dt = max(1.0, (obs2.tdb.jd - obs1.tdb.jd) * 86400.0)
+            dalpha = angle_diff(obs2_ra, Gamma[0])
+            ddelta = (obs2_dec - Gamma[1])
+            d_alpha_dt = dalpha / dt
+            d_delta_dt = ddelta / dt
+            rho_val = float(np.exp(logrho))
+            ve0 = rho_val * d_alpha_dt * np.cos(Gamma[1])
+            vn0 = rho_val * d_delta_dt
+            e_alpha, e_delta = tangent_basis(Gamma[0], Gamma[1])
+
+            v_guess_helio = v_obs_em1_tmp + ve0 * e_alpha + vn0 * e_delta
+            r1_hat = r1_tmp / max(np.linalg.norm(r1_tmp), 1e-12)
+            v_proj = v_guess_helio - np.dot(v_guess_helio, r1_hat) * r1_hat
+            vproj_norm = np.linalg.norm(v_proj)
+            if vproj_norm < 1e-8:
+                zaxis = np.array([0.0, 0.0, 1.0])
+                if abs(np.dot(r1_hat, zaxis)) > 0.9:
+                    zaxis = np.array([1.0, 0.0, 0.0])
+                v_proj = np.cross(r1_hat, zaxis)
+                vproj_norm = max(np.linalg.norm(v_proj), 1e-12)
+            vproj_unit = v_proj / vproj_norm
+            if np.dot(vproj_unit, v_guess_helio) < 0:
+                vproj_unit = -vproj_unit
+            v1_circ_mean = v_circ * vproj_unit
+            v_topo_mean = v1_circ_mean - v_obs_em1_tmp
+            dotrho_mean = float(np.dot(v_topo_mean, hat_u))
+            ve_mean = float(np.dot(v_topo_mean, e_alpha))
+            vn_mean = float(np.dot(v_topo_mean, e_delta))
+            psi_prior_mean = np.array([dotrho_mean, ve_mean, vn_mean], dtype=float)
+            s_phys = float(n.dot(psi_prior_mean - hat_psi))
+
+            if rho_prior_component.startswith("sso_"):
+                w_phys, w_cond, w_tail = 0.70, 0.20, 0.10
+            elif rho_prior_component == "tri":
+                w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
+            elif rho_prior_component == "flat_linear":
+                w_phys, w_cond, w_tail = 0.20, 0.50, 0.30
+            else:
+                w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
+            if rho_prior_component == "sso_Comet":
+                w_phys, w_cond, w_tail = 0.20, 0.30, 0.50
+            w_sum = w_phys + w_cond + w_tail
+            w_phys, w_cond, w_tail = w_phys / w_sum, w_cond / w_sum, w_tail / w_sum
+
+            tau = max(1e-3, 0.75 * np.sqrt(sigma_s2))
+            kappa = 3.0
+            nu = 3.0
+
+            u_comp = rng.random()
+            if u_comp < w_cond:
+                s = float(mu_s + np.sqrt(sigma_s2) * rng.normal())
+                s_comp = "cond"
+            elif u_comp < (w_cond + w_phys):
+                s = float(s_phys + tau * rng.normal())
+                s_comp = "phys"
+            else:
+                s = float(mu_s + np.sqrt(sigma_s2) * kappa * rng.standard_t(df=nu))
+                s_comp = "tail"
+
+            w_vec = np.concatenate([z, np.array([s])])
+            psi_star = hat_psi + U3.dot(w_vec)
+
+            log_q_z = logpdf_gauss(z, np.zeros(2), A)
+            log_q_cond_s = -0.5 * (
+                np.log(2.0 * np.pi * sigma_s2) + ((s - mu_s) ** 2) / sigma_s2
+            )
+            log_q_phys_s = -0.5 * (
+                np.log(2.0 * np.pi * (tau**2)) + ((s - s_phys) ** 2) / (tau**2)
+            )
+            log_q_tail_s = logpdf_t_univariate(
+                s, nu, loc=mu_s, scale=np.sqrt(sigma_s2) * kappa
+            )
+            log_q_forward = float(
+                logsumexp(
+                    [
+                        np.log(w_cond) + log_q_z + log_q_cond_s,
+                        np.log(w_phys) + log_q_z + log_q_phys_s,
+                        np.log(w_tail) + log_q_z + log_q_tail_s,
+                    ]
+                )
+            )
+
+            log_q_z0 = logpdf_gauss(np.zeros(2), np.zeros(2), A)
+            log_q_cond_s0 = -0.5 * np.log(2.0 * np.pi * sigma_s2)
+            log_q_phys_s0 = -0.5 * (
+                np.log(2.0 * np.pi * (tau**2)) + ((0.0 - s_phys) ** 2) / (tau**2)
+            )
+            log_q_tail_s0 = logpdf_t_univariate(
+                0.0, nu, loc=0.0, scale=np.sqrt(sigma_s2) * kappa
+            )
+            log_q_reverse = float(
+                logsumexp(
+                    [
+                        np.log(w_cond) + log_q_z0 + log_q_cond_s0,
+                        np.log(w_phys) + log_q_z0 + log_q_phys_s0,
+                        np.log(w_tail) + log_q_z0 + log_q_tail_s0,
+                    ]
+                )
+            )
+            comp = "NullLaplace"
+            break
+        except Exception as exc:
+            if attempt == 2:
+                raise RuntimeError(f"Nullspace proposal failed: {exc}") from exc
 
     try:
         log_target_star, state_star = compute_log_target(psi_star)
@@ -781,6 +927,7 @@ def _sample_variant_a_one(payload):
         "rho_prior_component": rho_prior_component,
         "vel_mode": vel_mode,
         "psi": psi_use,
+        "s_component": s_comp,
         "theta": theta_star,
         "ra_pred": ra_pred,
         "dec_pred": dec_pred,
