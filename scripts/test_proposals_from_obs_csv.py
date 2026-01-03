@@ -69,6 +69,10 @@ DEFAULT_F_SIGMA_V = 1.0
 FLAT_V_F = 1.8
 W_SSO_PHYS = 0.85
 ENERGY_PENALTY_LOG = -400.0
+PRIOR_SCALE = 0.25
+NULL_KAPPA = 2.0
+NULL_TAIL_DF = 3.0
+NULL_S_CLIP = 6.0
 CIRCULAR_WEIGHT_SSO = 0.80
 CIRCULAR_WEIGHT_OTHER = 0.20
 
@@ -601,9 +605,8 @@ def optimize_conditional_psi(
     r_helio = np.linalg.norm(r1_tmp)
     sigma_v = sigma_v_from_rhelio(r_helio, f=f_sigma_v)
     sigma_rdot = sigma_v
-    prior_Ppsi_inv = np.diag(
-        [1.0 / (sigma_rdot**2), 1.0 / (sigma_v**2), 1.0 / (sigma_v**2)]
-    )
+    prior_cov = np.diag([sigma_rdot**2, sigma_v**2, sigma_v**2]) * PRIOR_SCALE
+    prior_Ppsi_inv = la.inv(prior_cov)
     sqrt_prior_inv = la.cholesky(prior_Ppsi_inv)
     Wsqrt = la.cholesky(W2)
 
@@ -916,7 +919,7 @@ def _sample_variant_a_one(payload):
         r_helio = np.linalg.norm(r1)
         sigma_v = sigma_v_from_rhelio(r_helio, f=f_sigma_v_sample)
         sigma_rdot = sigma_v
-        prior_cov = np.diag([sigma_rdot**2, sigma_v**2, sigma_v**2])
+        prior_cov = np.diag([sigma_rdot**2, sigma_v**2, sigma_v**2]) * PRIOR_SCALE
         if vel_mode == "flat":
             log_g = logpdf_gauss(psi, psi_prior_mean, prior_cov)
             Sigma_t = (3.0**2) * prior_cov
@@ -963,7 +966,9 @@ def _sample_variant_a_one(payload):
             s_phys = float(n.dot(psi_prior_mean - hat_psi))
 
             if rho_prior_component.startswith("sso_"):
-                w_phys, w_cond, w_tail = W_SSO_PHYS, 0.10, 0.05
+                w_phys = W_SSO_PHYS
+                w_cond = 1.0 - W_SSO_PHYS - 0.03
+                w_tail = 0.03
             elif rho_prior_component == "tri":
                 w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
             elif rho_prior_component == "flat_linear":
@@ -976,8 +981,8 @@ def _sample_variant_a_one(payload):
             w_phys, w_cond, w_tail = w_phys / w_sum, w_cond / w_sum, w_tail / w_sum
 
             tau = max(1e-3, 0.75 * np.sqrt(sigma_s2))
-            kappa = 3.0
-            nu = 3.0
+            kappa = NULL_KAPPA
+            nu = NULL_TAIL_DF
 
             u_comp = rng.random()
             if u_comp < w_cond:
@@ -989,6 +994,9 @@ def _sample_variant_a_one(payload):
             else:
                 s = float(mu_s + np.sqrt(sigma_s2) * kappa * rng.standard_t(df=nu))
                 s_comp = "tail"
+            s_max = NULL_S_CLIP * np.sqrt(sigma_s2)
+            if abs(s) > s_max:
+                s = np.sign(s) * s_max
 
             w_vec = np.concatenate([z, np.array([s])])
             psi_star = hat_psi + U3.dot(w_vec)
