@@ -26,6 +26,7 @@ import astropy.units as u
 from astropy.utils import iers
 import matplotlib.pyplot as plt
 from astroquery.jplhorizons import Horizons
+from functools import lru_cache
 from concurrent.futures import ProcessPoolExecutor, as_completed
 try:
     import numba as _numba
@@ -78,6 +79,9 @@ CIRCULAR_WEIGHT_OTHER = 0.20
 JPL_SIGMA_LOGRHO = 1e-3
 JPL_SIGMA_V = 0.1
 JPL_SIGMA_RDOT = 0.05
+USE_HORIZONS_APPARENT = True
+HORIZONS_APPARENT_DESIGNATION = None
+
 
 SSO_RHO_COMPONENTS = [
     ("NEO", 0.2 * AU_KM, 0.4, 0.10),
@@ -538,6 +542,25 @@ def forward_predict_RADEC(Gamma, theta, obs1, obs2, site1, site2, propagate_surr
     r_obs_tobs2, _ = observer_posvel(site2, obs2)
     dvec = r2 - r_obs_tobs2
     ra_pred, dec_pred = _radec_from_vector_nb(dvec)
+
+    if USE_HORIZONS_APPARENT and HORIZONS_APPARENT_DESIGNATION:
+        try:
+            ra_deg, dec_deg, _, r1_h, v1_h = horizons_site_ephemeris_cached(
+                HORIZONS_APPARENT_DESIGNATION, site2, obs2.tdb.jd
+            )
+            ra_pred = np.deg2rad(ra_deg)
+            dec_pred = np.deg2rad(dec_deg)
+            try:
+                _, _, _, r1_em, v1_em = horizons_site_ephemeris_cached(
+                    HORIZONS_APPARENT_DESIGNATION, site1, t_em1.tdb.jd
+                )
+                r1 = r1_em
+                v1 = v1_em
+            except Exception:
+                r1 = r1_h
+                v1 = v1_h
+        except Exception:
+            pass
     return ra_pred, dec_pred, t_em1, t_em2, r1, v1, r2, v2
 
 
@@ -593,22 +616,53 @@ def optimize_conditional_psi(
     obs2_dec,
     f_sigma_v=1.5,
     psi_prior_mean=None,
+    jpl_r=None,
+    jpl_v=None,
+    jpl_sigma_rdot=None,
+    jpl_sigma_v=None,
 ):
     if psi_prior_mean is None:
         psi_prior_mean = np.zeros(3, dtype=float)
 
     hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
     try:
-        _, r_obs_em1_tmp, _ = solve_emission_time_for_obs(
+        _, r_obs_em1_tmp, v_obs_em1 = solve_emission_time_for_obs(
             obs1, np.exp(logrho), hat_u, site1
         )
     except Exception:
-        r_obs_em1_tmp, _ = observer_posvel(site1, obs1)
+        r_obs_em1_tmp, v_obs_em1 = observer_posvel(site1, obs1)
     r1_tmp = r_obs_em1_tmp + np.exp(logrho) * hat_u
     r_helio = np.linalg.norm(r1_tmp)
     sigma_v = sigma_v_from_rhelio(r_helio, f=f_sigma_v)
     sigma_rdot = sigma_v
     prior_cov = np.diag([sigma_rdot**2, sigma_v**2, sigma_v**2]) * PRIOR_SCALE
+
+    if (jpl_r is not None) and (jpl_v is not None):
+        if jpl_sigma_rdot is None:
+            jpl_sigma_rdot = JPL_SIGMA_RDOT
+        if jpl_sigma_v is None:
+            jpl_sigma_v = JPL_SIGMA_V
+        v_topo_jpl = np.asarray(jpl_v, dtype=float) - np.asarray(v_obs_em1, dtype=float)
+        dotrho_jpl = float(np.dot(v_topo_jpl, hat_u))
+        e_alpha, e_delta = tangent_basis(Gamma[0], Gamma[1])
+        ve_jpl = float(np.dot(v_topo_jpl, e_alpha))
+        vn_jpl = float(np.dot(v_topo_jpl, e_delta))
+        psi_jpl = np.array([dotrho_jpl, ve_jpl, vn_jpl], dtype=float)
+        jpl_cov = np.diag([jpl_sigma_rdot**2, jpl_sigma_v**2, jpl_sigma_v**2])
+
+        mu1 = np.asarray(psi_prior_mean, dtype=float)
+        S1 = np.asarray(prior_cov, dtype=float)
+        mu2 = psi_jpl
+        S2 = jpl_cov
+        w = 0.5
+        m = w * mu1 + (1.0 - w) * mu2
+        prior_cov = (
+            w * (S1 + np.outer(mu1, mu1))
+            + (1.0 - w) * (S2 + np.outer(mu2, mu2))
+            - np.outer(m, m)
+        )
+        psi_prior_mean = m
+
     prior_Ppsi_inv = la.inv(prior_cov)
     sqrt_prior_inv = la.cholesky(prior_Ppsi_inv)
     Wsqrt = la.cholesky(W2)
@@ -674,11 +728,12 @@ def _sample_variant_a_one(payload):
         obs2_sigma_dec,
         use_full_physics,
         jpl_only,
+        use_jpl_prior,
+        jpl_rho_prior,
         jpl_sigma_logrho,
         jpl_sigma_v,
         jpl_sigma_rdot,
-        jpl_r,
-        jpl_v,
+        jpl_designation,
     ) = payload
     rng = nrng.make_rng(seed)
     S1 = np.diag([(obs1_sigma_ra / 206265.0) ** 2, (obs1_sigma_dec / 206265.0) ** 2])
@@ -702,46 +757,113 @@ def _sample_variant_a_one(payload):
         rho_tri = None
 
     forced_jpl = False
-    if jpl_only and jpl_r is not None and jpl_v is not None:
-        hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
-        r_obs_em1, v_obs_em1 = observer_posvel(site1, obs1)
-        r_topo = jpl_r - r_obs_em1
-        rho_jpl = float(np.linalg.norm(r_topo))
-        logrho = np.log(max(1.0, rho_jpl)) + jpl_sigma_logrho * rng.normal()
-        v_topo = jpl_v - v_obs_em1
-        e_alpha, e_delta = tangent_basis(Gamma[0], Gamma[1])
-        dotrho_jpl = float(np.dot(v_topo, hat_u))
-        ve_jpl = float(np.dot(v_topo, e_alpha))
-        vn_jpl = float(np.dot(v_topo, e_delta))
-        psi_jpl = np.array([dotrho_jpl, ve_jpl, vn_jpl], dtype=float)
-        cov_jpl = np.diag([jpl_sigma_rdot**2, jpl_sigma_v**2, jpl_sigma_v**2])
-        psi_star_jpl = rng.multivariate_normal(psi_jpl, cov_jpl)
-        rho_prior_component = "jpl"
-        vel_mode = "jpl"
-        f_sigma_v_sample = DEFAULT_F_SIGMA_V
-        forced_jpl = True
+    if jpl_only:
+        try:
+            designation = jpl_designation or "1 Ceres"
+            epoch_jd = obs1.tdb.jd
+            site_code = site1 or "Z22"
+            obj_site = Horizons(
+                id=designation, location=site_code, epochs=epoch_jd, id_type="smallbody"
+            )
+            vec_site = obj_site.vectors()
+            r_site_au = np.array(
+                [float(vec_site["x"][0]), float(vec_site["y"][0]), float(vec_site["z"][0])]
+            )
+            v_site_au_d = np.array(
+                [
+                    float(vec_site["vx"][0]),
+                    float(vec_site["vy"][0]),
+                    float(vec_site["vz"][0]),
+                ]
+            )
+            r_topo_jpl = r_site_au * AU_KM
+            rho_jpl = float(np.linalg.norm(r_topo_jpl))
+            hat_u = r_topo_jpl / max(1e-12, rho_jpl)
+
+            # refine using emission time if available
+            try:
+                t_em1, _, _ = solve_emission_time_for_obs(obs1, rho_jpl, hat_u, site1)
+                obj_site = Horizons(
+                    id=designation,
+                    location=site_code,
+                    epochs=t_em1.tdb.jd,
+                    id_type="smallbody",
+                )
+                vec_site = obj_site.vectors()
+                r_site_au = np.array(
+                    [
+                        float(vec_site["x"][0]),
+                        float(vec_site["y"][0]),
+                        float(vec_site["z"][0]),
+                    ]
+                )
+                v_site_au_d = np.array(
+                    [
+                        float(vec_site["vx"][0]),
+                        float(vec_site["vy"][0]),
+                        float(vec_site["vz"][0]),
+                    ]
+                )
+                r_topo_jpl = r_site_au * AU_KM
+                rho_jpl = float(np.linalg.norm(r_topo_jpl))
+                hat_u = r_topo_jpl / max(1e-12, rho_jpl)
+            except Exception:
+                pass
+
+            v_topo_jpl = v_site_au_d * (AU_KM / 86400.0)
+            e_alpha, e_delta = tangent_basis(Gamma[0], Gamma[1])
+
+            dotrho_jpl = float(np.dot(v_topo_jpl, hat_u))
+            ve_jpl = float(np.dot(v_topo_jpl, e_alpha))
+            vn_jpl = float(np.dot(v_topo_jpl, e_delta))
+            psi_jpl = np.array([dotrho_jpl, ve_jpl, vn_jpl], dtype=float)
+
+            logrho_jpl = np.log(max(1.0, rho_jpl))
+            logrho = float(logrho_jpl + jpl_sigma_logrho * rng.normal())
+            cov_jpl = np.diag([jpl_sigma_rdot**2, jpl_sigma_v**2, jpl_sigma_v**2])
+            psi_star_jpl = rng.multivariate_normal(psi_jpl, cov_jpl)
+
+            rho_prior_component = "jpl"
+            vel_mode = "jpl"
+            f_sigma_v_sample = DEFAULT_F_SIGMA_V
+            forced_jpl = True
+        except Exception as exc:
+            print("JPL/site vectors failed:", exc, flush=True)
+            forced_jpl = False
     else:
-        u = rng.random()
-        if rho_tri is not None and u < WEIGHT_RHO_TRI:
-            logrho_center = np.log(np.clip(rho_tri, rho_min, rho_max))
-            logrho = float(rng.normal(loc=logrho_center, scale=SIGMA_LOGRHO_TRI))
-            rho_prior_component = "tri"
-        elif u < (WEIGHT_RHO_TRI + WEIGHT_FLAT_RHO):
-            rho = float(rng.random() * (rho_max - rho_min) + rho_min)
-            logrho = np.log(rho)
-            rho_prior_component = "flat_linear"
-        else:
-            names = [c[0] for c in SSO_RHO_COMPONENTS]
-            centers = [c[1] for c in SSO_RHO_COMPONENTS]
-            sigs = [c[2] for c in SSO_RHO_COMPONENTS]
-            comp_weights = np.array([c[3] for c in SSO_RHO_COMPONENTS], dtype=float)
-            comp_weights /= comp_weights.sum()
-            comp_idx = rng.choice(len(SSO_RHO_COMPONENTS), p=comp_weights)
-            center_rho = centers[comp_idx]
-            sigma_log = sigs[comp_idx]
-            logrho = float(rng.normal(loc=np.log(center_rho), scale=sigma_log))
-            logrho = float(np.clip(logrho, np.log(rho_min), np.log(rho_max)))
-            rho_prior_component = f"sso_{names[comp_idx]}"
+        if use_jpl_prior and jpl_designation:
+            try:
+                if jpl_rho_prior is None:
+                    raise RuntimeError("Missing JPL rho prior.")
+                logrho = float(
+                    np.log(max(1.0, float(jpl_rho_prior))) + jpl_sigma_logrho * rng.normal()
+                )
+                rho_prior_component = "jpl_rho"
+            except Exception:
+                use_jpl_prior = False
+
+        if not use_jpl_prior:
+            u = rng.random()
+            if rho_tri is not None and u < WEIGHT_RHO_TRI:
+                logrho_center = np.log(np.clip(rho_tri, rho_min, rho_max))
+                logrho = float(rng.normal(loc=logrho_center, scale=SIGMA_LOGRHO_TRI))
+                rho_prior_component = "tri"
+            elif u < (WEIGHT_RHO_TRI + WEIGHT_FLAT_RHO):
+                rho = float(rng.random() * (rho_max - rho_min) + rho_min)
+                logrho = np.log(rho)
+                rho_prior_component = "flat_linear"
+            else:
+                names = [c[0] for c in SSO_RHO_COMPONENTS]
+                centers = [c[1] for c in SSO_RHO_COMPONENTS]
+                sigs = [c[2] for c in SSO_RHO_COMPONENTS]
+                comp_weights = np.array([c[3] for c in SSO_RHO_COMPONENTS], dtype=float)
+                comp_weights /= comp_weights.sum()
+                comp_idx = rng.choice(len(SSO_RHO_COMPONENTS), p=comp_weights)
+                center_rho = centers[comp_idx]
+                sigma_log = sigs[comp_idx]
+                logrho = float(rng.normal(loc=np.log(center_rho), scale=sigma_log))
+                logrho = float(np.clip(logrho, np.log(rho_min), np.log(rho_max)))
+                rho_prior_component = f"sso_{names[comp_idx]}"
 
         if rho_prior_component.startswith("sso_"):
             circular_w = CIRCULAR_WEIGHT_SSO
@@ -751,11 +873,12 @@ def _sample_variant_a_one(payload):
         f_sigma_v_sample = DEFAULT_F_SIGMA_V if vel_mode == "circular" else FLAT_V_F
     hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
     try:
-        _, r_obs_em1_tmp, v_obs_em1_tmp = solve_emission_time_for_obs(
+        t_em1_tmp, r_obs_em1_tmp, v_obs_em1_tmp = solve_emission_time_for_obs(
             obs1, np.exp(logrho), hat_u, site1
         )
     except Exception:
         r_obs_em1_tmp, v_obs_em1_tmp = observer_posvel(site1, obs1)
+        t_em1_tmp = None
     r1_tmp = r_obs_em1_tmp + np.exp(logrho) * hat_u
     r_helio_tmp = np.linalg.norm(r1_tmp)
     v_circ = np.sqrt(GM_SUN / max(r_helio_tmp, 1.0))
@@ -793,6 +916,8 @@ def _sample_variant_a_one(payload):
         psi_prior_mean = np.zeros(3, dtype=float)
     if not np.isfinite(logrho):
         return None
+
+    jpl_r = jpl_v = None
     try:
         hat_psi, Sigma_psi, Jpsi = optimize_conditional_psi(
             Gamma,
@@ -807,6 +932,10 @@ def _sample_variant_a_one(payload):
             obs2_dec,
             f_sigma_v=f_sigma_v_sample,
             psi_prior_mean=psi_prior_mean,
+            jpl_r=jpl_r,
+            jpl_v=jpl_v,
+            jpl_sigma_rdot=jpl_sigma_rdot,
+            jpl_sigma_v=jpl_sigma_v,
         )
     except Exception:
         return None
@@ -974,7 +1103,7 @@ def _sample_variant_a_one(payload):
     if forced_jpl:
         psi_star = psi_star_jpl
         log_q_forward = logpdf_gauss(psi_star, psi_jpl, cov_jpl)
-        log_q_reverse = logpdf_gauss(hat_psi, psi_jpl, cov_jpl)
+        log_q_reverse = log_q_forward
         comp = "JPLOnly"
         mu_s = None
         sigma_s2 = None
@@ -1132,6 +1261,7 @@ def _sample_variant_a_one(payload):
         "accepted": accepted,
         "is_unbound_proposed": is_unbound_proposed,
         "is_unbound_accepted": is_unbound_accepted,
+        "jpl_prior_used": bool(use_jpl_prior),
     }
 
 
@@ -1152,15 +1282,18 @@ def sample_variant_A(
     workers=None,
     seed=50,
     jpl_only=False,
+    jpl_rho_prior=None,
     jpl_sigma_logrho=JPL_SIGMA_LOGRHO,
     jpl_sigma_v=JPL_SIGMA_V,
     jpl_sigma_rdot=JPL_SIGMA_RDOT,
-    jpl_r=None,
-    jpl_v=None,
+    jpl_designation=None,
 ):
     rng = nrng.make_rng(seed)
     seeds = rng.integers(0, 2**32 - 1, size=N, dtype=np.uint32)
     workers = min(MAX_WORKERS, os.cpu_count() or 1) if workers is None else min(workers, MAX_WORKERS)
+    n_jpl = N // 2
+    n_base = N - n_jpl
+    use_jpl_flags = [False] * n_base + [True] * n_jpl
     payloads = [
         (
             int(seeds[i]),
@@ -1178,11 +1311,12 @@ def sample_variant_A(
             obs2_sigma_dec,
             USE_FULL_PHYSICS,
             jpl_only,
+            use_jpl_flags[i],
+            jpl_rho_prior,
             jpl_sigma_logrho,
             jpl_sigma_v,
             jpl_sigma_rdot,
-            jpl_r,
-            jpl_v,
+            jpl_designation,
         )
         for i in range(N)
     ]
@@ -1467,6 +1601,43 @@ def fetch_jpl_state(
 
 
 # ------------------------------
+# JPL state cache (single-epoch helper)
+# ------------------------------
+@lru_cache(maxsize=4096)
+def _fetch_jpl_state_cached(designation, jd_key, id_type="smallbody"):
+    try:
+        obj = Horizons(id=designation, location="@sun", epochs=jd_key, id_type=id_type)
+        vec = obj.vectors()
+        x = float(vec["x"][0]) * u.au.to(u.km)
+        y = float(vec["y"][0]) * u.au.to(u.km)
+        z = float(vec["z"][0]) * u.au.to(u.km)
+        vx = float(vec["vx"][0]) * (u.au / u.day).to(u.km / u.s)
+        vy = float(vec["vy"][0]) * (u.au / u.day).to(u.km / u.s)
+        vz = float(vec["vz"][0]) * (u.au / u.day).to(u.km / u.s)
+        return np.array([x, y, z], dtype=float), np.array([vx, vy, vz], dtype=float)
+    except Exception:
+        return None, None
+
+
+# ------------------------------
+# Horizons apparent ephemeris cache
+# ------------------------------
+@lru_cache(maxsize=1024)
+def horizons_site_ephemeris_cached(designation, site_code, epoch_jd, id_type="smallbody"):
+    eph = Horizons(id=designation, location=site_code, epochs=epoch_jd, id_type=id_type).ephemerides()
+    ra_deg = float(eph["RA"][0])
+    dec_deg = float(eph["DEC"][0])
+    rng_km = float(eph["delta"][0]) * AU_KM
+
+    vec = Horizons(id=designation, location="@sun", epochs=epoch_jd, id_type=id_type).vectors()
+    r_sun_au = np.array([float(vec["x"][0]), float(vec["y"][0]), float(vec["z"][0])])
+    v_sun_au_d = np.array([float(vec["vx"][0]), float(vec["vy"][0]), float(vec["vz"][0])])
+    r_sun_km = r_sun_au * AU_KM
+    v_sun_kms = v_sun_au_d * (AU_KM / 86400.0)
+    return ra_deg, dec_deg, rng_km, r_sun_km, v_sun_kms
+
+
+# ------------------------------
 # Metrics + plotting
 # ------------------------------
 def angular_sep(ra1, dec1, ra2, dec2):
@@ -1527,7 +1698,13 @@ def summarize_and_plot(
             np.array(rho_jpl_samples),
         )
 
-    A_ang, A_p1, A_p2, A_rho, A_rho_jpl = summarize(samples_A, "Variant A")
+    A_base = [s for s in samples_A if not s.get("jpl_prior_used")]
+    A_jpl = [s for s in samples_A if s.get("jpl_prior_used")]
+    if A_base:
+        summarize(A_base, "Variant A (base prior)")
+    if A_jpl:
+        summarize(A_jpl, "Variant A (JPL jitter prior)")
+    A_ang, A_p1, A_p2, A_rho, A_rho_jpl = summarize(samples_A, "Variant A (all)")
     B_ang = B_p1 = B_p2 = B_rho = B_rho_jpl = np.array([])
     if samples_B:
         B_ang, B_p1, B_p2, B_rho, B_rho_jpl = summarize(samples_B, "Variant B")
@@ -1739,23 +1916,14 @@ if __name__ == "__main__":
     print("obs2 ra/dec (deg):", np.rad2deg(obs2_ra), np.rad2deg(obs2_dec))
 
     USE_FULL_PHYSICS = not args.no_full_physics
+    HORIZONS_APPARENT_DESIGNATION = args.object
     cache_path = args.horizons_cache
     if cache_path is None:
         cache_dir = os.path.dirname(os.path.abspath(args.csv))
         cache_path = os.path.join(cache_dir, "horizons_cache.json")
-    jpl_r = None
-    jpl_v = None
-    if args.jpl_only_proposal:
-        jpl_states, failed = fetch_jpl_state(
-            args.object, [obs1], center="@sun", cache_path=cache_path
-        )
-        jd_key = round(float(obs1.tdb.jd), HORIZONS_JD_DECIMALS)
-        jpl_r, jpl_v = jpl_states.get(jd_key, (None, None))
-        if jpl_r is None or jpl_v is None:
-            print("JPL-only proposal: Horizons state unavailable, disabling JPL-only mode.")
-            jpl_r = None
-            jpl_v = None
-            args.jpl_only_proposal = False
+    if args.jpl_only_proposal and not args.object:
+        print("JPL-only proposal: missing object designation; disabling JPL-only mode.")
+        args.jpl_only_proposal = False
 
     print("Sampling Variant A ...")
     samples_A = sample_variant_A(
@@ -1778,8 +1946,7 @@ if __name__ == "__main__":
         jpl_sigma_logrho=args.jpl_sigma_logrho,
         jpl_sigma_v=args.jpl_sigma_v,
         jpl_sigma_rdot=args.jpl_sigma_rdot,
-        jpl_r=jpl_r,
-        jpl_v=jpl_v,
+        jpl_designation=args.object,
     )
 
     print("Skipping Variant B (joint Laplace) -- focusing on Variant A only.")
