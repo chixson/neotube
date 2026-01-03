@@ -75,6 +75,9 @@ NULL_TAIL_DF = 3.0
 NULL_S_CLIP = 6.0
 CIRCULAR_WEIGHT_SSO = 0.80
 CIRCULAR_WEIGHT_OTHER = 0.20
+JPL_SIGMA_LOGRHO = 1e-3
+JPL_SIGMA_V = 0.1
+JPL_SIGMA_RDOT = 0.05
 
 SSO_RHO_COMPONENTS = [
     ("NEO", 0.2 * AU_KM, 0.4, 0.10),
@@ -670,6 +673,12 @@ def _sample_variant_a_one(payload):
         obs2_sigma_ra,
         obs2_sigma_dec,
         use_full_physics,
+        jpl_only,
+        jpl_sigma_logrho,
+        jpl_sigma_v,
+        jpl_sigma_rdot,
+        jpl_r,
+        jpl_v,
     ) = payload
     rng = nrng.make_rng(seed)
     S1 = np.diag([(obs1_sigma_ra / 206265.0) ** 2, (obs1_sigma_dec / 206265.0) ** 2])
@@ -692,34 +701,54 @@ def _sample_variant_a_one(payload):
     except Exception:
         rho_tri = None
 
-    u = rng.random()
-    if rho_tri is not None and u < WEIGHT_RHO_TRI:
-        logrho_center = np.log(np.clip(rho_tri, rho_min, rho_max))
-        logrho = float(rng.normal(loc=logrho_center, scale=SIGMA_LOGRHO_TRI))
-        rho_prior_component = "tri"
-    elif u < (WEIGHT_RHO_TRI + WEIGHT_FLAT_RHO):
-        rho = float(rng.random() * (rho_max - rho_min) + rho_min)
-        logrho = np.log(rho)
-        rho_prior_component = "flat_linear"
+    forced_jpl = False
+    if jpl_only and jpl_r is not None and jpl_v is not None:
+        hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
+        r_obs_em1, v_obs_em1 = observer_posvel(site1, obs1)
+        r_topo = jpl_r - r_obs_em1
+        rho_jpl = float(np.linalg.norm(r_topo))
+        logrho = np.log(max(1.0, rho_jpl)) + jpl_sigma_logrho * rng.normal()
+        v_topo = jpl_v - v_obs_em1
+        e_alpha, e_delta = tangent_basis(Gamma[0], Gamma[1])
+        dotrho_jpl = float(np.dot(v_topo, hat_u))
+        ve_jpl = float(np.dot(v_topo, e_alpha))
+        vn_jpl = float(np.dot(v_topo, e_delta))
+        psi_jpl = np.array([dotrho_jpl, ve_jpl, vn_jpl], dtype=float)
+        cov_jpl = np.diag([jpl_sigma_rdot**2, jpl_sigma_v**2, jpl_sigma_v**2])
+        psi_star_jpl = rng.multivariate_normal(psi_jpl, cov_jpl)
+        rho_prior_component = "jpl"
+        vel_mode = "jpl"
+        f_sigma_v_sample = DEFAULT_F_SIGMA_V
+        forced_jpl = True
     else:
-        names = [c[0] for c in SSO_RHO_COMPONENTS]
-        centers = [c[1] for c in SSO_RHO_COMPONENTS]
-        sigs = [c[2] for c in SSO_RHO_COMPONENTS]
-        comp_weights = np.array([c[3] for c in SSO_RHO_COMPONENTS], dtype=float)
-        comp_weights /= comp_weights.sum()
-        comp_idx = rng.choice(len(SSO_RHO_COMPONENTS), p=comp_weights)
-        center_rho = centers[comp_idx]
-        sigma_log = sigs[comp_idx]
-        logrho = float(rng.normal(loc=np.log(center_rho), scale=sigma_log))
-        logrho = float(np.clip(logrho, np.log(rho_min), np.log(rho_max)))
-        rho_prior_component = f"sso_{names[comp_idx]}"
+        u = rng.random()
+        if rho_tri is not None and u < WEIGHT_RHO_TRI:
+            logrho_center = np.log(np.clip(rho_tri, rho_min, rho_max))
+            logrho = float(rng.normal(loc=logrho_center, scale=SIGMA_LOGRHO_TRI))
+            rho_prior_component = "tri"
+        elif u < (WEIGHT_RHO_TRI + WEIGHT_FLAT_RHO):
+            rho = float(rng.random() * (rho_max - rho_min) + rho_min)
+            logrho = np.log(rho)
+            rho_prior_component = "flat_linear"
+        else:
+            names = [c[0] for c in SSO_RHO_COMPONENTS]
+            centers = [c[1] for c in SSO_RHO_COMPONENTS]
+            sigs = [c[2] for c in SSO_RHO_COMPONENTS]
+            comp_weights = np.array([c[3] for c in SSO_RHO_COMPONENTS], dtype=float)
+            comp_weights /= comp_weights.sum()
+            comp_idx = rng.choice(len(SSO_RHO_COMPONENTS), p=comp_weights)
+            center_rho = centers[comp_idx]
+            sigma_log = sigs[comp_idx]
+            logrho = float(rng.normal(loc=np.log(center_rho), scale=sigma_log))
+            logrho = float(np.clip(logrho, np.log(rho_min), np.log(rho_max)))
+            rho_prior_component = f"sso_{names[comp_idx]}"
 
-    if rho_prior_component.startswith("sso_"):
-        circular_w = CIRCULAR_WEIGHT_SSO
-    else:
-        circular_w = CIRCULAR_WEIGHT_OTHER
-    vel_mode = "circular" if rng.random() < circular_w else "flat"
-    f_sigma_v_sample = DEFAULT_F_SIGMA_V if vel_mode == "circular" else FLAT_V_F
+        if rho_prior_component.startswith("sso_"):
+            circular_w = CIRCULAR_WEIGHT_SSO
+        else:
+            circular_w = CIRCULAR_WEIGHT_OTHER
+        vel_mode = "circular" if rng.random() < circular_w else "flat"
+        f_sigma_v_sample = DEFAULT_F_SIGMA_V if vel_mode == "circular" else FLAT_V_F
     hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
     try:
         _, r_obs_em1_tmp, v_obs_em1_tmp = solve_emission_time_for_obs(
@@ -942,107 +971,116 @@ def _sample_variant_a_one(payload):
     # Nullspace-aware sampling of psi (hat_psi + V_r z + n s)
     # ------------------------------
     s_comp = None
-    for attempt in range(3):
-        try:
-            Uj, Svals, Vt = np.linalg.svd(Jpsi, full_matrices=True)
-            V = Vt.T
-            V_r = V[:, :2]
-            n = V[:, 2]
-            U3 = np.column_stack([V_r, n])
+    if forced_jpl:
+        psi_star = psi_star_jpl
+        log_q_forward = logpdf_gauss(psi_star, psi_jpl, cov_jpl)
+        log_q_reverse = logpdf_gauss(hat_psi, psi_jpl, cov_jpl)
+        comp = "JPLOnly"
+        mu_s = None
+        sigma_s2 = None
+        s_phys = None
+    else:
+        for attempt in range(3):
+            try:
+                Uj, Svals, Vt = np.linalg.svd(Jpsi, full_matrices=True)
+                V = Vt.T
+                V_r = V[:, :2]
+                n = V[:, 2]
+                U3 = np.column_stack([V_r, n])
 
-            Sigma_w = U3.T.dot(Sigma_psi).dot(U3)
-            A = Sigma_w[:2, :2].copy()
-            b = Sigma_w[:2, 2].copy()
-            c = float(Sigma_w[2, 2])
-            A += 1e-12 * np.eye(2)
+                Sigma_w = U3.T.dot(Sigma_psi).dot(U3)
+                A = Sigma_w[:2, :2].copy()
+                b = Sigma_w[:2, 2].copy()
+                c = float(Sigma_w[2, 2])
+                A += 1e-12 * np.eye(2)
 
-            L = la.cho_factor(A, lower=True)
-            z = rng.multivariate_normal(np.zeros(2), A)
-            Ainv_z = la.cho_solve(L, z)
-            Ainv_b = la.cho_solve(L, b)
-            mu_s = float(b.T.dot(Ainv_z))
-            sigma_s2 = max(1e-12, c - float(b.T.dot(Ainv_b)))
+                L = la.cho_factor(A, lower=True)
+                z = rng.multivariate_normal(np.zeros(2), A)
+                Ainv_z = la.cho_solve(L, z)
+                Ainv_b = la.cho_solve(L, b)
+                mu_s = float(b.T.dot(Ainv_z))
+                sigma_s2 = max(1e-12, c - float(b.T.dot(Ainv_b)))
 
-            s_phys = float(n.dot(psi_prior_mean - hat_psi))
+                s_phys = float(n.dot(psi_prior_mean - hat_psi))
 
-            if rho_prior_component.startswith("sso_"):
-                w_phys = W_SSO_PHYS
-                w_cond = 1.0 - W_SSO_PHYS - 0.03
-                w_tail = 0.03
-            elif rho_prior_component == "tri":
-                w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
-            elif rho_prior_component == "flat_linear":
-                w_phys, w_cond, w_tail = 0.20, 0.50, 0.30
-            else:
-                w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
-            if rho_prior_component == "sso_Comet":
-                w_phys, w_cond, w_tail = 0.20, 0.30, 0.50
-            w_sum = w_phys + w_cond + w_tail
-            w_phys, w_cond, w_tail = w_phys / w_sum, w_cond / w_sum, w_tail / w_sum
+                if rho_prior_component.startswith("sso_"):
+                    w_phys = W_SSO_PHYS
+                    w_cond = 1.0 - W_SSO_PHYS - 0.03
+                    w_tail = 0.03
+                elif rho_prior_component == "tri":
+                    w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
+                elif rho_prior_component == "flat_linear":
+                    w_phys, w_cond, w_tail = 0.20, 0.50, 0.30
+                else:
+                    w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
+                if rho_prior_component == "sso_Comet":
+                    w_phys, w_cond, w_tail = 0.20, 0.30, 0.50
+                w_sum = w_phys + w_cond + w_tail
+                w_phys, w_cond, w_tail = w_phys / w_sum, w_cond / w_sum, w_tail / w_sum
 
-            tau = max(1e-3, 0.75 * np.sqrt(sigma_s2))
-            kappa = NULL_KAPPA
-            nu = NULL_TAIL_DF
+                tau = max(1e-3, 0.75 * np.sqrt(sigma_s2))
+                kappa = NULL_KAPPA
+                nu = NULL_TAIL_DF
 
-            u_comp = rng.random()
-            if u_comp < w_cond:
-                s = float(mu_s + np.sqrt(sigma_s2) * rng.normal())
-                s_comp = "cond"
-            elif u_comp < (w_cond + w_phys):
-                s = float(s_phys + tau * rng.normal())
-                s_comp = "phys"
-            else:
-                s = float(mu_s + np.sqrt(sigma_s2) * kappa * rng.standard_t(df=nu))
-                s_comp = "tail"
-            s_max = NULL_S_CLIP * np.sqrt(sigma_s2)
-            if abs(s) > s_max:
-                s = np.sign(s) * s_max
+                u_comp = rng.random()
+                if u_comp < w_cond:
+                    s = float(mu_s + np.sqrt(sigma_s2) * rng.normal())
+                    s_comp = "cond"
+                elif u_comp < (w_cond + w_phys):
+                    s = float(s_phys + tau * rng.normal())
+                    s_comp = "phys"
+                else:
+                    s = float(mu_s + np.sqrt(sigma_s2) * kappa * rng.standard_t(df=nu))
+                    s_comp = "tail"
+                s_max = NULL_S_CLIP * np.sqrt(sigma_s2)
+                if abs(s) > s_max:
+                    s = np.sign(s) * s_max
 
-            w_vec = np.concatenate([z, np.array([s])])
-            psi_star = hat_psi + U3.dot(w_vec)
+                w_vec = np.concatenate([z, np.array([s])])
+                psi_star = hat_psi + U3.dot(w_vec)
 
-            log_q_z = logpdf_gauss(z, np.zeros(2), A)
-            log_q_cond_s = -0.5 * (
-                np.log(2.0 * np.pi * sigma_s2) + ((s - mu_s) ** 2) / sigma_s2
-            )
-            log_q_phys_s = -0.5 * (
-                np.log(2.0 * np.pi * (tau**2)) + ((s - s_phys) ** 2) / (tau**2)
-            )
-            log_q_tail_s = logpdf_t_univariate(
-                s, nu, loc=mu_s, scale=np.sqrt(sigma_s2) * kappa
-            )
-            log_q_forward = float(
-                logsumexp(
-                    [
-                        np.log(w_cond) + log_q_z + log_q_cond_s,
-                        np.log(w_phys) + log_q_z + log_q_phys_s,
-                        np.log(w_tail) + log_q_z + log_q_tail_s,
-                    ]
+                log_q_z = logpdf_gauss(z, np.zeros(2), A)
+                log_q_cond_s = -0.5 * (
+                    np.log(2.0 * np.pi * sigma_s2) + ((s - mu_s) ** 2) / sigma_s2
                 )
-            )
-
-            log_q_z0 = logpdf_gauss(np.zeros(2), np.zeros(2), A)
-            log_q_cond_s0 = -0.5 * np.log(2.0 * np.pi * sigma_s2)
-            log_q_phys_s0 = -0.5 * (
-                np.log(2.0 * np.pi * (tau**2)) + ((0.0 - s_phys) ** 2) / (tau**2)
-            )
-            log_q_tail_s0 = logpdf_t_univariate(
-                0.0, nu, loc=0.0, scale=np.sqrt(sigma_s2) * kappa
-            )
-            log_q_reverse = float(
-                logsumexp(
-                    [
-                        np.log(w_cond) + log_q_z0 + log_q_cond_s0,
-                        np.log(w_phys) + log_q_z0 + log_q_phys_s0,
-                        np.log(w_tail) + log_q_z0 + log_q_tail_s0,
-                    ]
+                log_q_phys_s = -0.5 * (
+                    np.log(2.0 * np.pi * (tau**2)) + ((s - s_phys) ** 2) / (tau**2)
                 )
-            )
-            comp = "NullLaplace"
-            break
-        except Exception as exc:
-            if attempt == 2:
-                raise RuntimeError(f"Nullspace proposal failed: {exc}") from exc
+                log_q_tail_s = logpdf_t_univariate(
+                    s, nu, loc=mu_s, scale=np.sqrt(sigma_s2) * kappa
+                )
+                log_q_forward = float(
+                    logsumexp(
+                        [
+                            np.log(w_cond) + log_q_z + log_q_cond_s,
+                            np.log(w_phys) + log_q_z + log_q_phys_s,
+                            np.log(w_tail) + log_q_z + log_q_tail_s,
+                        ]
+                    )
+                )
+
+                log_q_z0 = logpdf_gauss(np.zeros(2), np.zeros(2), A)
+                log_q_cond_s0 = -0.5 * np.log(2.0 * np.pi * sigma_s2)
+                log_q_phys_s0 = -0.5 * (
+                    np.log(2.0 * np.pi * (tau**2)) + ((0.0 - s_phys) ** 2) / (tau**2)
+                )
+                log_q_tail_s0 = logpdf_t_univariate(
+                    0.0, nu, loc=0.0, scale=np.sqrt(sigma_s2) * kappa
+                )
+                log_q_reverse = float(
+                    logsumexp(
+                        [
+                            np.log(w_cond) + log_q_z0 + log_q_cond_s0,
+                            np.log(w_phys) + log_q_z0 + log_q_phys_s0,
+                            np.log(w_tail) + log_q_z0 + log_q_tail_s0,
+                        ]
+                    )
+                )
+                comp = "NullLaplace"
+                break
+            except Exception as exc:
+                if attempt == 2:
+                    raise RuntimeError(f"Nullspace proposal failed: {exc}") from exc
 
     try:
         log_target_star, state_star = compute_log_target(psi_star)
@@ -1113,6 +1151,12 @@ def sample_variant_A(
     N=200,
     workers=None,
     seed=50,
+    jpl_only=False,
+    jpl_sigma_logrho=JPL_SIGMA_LOGRHO,
+    jpl_sigma_v=JPL_SIGMA_V,
+    jpl_sigma_rdot=JPL_SIGMA_RDOT,
+    jpl_r=None,
+    jpl_v=None,
 ):
     rng = nrng.make_rng(seed)
     seeds = rng.integers(0, 2**32 - 1, size=N, dtype=np.uint32)
@@ -1133,6 +1177,12 @@ def sample_variant_A(
             obs2_sigma_ra,
             obs2_sigma_dec,
             USE_FULL_PHYSICS,
+            jpl_only,
+            jpl_sigma_logrho,
+            jpl_sigma_v,
+            jpl_sigma_rdot,
+            jpl_r,
+            jpl_v,
         )
         for i in range(N)
     ]
@@ -1148,6 +1198,7 @@ def sample_variant_A(
     sso_counts = {c[0]: 0 for c in SSO_RHO_COMPONENTS}
     n_vel_circular = 0
     n_vel_flat = 0
+    n_vel_jpl = 0
     workers_sel, chunk_size = choose_workers_and_chunk(
         N, requested_workers=workers, max_workers=MAX_WORKERS
     )
@@ -1187,13 +1238,22 @@ def sample_variant_A(
                     n_vel_circular += 1
                 elif vm == "flat":
                     n_vel_flat += 1
+                elif vm == "jpl":
+                    n_vel_jpl += 1
                 samples.append(out)
     print("Variant A proposal diagnostics:")
     print(" n_proposed_G:", n_prop_g, "n_proposed_T:", n_prop_t)
     print(" n_accepted_G:", n_acc_g, "n_accepted_T:", n_acc_t)
     print(" n_unbound_proposed:", n_unbound_prop, "n_unbound_accepted:", n_unbound_acc)
     print(" rho prior breakdown: tri:", n_rho_tri, "flat_linear:", n_rho_flat, "sso_counts:", sso_counts)
-    print(" velocity-mode breakdown: circular:", n_vel_circular, "flat:", n_vel_flat)
+    print(
+        " velocity-mode breakdown: circular:",
+        n_vel_circular,
+        "flat:",
+        n_vel_flat,
+        "jpl:",
+        n_vel_jpl,
+    )
     return samples
 
 
@@ -1569,6 +1629,29 @@ if __name__ == "__main__":
         action="store_true",
         help="Display plots interactively (also saved to disk).",
     )
+    parser.add_argument(
+        "--jpl-only-proposal",
+        action="store_true",
+        help="Propose only JPL state +/- jitter (diagnostic).",
+    )
+    parser.add_argument(
+        "--jpl-sigma-logrho",
+        type=float,
+        default=JPL_SIGMA_LOGRHO,
+        help="Sigma for logrho when using JPL-only proposals.",
+    )
+    parser.add_argument(
+        "--jpl-sigma-v",
+        type=float,
+        default=JPL_SIGMA_V,
+        help="Sigma (km/s) for ve/vn when using JPL-only proposals.",
+    )
+    parser.add_argument(
+        "--jpl-sigma-rdot",
+        type=float,
+        default=JPL_SIGMA_RDOT,
+        help="Sigma (km/s) for rdot when using JPL-only proposals.",
+    )
     args = parser.parse_args()
 
     df = pd.read_csv(args.csv)
@@ -1656,6 +1739,23 @@ if __name__ == "__main__":
     print("obs2 ra/dec (deg):", np.rad2deg(obs2_ra), np.rad2deg(obs2_dec))
 
     USE_FULL_PHYSICS = not args.no_full_physics
+    cache_path = args.horizons_cache
+    if cache_path is None:
+        cache_dir = os.path.dirname(os.path.abspath(args.csv))
+        cache_path = os.path.join(cache_dir, "horizons_cache.json")
+    jpl_r = None
+    jpl_v = None
+    if args.jpl_only_proposal:
+        jpl_states, failed = fetch_jpl_state(
+            args.object, [obs1], center="@sun", cache_path=cache_path
+        )
+        jd_key = round(float(obs1.tdb.jd), HORIZONS_JD_DECIMALS)
+        jpl_r, jpl_v = jpl_states.get(jd_key, (None, None))
+        if jpl_r is None or jpl_v is None:
+            print("JPL-only proposal: Horizons state unavailable, disabling JPL-only mode.")
+            jpl_r = None
+            jpl_v = None
+            args.jpl_only_proposal = False
 
     print("Sampling Variant A ...")
     samples_A = sample_variant_A(
@@ -1674,6 +1774,12 @@ if __name__ == "__main__":
         N=args.N,
         workers=args.workers,
         seed=args.seed,
+        jpl_only=args.jpl_only_proposal,
+        jpl_sigma_logrho=args.jpl_sigma_logrho,
+        jpl_sigma_v=args.jpl_sigma_v,
+        jpl_sigma_rdot=args.jpl_sigma_rdot,
+        jpl_r=jpl_r,
+        jpl_v=jpl_v,
     )
 
     print("Skipping Variant B (joint Laplace) -- focusing on Variant A only.")
@@ -1685,10 +1791,6 @@ if __name__ == "__main__":
         times_set[round(float(s["t_em2"].tdb.jd), 6)] = s["t_em2"]
     times_list = list(times_set.values())
     print("Querying JPL/Horizons for %d unique emission times ..." % len(times_list))
-    cache_path = args.horizons_cache
-    if cache_path is None:
-        cache_dir = os.path.dirname(os.path.abspath(args.csv))
-        cache_path = os.path.join(cache_dir, "horizons_cache.json")
     jpl_states, failed_jds = fetch_jpl_state(
         args.object, times_list, center="@sun", cache_path=cache_path
     )
