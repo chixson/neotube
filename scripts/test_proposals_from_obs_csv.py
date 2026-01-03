@@ -66,7 +66,9 @@ WEIGHT_RHO_TRI = 0.15
 WEIGHT_FLAT_RHO = 0.10
 SIGMA_LOGRHO_TRI = 1.0
 DEFAULT_F_SIGMA_V = 1.0
-FLAT_V_F = 3.0
+FLAT_V_F = 1.8
+W_SSO_PHYS = 0.85
+ENERGY_PENALTY_LOG = -400.0
 CIRCULAR_WEIGHT_SSO = 0.80
 CIRCULAR_WEIGHT_OTHER = 0.20
 
@@ -583,7 +585,28 @@ def optimize_conditional_psi(
     obs2_ra,
     obs2_dec,
     f_sigma_v=1.5,
+    psi_prior_mean=None,
 ):
+    if psi_prior_mean is None:
+        psi_prior_mean = np.zeros(3, dtype=float)
+
+    hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
+    try:
+        _, r_obs_em1_tmp, _ = solve_emission_time_for_obs(
+            obs1, np.exp(logrho), hat_u, site1
+        )
+    except Exception:
+        r_obs_em1_tmp, _ = observer_posvel(site1, obs1)
+    r1_tmp = r_obs_em1_tmp + np.exp(logrho) * hat_u
+    r_helio = np.linalg.norm(r1_tmp)
+    sigma_v = sigma_v_from_rhelio(r_helio, f=f_sigma_v)
+    sigma_rdot = sigma_v
+    prior_Ppsi_inv = np.diag(
+        [1.0 / (sigma_rdot**2), 1.0 / (sigma_v**2), 1.0 / (sigma_v**2)]
+    )
+    sqrt_prior_inv = la.cholesky(prior_Ppsi_inv)
+    Wsqrt = la.cholesky(W2)
+
     def residuals(psi):
         theta = np.concatenate(([logrho], psi))
         try:
@@ -591,13 +614,13 @@ def optimize_conditional_psi(
                 Gamma, theta, obs1, obs2, site1, site2, propagate_surrogate
             )
         except Exception:
-            return np.array([1e6, 1e6])
+            return np.array([1e6, 1e6, 1e6, 1e6, 1e6])
         res = np.array([
             angle_diff(ra_pred, obs2_ra) * np.cos(obs2_dec),
             (dec_pred - obs2_dec),
         ])
-        Wsqrt = la.cholesky(W2)
-        return Wsqrt.dot(res)
+        prior_res = sqrt_prior_inv.dot(psi - psi_prior_mean)
+        return np.concatenate([Wsqrt.dot(res), prior_res])
 
     dt = max(1.0, (obs2.tdb.jd - obs1.tdb.jd) * 86400.0)
     dalpha = angle_diff(obs2_ra, Gamma[0])
@@ -607,19 +630,11 @@ def optimize_conditional_psi(
     rho = np.exp(logrho)
     ve0 = rho * d_alpha_dt * np.cos(Gamma[1])
     vn0 = rho * d_delta_dt
-    psi0 = np.array([0.0, ve0, vn0])
+    psi0_heur = np.array([0.0, ve0, vn0])
+    psi0 = 0.7 * psi_prior_mean + 0.3 * psi0_heur
     res = least_squares(residuals, psi0, method="trf", xtol=1e-8, ftol=1e-8, gtol=1e-8)
     hat_psi = res.x
     theta_hat = np.concatenate(([logrho], hat_psi))
-    _, _, _, _, r1, _, _, _ = forward_predict_RADEC(
-        Gamma, theta_hat, obs1, obs2, site1, site2, propagate_surrogate
-    )
-    r_helio = np.linalg.norm(r1)
-    sigma_v = sigma_v_from_rhelio(r_helio, f=f_sigma_v)
-    sigma_rdot = sigma_v
-    prior_Ppsi_inv = np.diag(
-        [1.0 / (sigma_rdot**2), 1.0 / (sigma_v**2), 1.0 / (sigma_v**2)]
-    )
 
     J_full = jacobian_fd(
         Gamma,
@@ -702,6 +717,46 @@ def _sample_variant_a_one(payload):
         circular_w = CIRCULAR_WEIGHT_OTHER
     vel_mode = "circular" if rng.random() < circular_w else "flat"
     f_sigma_v_sample = DEFAULT_F_SIGMA_V if vel_mode == "circular" else FLAT_V_F
+    hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
+    try:
+        _, r_obs_em1_tmp, v_obs_em1_tmp = solve_emission_time_for_obs(
+            obs1, np.exp(logrho), hat_u, site1
+        )
+    except Exception:
+        r_obs_em1_tmp, v_obs_em1_tmp = observer_posvel(site1, obs1)
+    r1_tmp = r_obs_em1_tmp + np.exp(logrho) * hat_u
+    r_helio_tmp = np.linalg.norm(r1_tmp)
+    v_circ = np.sqrt(GM_SUN / max(r_helio_tmp, 1.0))
+
+    dt = max(1.0, (obs2.tdb.jd - obs1.tdb.jd) * 86400.0)
+    dalpha = angle_diff(obs2_ra, Gamma[0])
+    ddelta = (obs2_dec - Gamma[1])
+    d_alpha_dt = dalpha / dt
+    d_delta_dt = ddelta / dt
+    rho_val = float(np.exp(logrho))
+    ve0 = rho_val * d_alpha_dt * np.cos(Gamma[1])
+    vn0 = rho_val * d_delta_dt
+    e_alpha, e_delta = tangent_basis(Gamma[0], Gamma[1])
+
+    v_guess_helio = v_obs_em1_tmp + ve0 * e_alpha + vn0 * e_delta
+    r1_hat = r1_tmp / max(np.linalg.norm(r1_tmp), 1e-12)
+    v_proj = v_guess_helio - np.dot(v_guess_helio, r1_hat) * r1_hat
+    vproj_norm = np.linalg.norm(v_proj)
+    if vproj_norm < 1e-8:
+        zaxis = np.array([0.0, 0.0, 1.0])
+        if abs(np.dot(r1_hat, zaxis)) > 0.9:
+            zaxis = np.array([1.0, 0.0, 0.0])
+        v_proj = np.cross(r1_hat, zaxis)
+        vproj_norm = max(np.linalg.norm(v_proj), 1e-12)
+    vproj_unit = v_proj / vproj_norm
+    if np.dot(vproj_unit, v_guess_helio) < 0:
+        vproj_unit = -vproj_unit
+    v1_circ_mean = v_circ * vproj_unit
+    v_topo_mean = v1_circ_mean - v_obs_em1_tmp
+    dotrho_mean = float(np.dot(v_topo_mean, hat_u))
+    ve_mean = float(np.dot(v_topo_mean, e_alpha))
+    vn_mean = float(np.dot(v_topo_mean, e_delta))
+    psi_prior_mean = np.array([dotrho_mean, ve_mean, vn_mean], dtype=float)
     if not np.isfinite(logrho):
         return None
     try:
@@ -717,6 +772,7 @@ def _sample_variant_a_one(payload):
             obs2_ra,
             obs2_dec,
             f_sigma_v=f_sigma_v_sample,
+            psi_prior_mean=psi_prior_mean,
         )
     except Exception:
         return None
@@ -743,6 +799,9 @@ def _sample_variant_a_one(payload):
             log_prior = float(logsumexp([np.log(0.8) + log_g, np.log(0.2) + log_t]))
         else:
             log_prior = logpdf_gauss(psi, np.zeros_like(psi), prior_cov)
+        eps = 0.5 * np.dot(v1, v1) - GM_SUN / np.linalg.norm(r1)
+        if eps > 0.0:
+            log_prior += ENERGY_PENALTY_LOG
         log_like = -0.5 * chi2
         return float(log_like + log_prior), (t_em1, t_em2, r1, v1, r2, v2, ra_pred, dec_pred)
 
@@ -776,50 +835,10 @@ def _sample_variant_a_one(payload):
             mu_s = float(b.T.dot(Ainv_z))
             sigma_s2 = max(1e-12, c - float(b.T.dot(Ainv_b)))
 
-            hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
-            try:
-                _, r_obs_em1_tmp, v_obs_em1_tmp = solve_emission_time_for_obs(
-                    obs1, np.exp(logrho), hat_u, site1
-                )
-            except Exception:
-                r_obs_em1_tmp, v_obs_em1_tmp = observer_posvel(site1, obs1)
-            r1_tmp = r_obs_em1_tmp + np.exp(logrho) * hat_u
-            r_helio_tmp = np.linalg.norm(r1_tmp)
-            v_circ = np.sqrt(GM_SUN / max(r_helio_tmp, 1.0))
-
-            dt = max(1.0, (obs2.tdb.jd - obs1.tdb.jd) * 86400.0)
-            dalpha = angle_diff(obs2_ra, Gamma[0])
-            ddelta = (obs2_dec - Gamma[1])
-            d_alpha_dt = dalpha / dt
-            d_delta_dt = ddelta / dt
-            rho_val = float(np.exp(logrho))
-            ve0 = rho_val * d_alpha_dt * np.cos(Gamma[1])
-            vn0 = rho_val * d_delta_dt
-            e_alpha, e_delta = tangent_basis(Gamma[0], Gamma[1])
-
-            v_guess_helio = v_obs_em1_tmp + ve0 * e_alpha + vn0 * e_delta
-            r1_hat = r1_tmp / max(np.linalg.norm(r1_tmp), 1e-12)
-            v_proj = v_guess_helio - np.dot(v_guess_helio, r1_hat) * r1_hat
-            vproj_norm = np.linalg.norm(v_proj)
-            if vproj_norm < 1e-8:
-                zaxis = np.array([0.0, 0.0, 1.0])
-                if abs(np.dot(r1_hat, zaxis)) > 0.9:
-                    zaxis = np.array([1.0, 0.0, 0.0])
-                v_proj = np.cross(r1_hat, zaxis)
-                vproj_norm = max(np.linalg.norm(v_proj), 1e-12)
-            vproj_unit = v_proj / vproj_norm
-            if np.dot(vproj_unit, v_guess_helio) < 0:
-                vproj_unit = -vproj_unit
-            v1_circ_mean = v_circ * vproj_unit
-            v_topo_mean = v1_circ_mean - v_obs_em1_tmp
-            dotrho_mean = float(np.dot(v_topo_mean, hat_u))
-            ve_mean = float(np.dot(v_topo_mean, e_alpha))
-            vn_mean = float(np.dot(v_topo_mean, e_delta))
-            psi_prior_mean = np.array([dotrho_mean, ve_mean, vn_mean], dtype=float)
             s_phys = float(n.dot(psi_prior_mean - hat_psi))
 
             if rho_prior_component.startswith("sso_"):
-                w_phys, w_cond, w_tail = 0.70, 0.20, 0.10
+                w_phys, w_cond, w_tail = W_SSO_PHYS, 0.10, 0.05
             elif rho_prior_component == "tri":
                 w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
             elif rho_prior_component == "flat_linear":
