@@ -34,6 +34,7 @@ except Exception:
     _numba = None
 
 import neotube.rng as nrng
+from neotube.fit import _initial_state_from_horizons
 
 # ------------------------------
 # TRY TO IMPORT NEOTUBE HELPERS
@@ -68,6 +69,8 @@ WEIGHT_FLAT_RHO = 0.10
 SIGMA_LOGRHO_TRI = 1.0
 DEFAULT_F_SIGMA_V = 1.0
 FLAT_V_F = 1.8
+ADAPTIVE_F_MIN = 0.1
+FLAT_LOGRHO_SIGMA = 1.0
 W_SSO_PHYS = 0.85
 ENERGY_PENALTY_LOG = -400.0
 PRIOR_SCALE = 0.25
@@ -192,6 +195,15 @@ def logpdf_mvt(x, mu, Sigma, nu):
     return float(a + b + c)
 
 
+def logpdf_normal_1d(x, mu, sigma):
+    """Log pdf of univariate Normal N(mu, sigma^2)."""
+    sigma = float(sigma)
+    if sigma <= 0.0:
+        return float("-inf")
+    dx = (float(x) - float(mu)) / sigma
+    return float(-0.5 * (dx * dx) - np.log(sigma * np.sqrt(2.0 * np.pi)))
+
+
 def logpdf_t_univariate(x, nu, loc=0.0, scale=1.0):
     """Log pdf of univariate Student-t with df=nu, location loc and scale."""
     dx = (float(x) - float(loc)) / float(scale)
@@ -247,6 +259,52 @@ def sigma_v_from_rhelio(r_helio_km, f=1.5, r_min_km=1e5):
     if r < 5.0 * 6378.1363:
         sigma_v = f * np.sqrt(GM_EARTH / max(r, 1.0))
     return float(sigma_v)
+
+
+def adaptive_f(rho_km, sigma_theta_dot, r_helio_km, C=1.0, f_min=ADAPTIVE_F_MIN):
+    """Data-aware scale factor for velocity prior."""
+    r = max(float(r_helio_km), 1.0)
+    v_kepler = np.sqrt(GM_SUN / r)
+    sigma_v_data = float(rho_km) * float(sigma_theta_dot)
+    if v_kepler <= 0.0:
+        return float(f_min)
+    f = float(C) * (sigma_v_data / v_kepler)
+    return max(float(f), float(f_min))
+
+
+def log_q_rho_base(logrho, rho_min, rho_max, rho_tri):
+    """Log proposal density for logrho under the base mixture."""
+    logs = []
+    if rho_tri is None:
+        weight_tri = 0.0
+        weight_flat = WEIGHT_RHO_TRI + WEIGHT_FLAT_RHO
+    else:
+        weight_tri = WEIGHT_RHO_TRI
+        weight_flat = WEIGHT_FLAT_RHO
+        logrho_center = np.log(np.clip(rho_tri, rho_min, rho_max))
+        logs.append(np.log(weight_tri) + logpdf_normal_1d(logrho, logrho_center, SIGMA_LOGRHO_TRI))
+
+    rho = float(np.exp(logrho))
+    if rho_min <= rho <= rho_max:
+        log_flat = np.log(rho) - np.log(rho_max - rho_min)
+        logs.append(np.log(weight_flat) + log_flat)
+
+    weight_sso = max(0.0, 1.0 - weight_tri - weight_flat)
+    if weight_sso > 0.0:
+        comp_logs = []
+        for _, center_rho, sigma_log, w in SSO_RHO_COMPONENTS:
+            comp_logs.append(np.log(w) + logpdf_normal_1d(logrho, np.log(center_rho), sigma_log))
+        logs.append(np.log(weight_sso) + float(logsumexp(comp_logs)))
+    if not logs:
+        return float("-inf")
+    return float(logsumexp(logs))
+
+
+def log_q_rho_jpl(logrho, rho_center, sigma_logrho):
+    """Log proposal density for logrho under a JPL-centered Gaussian."""
+    if rho_center is None:
+        return float("nan")
+    return logpdf_normal_1d(logrho, np.log(max(1.0, float(rho_center))), sigma_logrho)
 
 # ------------------------------
 # CSV parsing helpers
@@ -480,7 +538,7 @@ def _propagate_state_to_time(r1, v1, t0, t1, propagate_fn):
     state = np.concatenate([r1, v1])
     try:
         out = propagate_fn(state, t0, [t1])
-        out = np.asarray(out)
+        out = _canonicalize_propagate_output(out, 1, caller_desc="propagate_fn(state, t0, [t1])")
         return out[0, :3], out[0, 3:]
     except Exception:
         try:
@@ -519,6 +577,22 @@ def solve_emission_time_and_propagate(
     return Time(t_em_jd, format="jd", scale="tdb"), r_t, v_t
 
 
+def _canonicalize_propagate_output(out, n_states, caller_desc="propagate_state"):
+    """Return array shape (n_states, 6) from propagate_state output."""
+    arr = np.asarray(out, dtype=float)
+    if arr.ndim == 3 and arr.shape[2] == 6:
+        return arr[:, -1, :].reshape((arr.shape[0], 6))
+    if arr.ndim == 2 and arr.shape[1] == 6:
+        if arr.shape[0] == n_states:
+            return arr
+        if arr.shape[0] == 1:
+            return np.repeat(arr, n_states, axis=0)
+        raise RuntimeError(
+            f"{caller_desc} returned shape {arr.shape} and cannot map to {n_states} states"
+        )
+    raise RuntimeError(f"{caller_desc} returned unexpected array shape {arr.shape}")
+
+
 # ------------------------------
 # Forward model g(Gamma,theta) producing predicted RA/Dec at obs2
 # ------------------------------
@@ -550,15 +624,6 @@ def forward_predict_RADEC(Gamma, theta, obs1, obs2, site1, site2, propagate_surr
             )
             ra_pred = np.deg2rad(ra_deg)
             dec_pred = np.deg2rad(dec_deg)
-            try:
-                _, _, _, r1_em, v1_em = horizons_site_ephemeris_cached(
-                    HORIZONS_APPARENT_DESIGNATION, site1, t_em1.tdb.jd
-                )
-                r1 = r1_em
-                v1 = v1_em
-            except Exception:
-                r1 = r1_h
-                v1 = v1_h
         except Exception:
             pass
     return ra_pred, dec_pred, t_em1, t_em2, r1, v1, r2, v2
@@ -614,8 +679,13 @@ def optimize_conditional_psi(
     W2,
     obs2_ra,
     obs2_dec,
+    obs1_sigma_ra,
+    obs1_sigma_dec,
+    obs2_sigma_ra,
+    obs2_sigma_dec,
     f_sigma_v=1.5,
     psi_prior_mean=None,
+    sigma_logrho_prior=None,
     jpl_r=None,
     jpl_v=None,
     jpl_sigma_rdot=None,
@@ -635,7 +705,38 @@ def optimize_conditional_psi(
     r_helio = np.linalg.norm(r1_tmp)
     sigma_v = sigma_v_from_rhelio(r_helio, f=f_sigma_v)
     sigma_rdot = sigma_v
-    prior_cov = np.diag([sigma_rdot**2, sigma_v**2, sigma_v**2]) * PRIOR_SCALE
+    rho_val = float(np.exp(logrho))
+    dt = max(1.0, (obs2.tdb.jd - obs1.tdb.jd) * 86400.0)
+    dalpha = angle_diff(obs2_ra, Gamma[0])
+    ddelta = (obs2_dec - Gamma[1])
+    d_alpha_dt = dalpha / dt
+    d_delta_dt = ddelta / dt
+    sigma_ra1 = float(obs1_sigma_ra) / 206265.0
+    sigma_ra2 = float(obs2_sigma_ra) / 206265.0
+    sigma_dec1 = float(obs1_sigma_dec) / 206265.0
+    sigma_dec2 = float(obs2_sigma_dec) / 206265.0
+    var_dalpha_dt = (sigma_ra1**2 + sigma_ra2**2) / (dt * dt)
+    var_ddelta_dt = (sigma_dec1**2 + sigma_dec2**2) / (dt * dt)
+    if sigma_logrho_prior is None:
+        sigma_logrho_prior = SIGMA_LOGRHO_TRI
+    var_rho = (rho_val**2) * (float(sigma_logrho_prior) ** 2)
+    cos_dec = np.cos(Gamma[1])
+    var_ve = (
+        (d_alpha_dt * cos_dec) ** 2 * var_rho
+        + (rho_val * cos_dec) ** 2 * var_dalpha_dt
+        + sigma_v**2
+    )
+    var_vn = (d_delta_dt**2) * var_rho + (rho_val**2) * var_ddelta_dt + sigma_v**2
+    cov_ve_vn = (d_alpha_dt * cos_dec) * d_delta_dt * var_rho
+    prior_cov = np.array(
+        [
+            [sigma_rdot**2, 0.0, 0.0],
+            [0.0, var_ve, cov_ve_vn],
+            [0.0, cov_ve_vn, var_vn],
+        ],
+        dtype=float,
+    )
+    prior_cov *= PRIOR_SCALE
 
     if (jpl_r is not None) and (jpl_v is not None):
         if jpl_sigma_rdot is None:
@@ -713,6 +814,7 @@ def optimize_conditional_psi(
 
 def _sample_variant_a_one(payload):
     (
+        sample_idx,
         seed,
         obs1,
         obs2,
@@ -734,6 +836,7 @@ def _sample_variant_a_one(payload):
         jpl_sigma_v,
         jpl_sigma_rdot,
         jpl_designation,
+        do_prop_check,
     ) = payload
     rng = nrng.make_rng(seed)
     S1 = np.diag([(obs1_sigma_ra / 206265.0) ** 2, (obs1_sigma_dec / 206265.0) ** 2])
@@ -757,6 +860,9 @@ def _sample_variant_a_one(payload):
         rho_tri = None
 
     forced_jpl = False
+    rho_jpl_center = None
+    sigma_logrho_prior = SIGMA_LOGRHO_TRI
+    base_f = DEFAULT_F_SIGMA_V
     if jpl_only:
         try:
             designation = jpl_designation or "1 Ceres"
@@ -778,6 +884,7 @@ def _sample_variant_a_one(payload):
             )
             r_topo_jpl = r_site_au * AU_KM
             rho_jpl = float(np.linalg.norm(r_topo_jpl))
+            rho_jpl_center = rho_jpl
             hat_u = r_topo_jpl / max(1e-12, rho_jpl)
 
             # refine using emission time if available
@@ -825,7 +932,8 @@ def _sample_variant_a_one(payload):
 
             rho_prior_component = "jpl"
             vel_mode = "jpl"
-            f_sigma_v_sample = DEFAULT_F_SIGMA_V
+            base_f = DEFAULT_F_SIGMA_V
+            sigma_logrho_prior = jpl_sigma_logrho
             forced_jpl = True
         except Exception as exc:
             print("JPL/site vectors failed:", exc, flush=True)
@@ -835,10 +943,12 @@ def _sample_variant_a_one(payload):
             try:
                 if jpl_rho_prior is None:
                     raise RuntimeError("Missing JPL rho prior.")
+                rho_jpl_center = float(jpl_rho_prior)
                 logrho = float(
                     np.log(max(1.0, float(jpl_rho_prior))) + jpl_sigma_logrho * rng.normal()
                 )
                 rho_prior_component = "jpl_rho"
+                sigma_logrho_prior = jpl_sigma_logrho
             except Exception:
                 use_jpl_prior = False
 
@@ -848,10 +958,12 @@ def _sample_variant_a_one(payload):
                 logrho_center = np.log(np.clip(rho_tri, rho_min, rho_max))
                 logrho = float(rng.normal(loc=logrho_center, scale=SIGMA_LOGRHO_TRI))
                 rho_prior_component = "tri"
+                sigma_logrho_prior = SIGMA_LOGRHO_TRI
             elif u < (WEIGHT_RHO_TRI + WEIGHT_FLAT_RHO):
                 rho = float(rng.random() * (rho_max - rho_min) + rho_min)
                 logrho = np.log(rho)
                 rho_prior_component = "flat_linear"
+                sigma_logrho_prior = FLAT_LOGRHO_SIGMA
             else:
                 names = [c[0] for c in SSO_RHO_COMPONENTS]
                 centers = [c[1] for c in SSO_RHO_COMPONENTS]
@@ -864,14 +976,19 @@ def _sample_variant_a_one(payload):
                 logrho = float(rng.normal(loc=np.log(center_rho), scale=sigma_log))
                 logrho = float(np.clip(logrho, np.log(rho_min), np.log(rho_max)))
                 rho_prior_component = f"sso_{names[comp_idx]}"
+                sigma_logrho_prior = sigma_log
 
         if rho_prior_component.startswith("sso_"):
             circular_w = CIRCULAR_WEIGHT_SSO
         else:
             circular_w = CIRCULAR_WEIGHT_OTHER
         vel_mode = "circular" if rng.random() < circular_w else "flat"
-        f_sigma_v_sample = DEFAULT_F_SIGMA_V if vel_mode == "circular" else FLAT_V_F
+        base_f = DEFAULT_F_SIGMA_V if vel_mode == "circular" else FLAT_V_F
     hat_u = hat_u_from_radec(Gamma[0], Gamma[1])
+    if forced_jpl or use_jpl_prior:
+        log_q_rho = log_q_rho_jpl(logrho, rho_jpl_center, jpl_sigma_logrho)
+    else:
+        log_q_rho = log_q_rho_base(logrho, rho_min, rho_max, rho_tri)
     try:
         t_em1_tmp, r_obs_em1_tmp, v_obs_em1_tmp = solve_emission_time_for_obs(
             obs1, np.exp(logrho), hat_u, site1
@@ -889,6 +1006,20 @@ def _sample_variant_a_one(payload):
     d_alpha_dt = dalpha / dt
     d_delta_dt = ddelta / dt
     rho_val = float(np.exp(logrho))
+    sigma_ra1 = float(obs1_sigma_ra) / 206265.0
+    sigma_ra2 = float(obs2_sigma_ra) / 206265.0
+    sigma_dec1 = float(obs1_sigma_dec) / 206265.0
+    sigma_dec2 = float(obs2_sigma_dec) / 206265.0
+    sigma_alpha_dot = np.sqrt(sigma_ra1**2 + sigma_ra2**2) / dt
+    sigma_delta_dot = np.sqrt(sigma_dec1**2 + sigma_dec2**2) / dt
+    sigma_theta_dot = float(np.sqrt(sigma_alpha_dot**2 + sigma_delta_dot**2))
+    f_sigma_v_sample = adaptive_f(
+        rho_val,
+        sigma_theta_dot,
+        r_helio_tmp,
+        C=base_f,
+        f_min=ADAPTIVE_F_MIN,
+    )
     ve0 = rho_val * d_alpha_dt * np.cos(Gamma[1])
     vn0 = rho_val * d_delta_dt
     e_alpha, e_delta = tangent_basis(Gamma[0], Gamma[1])
@@ -930,8 +1061,13 @@ def _sample_variant_a_one(payload):
             W2,
             obs2_ra,
             obs2_dec,
+            obs1_sigma_ra,
+            obs1_sigma_dec,
+            obs2_sigma_ra,
+            obs2_sigma_dec,
             f_sigma_v=f_sigma_v_sample,
             psi_prior_mean=psi_prior_mean,
+            sigma_logrho_prior=sigma_logrho_prior,
             jpl_r=jpl_r,
             jpl_v=jpl_v,
             jpl_sigma_rdot=jpl_sigma_rdot,
@@ -1089,10 +1225,20 @@ def _sample_variant_a_one(payload):
         if eps > 0.0:
             log_prior += ENERGY_PENALTY_LOG
         log_like = -0.5 * chi2
-        return float(log_like + log_prior), (t_em1, t_em2, r1, v1, r2, v2, ra_pred, dec_pred)
+        log_target = float(log_like + log_prior)
+        return log_target, float(log_like), float(log_prior), (
+            t_em1,
+            t_em2,
+            r1,
+            v1,
+            r2,
+            v2,
+            ra_pred,
+            dec_pred,
+        )
 
     try:
-        log_target_cur, state_cur = compute_log_target(hat_psi)
+        log_target_cur, log_like_cur, log_prior_cur, state_cur = compute_log_target(hat_psi)
     except Exception:
         return None
 
@@ -1212,7 +1358,7 @@ def _sample_variant_a_one(payload):
                     raise RuntimeError(f"Nullspace proposal failed: {exc}") from exc
 
     try:
-        log_target_star, state_star = compute_log_target(psi_star)
+        log_target_star, log_like_star, log_prior_star, state_star = compute_log_target(psi_star)
     except Exception:
         return None
 
@@ -1222,13 +1368,33 @@ def _sample_variant_a_one(payload):
         state_use = state_star
         accepted = True
         accepted_comp = comp
+        log_target_use = log_target_star
+        log_like_use = log_like_star
+        log_prior_use = log_prior_star
+        log_q_psi_use = log_q_forward
     else:
         psi_use = hat_psi
         state_use = state_cur
         accepted = False
         accepted_comp = None
+        log_target_use = log_target_cur
+        log_like_use = log_like_cur
+        log_prior_use = log_prior_cur
+        log_q_psi_use = log_q_reverse
 
     t_em1, t_em2, r1, v1, r2, v2, ra_pred, dec_pred = state_use
+    if do_prop_check:
+        try:
+            r2_chk, v2_chk = _propagate_state_to_time(r1, v1, t_em1, t_em2, eval_fn)
+            dpos = float(np.linalg.norm(r2_chk - r2))
+            dvel = float(np.linalg.norm(v2_chk - v2))
+            if dpos > 1e-3 or dvel > 1e-9:
+                raise RuntimeError(
+                    f"Propagation mismatch for index {sample_idx}: dpos={dpos} km dvel={dvel} km/s"
+                )
+        except Exception as exc:
+            print("Propagation sanity check failed for index", sample_idx, ":", exc)
+            raise
     eps = 0.5 * np.dot(v1, v1) - GM_SUN / np.linalg.norm(r1)
     is_unbound_proposed = None
     try:
@@ -1240,6 +1406,9 @@ def _sample_variant_a_one(payload):
     is_unbound_accepted = bool(eps > 0.0)
 
     theta_star = np.concatenate(([logrho], psi_use))
+    log_weight = float("nan")
+    if np.isfinite(log_q_psi_use) and np.isfinite(log_q_rho):
+        log_weight = float(log_target_use - (log_q_psi_use + log_q_rho))
     return {
         "Gamma": Gamma,
         "logrho": logrho,
@@ -1262,6 +1431,12 @@ def _sample_variant_a_one(payload):
         "is_unbound_proposed": is_unbound_proposed,
         "is_unbound_accepted": is_unbound_accepted,
         "jpl_prior_used": bool(use_jpl_prior),
+        "log_like": log_like_use,
+        "log_prior": log_prior_use,
+        "log_target": log_target_use,
+        "log_q_psi": log_q_psi_use,
+        "log_q_rho": log_q_rho,
+        "log_weight": log_weight,
     }
 
 
@@ -1294,8 +1469,10 @@ def sample_variant_A(
     n_jpl = N // 2
     n_base = N - n_jpl
     use_jpl_flags = [False] * n_base + [True] * n_jpl
+    check_indices = {0, max(0, N // 2), max(0, N - 1)}
     payloads = [
         (
+            i,
             int(seeds[i]),
             obs1,
             obs2,
@@ -1317,6 +1494,7 @@ def sample_variant_A(
             jpl_sigma_v,
             jpl_sigma_rdot,
             jpl_designation,
+            i in check_indices,
         )
         for i in range(N)
     ]
@@ -1568,16 +1746,9 @@ def fetch_jpl_state(
         last_exc = None
         for attempt in range(max_retries):
             try:
-                obj = Horizons(id=body_id, location=center, epochs=t.tdb.jd, id_type=id_type)
-                vec = obj.vectors()
-                x = float(vec["x"][0]) * u.au.to(u.km)
-                y = float(vec["y"][0]) * u.au.to(u.km)
-                z = float(vec["z"][0]) * u.au.to(u.km)
-                vx = float(vec["vx"][0]) * (u.au / u.day).to(u.km / u.s)
-                vy = float(vec["vy"][0]) * (u.au / u.day).to(u.km / u.s)
-                vz = float(vec["vz"][0]) * (u.au / u.day).to(u.km / u.s)
-                r = [x, y, z]
-                v = [vx, vy, vz]
+                state = _initial_state_from_horizons(body_id, t)
+                r = state[:3].tolist()
+                v = state[3:].tolist()
                 results[float(jd_key)] = (np.array(r), np.array(v))
                 cache[jd_key] = {"r": r, "v": v}
                 break
@@ -1601,20 +1772,14 @@ def fetch_jpl_state(
 
 
 # ------------------------------
-# JPL state cache (single-epoch helper)
+# JPL state cache (single-epoch helper, heliocentric via fit._initial_state_from_horizons)
 # ------------------------------
 @lru_cache(maxsize=4096)
 def _fetch_jpl_state_cached(designation, jd_key, id_type="smallbody"):
     try:
-        obj = Horizons(id=designation, location="@sun", epochs=jd_key, id_type=id_type)
-        vec = obj.vectors()
-        x = float(vec["x"][0]) * u.au.to(u.km)
-        y = float(vec["y"][0]) * u.au.to(u.km)
-        z = float(vec["z"][0]) * u.au.to(u.km)
-        vx = float(vec["vx"][0]) * (u.au / u.day).to(u.km / u.s)
-        vy = float(vec["vy"][0]) * (u.au / u.day).to(u.km / u.s)
-        vz = float(vec["vz"][0]) * (u.au / u.day).to(u.km / u.s)
-        return np.array([x, y, z], dtype=float), np.array([vx, vy, vz], dtype=float)
+        t = Time(jd_key, format="jd", scale="tdb")
+        state = _initial_state_from_horizons(designation, t)
+        return np.array(state[:3], dtype=float), np.array(state[3:], dtype=float)
     except Exception:
         return None, None
 
@@ -1647,23 +1812,143 @@ def angular_sep(ra1, dec1, ra2, dec2):
     return np.arccos(cosang)
 
 
+def normalize_log_weights(log_w):
+    """Normalize log-weights to weights that sum to 1."""
+    lw = np.asarray(log_w, dtype=float)
+    lw = lw - logsumexp(lw)
+    w = np.exp(lw)
+    w = w / np.sum(w)
+    return w
+
+
+def weighted_quantile(values, weights, quantiles):
+    values = np.asarray(values)
+    weights = np.asarray(weights, dtype=float)
+    if np.sum(weights) <= 0:
+        raise ValueError("weights must sum to > 0")
+    weights = weights / np.sum(weights)
+    sorter = np.argsort(values)
+    vals = values[sorter]
+    w = weights[sorter]
+    cumsum = np.cumsum(w)
+    cumsum_prev = np.concatenate(([0.0], cumsum[:-1]))
+    qs = np.atleast_1d(quantiles)
+    out = np.empty(qs.shape, dtype=float)
+    for i, q in enumerate(qs):
+        if q <= 0:
+            out[i] = vals[0]
+            continue
+        if q >= 1:
+            out[i] = vals[-1]
+            continue
+        idx = np.searchsorted(cumsum, q, side="right")
+        if idx == 0:
+            out[i] = vals[0]
+        else:
+            w_left = cumsum_prev[idx]
+            w_right = cumsum[idx]
+            v_left = vals[idx - 1]
+            v_right = vals[idx]
+            if w_right == w_left:
+                out[i] = v_right
+            else:
+                frac = (q - w_left) / (w_right - w_left)
+                out[i] = v_left + frac * (v_right - v_left)
+    return out[0] if np.isscalar(quantiles) else out
+
+
+def weighted_stats(values, log_weights):
+    values = np.asarray(values, dtype=float)
+    log_w = np.asarray(log_weights, dtype=float)
+    mask = np.isfinite(values) & np.isfinite(log_w)
+    if not np.any(mask):
+        return None
+    v = values[mask]
+    lw = log_w[mask]
+    w = normalize_log_weights(lw)
+    mean = float(np.sum(w * v))
+    var = float(np.sum(w * (v - mean) ** 2))
+    median = float(weighted_quantile(v, w, 0.5))
+    lo, hi = weighted_quantile(v, w, [0.05, 0.95])
+    ess = float(1.0 / np.sum(w**2))
+    return {
+        "n": int(len(v)),
+        "ess": ess,
+        "mean": mean,
+        "median": median,
+        "var": var,
+        "std": float(np.sqrt(var)),
+        "ci90": (float(lo), float(hi)),
+    }
+
+
 def summarize_and_plot(
     samples_A,
     samples_B,
     jpl_states,
     obs1,
     site1,
+    obs2,
+    site2,
     obs2_ra,
     obs2_dec,
     output_dir=None,
     show_plots=True,
+    show_outliers=True,
 ):
+    def summarize_resids(
+        r1,
+        r2,
+        t_em1_array=None,
+        jpl_r_em1_array=None,
+        prop_r_em1_array=None,
+        obs1_info=None,
+    ):
+        def print_pct(x, name):
+            print(f"{name}: mean {np.mean(x):.6g}  med {np.median(x):.6g}  std {np.std(x):.6g}")
+            for p in (1, 5, 10, 25, 50, 75, 90, 95, 99):
+                print(f"  p{p:02d}: {np.percentile(x, p):.6g}")
+            for t in (1e3, 1e4, 1e5, 1e6, 1e7, 1e8):
+                frac = np.mean(x < t)
+                print(f"  frac < {t:.0f} km: {frac:.4f}")
+
+        print("=== em1 residuals (km) ===")
+        print_pct(r1, "em1")
+        print("\n=== em2 residuals (km) ===")
+        print_pct(r2, "em2")
+        if show_outliers:
+            idx = np.argsort(r1)[-10:][::-1]
+            print("\nTop 10 em1 outliers (index, em1_km, em2_km):")
+            for i in idx:
+                print(i, r1[i], r2[i])
+            if (
+                t_em1_array is not None
+                and jpl_r_em1_array is not None
+                and prop_r_em1_array is not None
+                and obs1_info is not None
+            ):
+                print("\nTop 10 em1 outliers (metadata):")
+                for i in idx:
+                    print("---- sample", i, "----")
+                    print("t_em1:", t_em1_array[i].isot)
+                    print("jpl_r_em1:", jpl_r_em1_array[i])
+                    print("prop_r_em1:", prop_r_em1_array[i])
+                    print("obs details:", obs1_info[i])
+
     def summarize(samples, label):
         ang_res_obs2 = []
         pos_res_em1 = []
         pos_res_em2 = []
         rho_samples = []
         rho_jpl_samples = []
+        rho_em2_samples = []
+        rho_em2_jpl_samples = []
+        rho_em2_resid = []
+        log_weights = []
+        t_em1_list = []
+        jpl_r_em1_list = []
+        prop_r_em1_list = []
+        obs1_info_list = []
         for s in samples:
             ang = angular_sep(s["ra_pred"], s["dec_pred"], obs2_ra, obs2_dec)
             ang_res_obs2.append(ang * 206265.0)
@@ -1677,6 +1962,26 @@ def summarize_and_plot(
             rho_samples.append(float(np.linalg.norm(s["r1"] - r_obs_em1)))
             if r1_jpl is not None:
                 rho_jpl_samples.append(float(np.linalg.norm(r1_jpl - r_obs_em1)))
+            r_obs_em2, _ = observer_posvel(site2, s["t_em2"])
+            rho_em2 = float(np.linalg.norm(s["r2"] - r_obs_em2))
+            rho_em2_samples.append(rho_em2)
+            if r2_jpl is not None:
+                rho_jpl_em2 = float(np.linalg.norm(r2_jpl - r_obs_em2))
+                rho_em2_jpl_samples.append(rho_jpl_em2)
+                rho_em2_resid.append(rho_em2 - rho_jpl_em2)
+            else:
+                rho_em2_resid.append(np.nan)
+            log_weights.append(s.get("log_weight", float("nan")))
+            t_em1_list.append(s["t_em1"])
+            jpl_r_em1_list.append(r1_jpl)
+            prop_r_em1_list.append(s["r1"])
+            obs1_info_list.append(
+                {
+                    "site": site1,
+                    "obs1_ra_deg": float(np.rad2deg(obs1_ra)),
+                    "obs1_dec_deg": float(np.rad2deg(obs1_dec)),
+                }
+            )
         print(f"--- {label} ---")
         print(
             "Obs2 angular residual arcsec: mean %.3f med %.3f std %.3f"
@@ -1696,18 +2001,104 @@ def summarize_and_plot(
             np.array(pos_res_em2),
             np.array(rho_samples),
             np.array(rho_jpl_samples),
+            np.array(rho_em2_resid),
+            np.array(log_weights),
+            t_em1_list,
+            jpl_r_em1_list,
+            prop_r_em1_list,
+            obs1_info_list,
         )
 
     A_base = [s for s in samples_A if not s.get("jpl_prior_used")]
     A_jpl = [s for s in samples_A if s.get("jpl_prior_used")]
     if A_base:
-        summarize(A_base, "Variant A (base prior)")
+        (
+            _,
+            A_base_p1,
+            A_base_p2,
+            _,
+            _,
+            A_base_rho_res_em2,
+            A_base_logw,
+            A_base_t,
+            A_base_jplr,
+            A_base_propr,
+            A_base_obs,
+        ) = summarize(A_base, "Variant A (base prior)")
+        summarize_resids(A_base_p1, A_base_p2, A_base_t, A_base_jplr, A_base_propr, A_base_obs)
+        wstats = weighted_stats(A_base_rho_res_em2, A_base_logw)
+        if wstats:
+            print(
+                "Weighted rho@em2 residuals (prop - JPL) [base]: "
+                f"mean {wstats['mean']:.6g} med {wstats['median']:.6g} "
+                f"std {wstats['std']:.6g} var {wstats['var']:.6g} "
+                f"90% CI [{wstats['ci90'][0]:.6g}, {wstats['ci90'][1]:.6g}] "
+                f"ESS {wstats['ess']:.1f} (n={wstats['n']})"
+            )
     if A_jpl:
-        summarize(A_jpl, "Variant A (JPL jitter prior)")
-    A_ang, A_p1, A_p2, A_rho, A_rho_jpl = summarize(samples_A, "Variant A (all)")
+        (
+            _,
+            A_jpl_p1,
+            A_jpl_p2,
+            _,
+            _,
+            A_jpl_rho_res_em2,
+            A_jpl_logw,
+            A_jpl_t,
+            A_jpl_jplr,
+            A_jpl_propr,
+            A_jpl_obs,
+        ) = summarize(A_jpl, "Variant A (JPL jitter prior)")
+        summarize_resids(A_jpl_p1, A_jpl_p2, A_jpl_t, A_jpl_jplr, A_jpl_propr, A_jpl_obs)
+        wstats = weighted_stats(A_jpl_rho_res_em2, A_jpl_logw)
+        if wstats:
+            print(
+                "Weighted rho@em2 residuals (prop - JPL) [JPL jitter]: "
+                f"mean {wstats['mean']:.6g} med {wstats['median']:.6g} "
+                f"std {wstats['std']:.6g} var {wstats['var']:.6g} "
+                f"90% CI [{wstats['ci90'][0]:.6g}, {wstats['ci90'][1]:.6g}] "
+                f"ESS {wstats['ess']:.1f} (n={wstats['n']})"
+            )
+    (
+        A_ang,
+        A_p1,
+        A_p2,
+        A_rho,
+        A_rho_jpl,
+        A_rho_res_em2,
+        A_logw,
+        A_t,
+        A_jplr,
+        A_propr,
+        A_obs,
+    ) = summarize(
+        samples_A, "Variant A (all)"
+    )
+    summarize_resids(A_p1, A_p2, A_t, A_jplr, A_propr, A_obs)
+    wstats = weighted_stats(A_rho_res_em2, A_logw)
+    if wstats:
+        print(
+            "Weighted rho@em2 residuals (prop - JPL) [all]: "
+            f"mean {wstats['mean']:.6g} med {wstats['median']:.6g} "
+            f"std {wstats['std']:.6g} var {wstats['var']:.6g} "
+            f"90% CI [{wstats['ci90'][0]:.6g}, {wstats['ci90'][1]:.6g}] "
+            f"ESS {wstats['ess']:.1f} (n={wstats['n']})"
+        )
     B_ang = B_p1 = B_p2 = B_rho = B_rho_jpl = np.array([])
     if samples_B:
-        B_ang, B_p1, B_p2, B_rho, B_rho_jpl = summarize(samples_B, "Variant B")
+        (
+            B_ang,
+            B_p1,
+            B_p2,
+            B_rho,
+            B_rho_jpl,
+            _B_rho_res_em2,
+            _B_logw,
+            _B_t,
+            _B_jplr,
+            _B_propr,
+            _B_obs,
+        ) = summarize(samples_B, "Variant B")
 
     plt.figure(figsize=(10, 4))
     plt.subplot(1, 2, 1)
@@ -1790,6 +2181,11 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=None, help="Max parallel workers (default: CPU count up to 50)")
     parser.add_argument("--seed", type=int, default=50, help="RNG seed for reproducible sampling")
     parser.add_argument("--horizons-cache", default=None, help="Path to Horizons cache JSON")
+    parser.add_argument(
+        "--skip-outliers",
+        action="store_true",
+        help="Skip detailed outlier listings in residual summaries.",
+    )
     physics_group = parser.add_mutually_exclusive_group()
     physics_group.add_argument(
         "--full-physics",
@@ -1855,11 +2251,13 @@ if __name__ == "__main__":
     df_obj.sort_values(by="parsed_time", inplace=True)
 
     if args.obs1_index is None:
-        row1 = df_obj.iloc[0]
+        if df_obj.shape[0] < 3:
+            raise SystemExit("Need at least three observations to default to obs1=1, obs2=2.")
+        row1 = df_obj.iloc[1]
     else:
         row1 = df_obj.iloc[args.obs1_index]
     if args.obs2_index is None:
-        row2 = df_obj.iloc[1]
+        row2 = df_obj.iloc[2] if args.obs1_index is None else df_obj.iloc[1]
     else:
         row2 = df_obj.iloc[args.obs2_index]
 
@@ -1925,6 +2323,18 @@ if __name__ == "__main__":
         print("JPL-only proposal: missing object designation; disabling JPL-only mode.")
         args.jpl_only_proposal = False
 
+    print("JPL state fetch uses fit._initial_state_from_horizons (Horizons location='@sun').")
+    jpl_rho_prior = None
+    if args.object:
+        try:
+            jd_key = round(float(obs1.tdb.jd), HORIZONS_JD_DECIMALS)
+            r_jpl, _ = _fetch_jpl_state_cached(args.object, jd_key)
+            if r_jpl is not None:
+                r_obs_t1, _ = observer_posvel(site1, obs1)
+                jpl_rho_prior = float(np.linalg.norm(r_jpl - r_obs_t1))
+        except Exception:
+            jpl_rho_prior = None
+
     print("Sampling Variant A ...")
     samples_A = sample_variant_A(
         obs1,
@@ -1943,6 +2353,7 @@ if __name__ == "__main__":
         workers=args.workers,
         seed=args.seed,
         jpl_only=args.jpl_only_proposal,
+        jpl_rho_prior=jpl_rho_prior,
         jpl_sigma_logrho=args.jpl_sigma_logrho,
         jpl_sigma_v=args.jpl_sigma_v,
         jpl_sigma_rdot=args.jpl_sigma_rdot,
@@ -1971,8 +2382,11 @@ if __name__ == "__main__":
         jpl_states,
         obs1,
         site1,
+        obs2,
+        site2,
         obs2_ra,
         obs2_dec,
         output_dir=output_dir,
         show_plots=show_plots,
+        show_outliers=not args.skip_outliers,
     )
