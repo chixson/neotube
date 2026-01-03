@@ -1284,38 +1284,62 @@ def _sample_variant_a_one(payload):
                 c = float(Sigma_w[2, 2])
                 A += 1e-12 * np.eye(2)
 
-                L = la.cho_factor(A, lower=True)
+                L_A = la.cho_factor(A, lower=True)
 
-                def log_target_s(s_scalar, z_vec):
-                    wvec = np.concatenate([z_vec, np.array([s_scalar])])
-                    psi_cand = hat_psi + U3.dot(wvec)
-                    log_t, _, _, _ = compute_log_target(psi_cand)
-                    return log_t
+                def make_log_target_s():
+                    cache = {}
 
-                def find_s_star_and_prop_sigma(z_vec, mu_s, sigma_s2):
+                    def log_target_s_cached(s_scalar, z_vec):
+                        key = round(float(s_scalar), 9)
+                        if key in cache:
+                            return cache[key]
+                        wvec = np.concatenate([z_vec, np.array([s_scalar])])
+                        psi_cand = hat_psi + U3.dot(wvec)
+                        log_t, _, _, _ = compute_log_target(psi_cand)
+                        cache[key] = log_t
+                        return log_t
+
+                    log_target_s_cached.clear_cache = cache.clear
+                    return log_target_s_cached
+
+                def find_s_star_and_prop_sigma(z_vec, mu_s, sigma_s2, log_target_s_fn, K_init=8.0):
                     s_center = float(mu_s)
                     s_std = max(np.sqrt(max(0.0, sigma_s2)), 1e-6)
-                    K = 8.0
-                    low = s_center - K * s_std
-                    high = s_center + K * s_std
+                    K = float(K_init)
+                    edge_hit = False
+                    res = None
 
-                    def neg_f(sval):
-                        return -log_target_s(sval, z_vec)
+                    for _expand in range(3):
+                        low = s_center - K * s_std
+                        high = s_center + K * s_std
 
-                    try:
-                        res = minimize_scalar(
-                            neg_f,
-                            bounds=(low, high),
-                            method="bounded",
-                            options={"xatol": 1e-6, "maxiter": 100},
-                        )
-                        if not res.success:
-                            raise RuntimeError("s-star optimization failed")
-                        s_star = float(res.x)
-                    except Exception:
+                        def neg_f(sval):
+                            return -log_target_s_fn(sval, z_vec)
+
+                        try:
+                            res = minimize_scalar(
+                                neg_f,
+                                bounds=(low, high),
+                                method="bounded",
+                                options={"xatol": 1e-6, "maxiter": 100},
+                            )
+                            s_star = float(res.x)
+                            opt_ok = bool(res.success)
+                        except Exception:
+                            opt_ok = False
+                            s_star = s_center
+
+                        eps_edge = 1e-8 + 1e-6 * max(abs(low), abs(high))
+                        if opt_ok and (abs(s_star - low) < eps_edge or abs(s_star - high) < eps_edge):
+                            edge_hit = True
+                            K *= 2.0
+                            continue
+                        break
+
+                    if res is None or not opt_ok:
                         s_star = s_center
 
-                    h = max(1e-3, s_std * 1e-3, 1e-8)
+                    h = max(1e-6, s_std * 1e-3, 1e-8)
                     try:
                         f0 = neg_f(s_star)
                         f_plus = neg_f(s_star + h)
@@ -1324,22 +1348,38 @@ def _sample_variant_a_one(payload):
                     except Exception:
                         d2 = 0.0
 
-                    if d2 > 0.0:
+                    if d2 > 1e-12:
                         sigma_local = math.sqrt(1.0 / d2)
                         prop_sigma = max(
                             1e-6, min(2.0 * s_std, max(0.1 * sigma_local, 1e-3))
                         )
                     else:
                         prop_sigma = max(1e-3, min(2.0 * s_std, max(0.1 * s_std, 1.0)))
-                    return s_star, float(prop_sigma)
+
+                    return float(s_star), float(prop_sigma), bool(opt_ok), bool(edge_hit)
+
+                try:
+                    Ainv_b = la.cho_solve(L_A, b)
+                    sigma_s20 = max(1e-12, float(c - b.T.dot(Ainv_b)))
+                except Exception:
+                    sigma_s20 = max(1e-12, float(c))
+
+                log_target_s0 = make_log_target_s()
+                s_star0, prop_sigma0, _opt0, _edge0 = find_s_star_and_prop_sigma(
+                    np.zeros(2), 0.0, sigma_s20, log_target_s0
+                )
 
                 z = rng.multivariate_normal(np.zeros(2), A)
-                Ainv_z = la.cho_solve(L, z)
-                Ainv_b = la.cho_solve(L, b)
-                mu_s = float(b.T.dot(Ainv_z))
-                sigma_s2 = max(1e-12, c - float(b.T.dot(Ainv_b)))
+                log_target_s = make_log_target_s()
+                log_target_s.clear_cache()
 
-                s_star, prop_sigma = find_s_star_and_prop_sigma(z, mu_s, sigma_s2)
+                Ainv_z = la.cho_solve(L_A, z)
+                mu_s = float(b.T.dot(Ainv_z))
+                sigma_s2 = max(1e-12, float(c - b.T.dot(Ainv_b)))
+
+                s_star, prop_sigma, _opt_ok, _edge_hit = find_s_star_and_prop_sigma(
+                    z, mu_s, sigma_s2, log_target_s
+                )
                 s_prop = float(rng.normal(loc=s_star, scale=prop_sigma))
 
                 s_max = NULL_S_CLIP * math.sqrt(max(sigma_s2, 1e-12))
@@ -1350,7 +1390,6 @@ def _sample_variant_a_one(payload):
                 log_q_s = logpdf_normal_1d(s_prop, s_star, prop_sigma)
                 log_q_forward = float(log_q_z + log_q_s)
 
-                s_star0, prop_sigma0 = find_s_star_and_prop_sigma(np.zeros(2), 0.0, c)
                 log_q_z0 = logpdf_gauss(np.zeros(2), np.zeros(2), A)
                 log_q_s0 = logpdf_normal_1d(0.0, s_star0, prop_sigma0)
                 log_q_reverse = float(log_q_z0 + log_q_s0)
