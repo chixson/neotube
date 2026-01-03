@@ -757,6 +757,8 @@ def _sample_variant_a_one(payload):
     ve_mean = float(np.dot(v_topo_mean, e_alpha))
     vn_mean = float(np.dot(v_topo_mean, e_delta))
     psi_prior_mean = np.array([dotrho_mean, ve_mean, vn_mean], dtype=float)
+    if psi_prior_mean is None:
+        psi_prior_mean = np.zeros(3, dtype=float)
     if not np.isfinite(logrho):
         return None
     try:
@@ -793,12 +795,12 @@ def _sample_variant_a_one(payload):
         sigma_rdot = sigma_v
         prior_cov = np.diag([sigma_rdot**2, sigma_v**2, sigma_v**2])
         if vel_mode == "flat":
-            log_g = logpdf_gauss(psi, np.zeros_like(psi), prior_cov)
+            log_g = logpdf_gauss(psi, psi_prior_mean, prior_cov)
             Sigma_t = (3.0**2) * prior_cov
-            log_t = logpdf_mvt(psi, np.zeros_like(psi), Sigma_t, nu=3.0)
+            log_t = logpdf_mvt(psi, psi_prior_mean, Sigma_t, nu=3.0)
             log_prior = float(logsumexp([np.log(0.8) + log_g, np.log(0.2) + log_t]))
         else:
-            log_prior = logpdf_gauss(psi, np.zeros_like(psi), prior_cov)
+            log_prior = logpdf_gauss(psi, psi_prior_mean, prior_cov)
         eps = 0.5 * np.dot(v1, v1) - GM_SUN / np.linalg.norm(r1)
         if eps > 0.0:
             log_prior += ENERGY_PENALTY_LOG
