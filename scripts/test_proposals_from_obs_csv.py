@@ -134,7 +134,14 @@ def _process_chunk_fullphysics(chunk_payload):
     for p in chunk_payload:
         try:
             out = _sample_variant_a_one(p)
-        except Exception:
+        except Exception as exc:
+            import traceback
+
+            seed_info = None
+            if isinstance(p, (list, tuple)) and p:
+                seed_info = p[0]
+            print(f"EXCEPTION in _sample_variant_a_one (seed={seed_info}): {exc}", flush=True)
+            traceback.print_exc()
             out = None
         results.append(out)
     return results
@@ -686,6 +693,8 @@ def _sample_variant_a_one(payload):
         circular_w = CIRCULAR_WEIGHT_OTHER
     vel_mode = "circular" if rng.random() < circular_w else "flat"
     f_sigma_v_sample = DEFAULT_F_SIGMA_V if vel_mode == "circular" else FLAT_V_F
+    if not np.isfinite(logrho):
+        return None
     try:
         hat_psi, Sigma_psi = optimize_conditional_psi(
             Gamma,
@@ -784,7 +793,6 @@ def _sample_variant_a_one(payload):
         "proposal_component": comp,
         "accepted_component": accepted_comp,
         "accepted": accepted,
-        "rho_proposal_component": rho_proposal_component,
         "is_unbound_proposed": is_unbound_proposed,
         "is_unbound_accepted": is_unbound_accepted,
     }
@@ -1109,7 +1117,17 @@ def angular_sep(ra1, dec1, ra2, dec2):
     return np.arccos(cosang)
 
 
-def summarize_and_plot(samples_A, samples_B, jpl_states, obs1, site1, obs2_ra, obs2_dec):
+def summarize_and_plot(
+    samples_A,
+    samples_B,
+    jpl_states,
+    obs1,
+    site1,
+    obs2_ra,
+    obs2_dec,
+    output_dir=None,
+    show_plots=True,
+):
     def summarize(samples, label):
         ang_res_obs2 = []
         pos_res_em1 = []
@@ -1169,7 +1187,11 @@ def summarize_and_plot(samples_A, samples_B, jpl_states, obs1, site1, obs2_ra, o
     plt.xlabel("pos residual @ em2 (km)")
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    if output_dir is not None:
+        out_path = os.path.join(output_dir, "variantA_residuals.png")
+        plt.savefig(out_path, dpi=150)
+    if show_plots:
+        plt.show()
 
     plt.figure(figsize=(8, 4))
     plt.hist(A_rho, bins=40, alpha=0.6, label="A rho")
@@ -1189,7 +1211,11 @@ def summarize_and_plot(samples_A, samples_B, jpl_states, obs1, site1, obs2_ra, o
     plt.xlabel("rho at em1 (km)")
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    if output_dir is not None:
+        out_path = os.path.join(output_dir, "variantA_rho.png")
+        plt.savefig(out_path, dpi=150)
+    if show_plots:
+        plt.show()
 
 
 # ------------------------------
@@ -1238,6 +1264,11 @@ if __name__ == "__main__":
         "--no-full-physics",
         action="store_true",
         help="Disable full-physics propagation.",
+    )
+    parser.add_argument(
+        "--show-plots",
+        action="store_true",
+        help="Display plots interactively (also saved to disk).",
     )
     args = parser.parse_args()
 
@@ -1364,4 +1395,16 @@ if __name__ == "__main__":
     )
     if failed_jds:
         print("Horizons failures:", len(failed_jds))
-    summarize_and_plot(samples_A, samples_B, jpl_states, obs1, site1, obs2_ra, obs2_dec)
+    output_dir = os.path.dirname(os.path.abspath(args.csv))
+    show_plots = args.show_plots
+    summarize_and_plot(
+        samples_A,
+        samples_B,
+        jpl_states,
+        obs1,
+        site1,
+        obs2_ra,
+        obs2_dec,
+        output_dir=output_dir,
+        show_plots=show_plots,
+    )
