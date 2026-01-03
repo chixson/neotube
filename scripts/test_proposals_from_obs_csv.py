@@ -17,7 +17,7 @@ import json
 import time
 import numpy as np
 import scipy.linalg as la
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, minimize_scalar
 from scipy.special import gammaln, logsumexp
 import pandas as pd
 from astropy.time import Time
@@ -1073,12 +1073,27 @@ def _sample_variant_a_one(payload):
             jpl_sigma_rdot=jpl_sigma_rdot,
             jpl_sigma_v=jpl_sigma_v,
         )
-    except Exception:
+    except Exception as exc:
+        if os.environ.get("DEBUG_OPT_PSI"):
+            dt_dbg = float((obs2.tdb.jd - obs1.tdb.jd) * 86400.0)
+            print(
+                "optimize_conditional_psi failed:",
+                "seed",
+                seed,
+                "dt_s",
+                dt_dbg,
+                "logrho",
+                logrho,
+                "Gamma",
+                Gamma,
+                "err",
+                exc,
+                flush=True,
+            )
         return None
 
     # --- Begin diagnostic logging (insert in _sample_variant_a_one after hat_psi, Sigma_psi, Jpsi are available) ---
     import csv
-    import os
 
     DEBUG_LOGPATH = os.path.join(
         os.path.dirname(__file__), "..", "runs", "ceres-ground-test", "debug_nullspace.csv"
@@ -1270,92 +1285,85 @@ def _sample_variant_a_one(payload):
                 A += 1e-12 * np.eye(2)
 
                 L = la.cho_factor(A, lower=True)
+
+                def log_target_s(s_scalar, z_vec):
+                    wvec = np.concatenate([z_vec, np.array([s_scalar])])
+                    psi_cand = hat_psi + U3.dot(wvec)
+                    log_t, _, _, _ = compute_log_target(psi_cand)
+                    return log_t
+
+                def find_s_star_and_prop_sigma(z_vec, mu_s, sigma_s2):
+                    s_center = float(mu_s)
+                    s_std = max(np.sqrt(max(0.0, sigma_s2)), 1e-6)
+                    K = 8.0
+                    low = s_center - K * s_std
+                    high = s_center + K * s_std
+
+                    def neg_f(sval):
+                        return -log_target_s(sval, z_vec)
+
+                    try:
+                        res = minimize_scalar(
+                            neg_f,
+                            bounds=(low, high),
+                            method="bounded",
+                            options={"xatol": 1e-6, "maxiter": 100},
+                        )
+                        if not res.success:
+                            raise RuntimeError("s-star optimization failed")
+                        s_star = float(res.x)
+                    except Exception:
+                        s_star = s_center
+
+                    h = max(1e-3, s_std * 1e-3, 1e-8)
+                    try:
+                        f0 = neg_f(s_star)
+                        f_plus = neg_f(s_star + h)
+                        f_minus = neg_f(s_star - h)
+                        d2 = (f_plus - 2.0 * f0 + f_minus) / (h * h)
+                    except Exception:
+                        d2 = 0.0
+
+                    if d2 > 0.0:
+                        sigma_local = math.sqrt(1.0 / d2)
+                        prop_sigma = max(
+                            1e-6, min(2.0 * s_std, max(0.1 * sigma_local, 1e-3))
+                        )
+                    else:
+                        prop_sigma = max(1e-3, min(2.0 * s_std, max(0.1 * s_std, 1.0)))
+                    return s_star, float(prop_sigma)
+
                 z = rng.multivariate_normal(np.zeros(2), A)
                 Ainv_z = la.cho_solve(L, z)
                 Ainv_b = la.cho_solve(L, b)
                 mu_s = float(b.T.dot(Ainv_z))
                 sigma_s2 = max(1e-12, c - float(b.T.dot(Ainv_b)))
 
-                s_phys = float(n.dot(psi_prior_mean - hat_psi))
+                s_star, prop_sigma = find_s_star_and_prop_sigma(z, mu_s, sigma_s2)
+                s_prop = float(rng.normal(loc=s_star, scale=prop_sigma))
 
-                if rho_prior_component.startswith("sso_"):
-                    w_phys = W_SSO_PHYS
-                    w_cond = 1.0 - W_SSO_PHYS - 0.03
-                    w_tail = 0.03
-                elif rho_prior_component == "tri":
-                    w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
-                elif rho_prior_component == "flat_linear":
-                    w_phys, w_cond, w_tail = 0.20, 0.50, 0.30
-                else:
-                    w_phys, w_cond, w_tail = 0.25, 0.50, 0.25
-                if rho_prior_component == "sso_Comet":
-                    w_phys, w_cond, w_tail = 0.20, 0.30, 0.50
-                w_sum = w_phys + w_cond + w_tail
-                w_phys, w_cond, w_tail = w_phys / w_sum, w_cond / w_sum, w_tail / w_sum
-
-                tau = max(1e-3, 0.75 * np.sqrt(sigma_s2))
-                kappa = NULL_KAPPA
-                nu = NULL_TAIL_DF
-
-                u_comp = rng.random()
-                if u_comp < w_cond:
-                    s = float(mu_s + np.sqrt(sigma_s2) * rng.normal())
-                    s_comp = "cond"
-                elif u_comp < (w_cond + w_phys):
-                    s = float(s_phys + tau * rng.normal())
-                    s_comp = "phys"
-                else:
-                    s = float(mu_s + np.sqrt(sigma_s2) * kappa * rng.standard_t(df=nu))
-                    s_comp = "tail"
-                s_max = NULL_S_CLIP * np.sqrt(sigma_s2)
-                if abs(s) > s_max:
-                    s = np.sign(s) * s_max
-
-                w_vec = np.concatenate([z, np.array([s])])
-                psi_star = hat_psi + U3.dot(w_vec)
+                s_max = NULL_S_CLIP * math.sqrt(max(sigma_s2, 1e-12))
+                if abs(s_prop) > s_max:
+                    s_prop = math.copysign(min(abs(s_prop), s_max), s_prop)
 
                 log_q_z = logpdf_gauss(z, np.zeros(2), A)
-                log_q_cond_s = -0.5 * (
-                    np.log(2.0 * np.pi * sigma_s2) + ((s - mu_s) ** 2) / sigma_s2
-                )
-                log_q_phys_s = -0.5 * (
-                    np.log(2.0 * np.pi * (tau**2)) + ((s - s_phys) ** 2) / (tau**2)
-                )
-                log_q_tail_s = logpdf_t_univariate(
-                    s, nu, loc=mu_s, scale=np.sqrt(sigma_s2) * kappa
-                )
-                log_q_forward = float(
-                    logsumexp(
-                        [
-                            np.log(w_cond) + log_q_z + log_q_cond_s,
-                            np.log(w_phys) + log_q_z + log_q_phys_s,
-                            np.log(w_tail) + log_q_z + log_q_tail_s,
-                        ]
-                    )
-                )
+                log_q_s = logpdf_normal_1d(s_prop, s_star, prop_sigma)
+                log_q_forward = float(log_q_z + log_q_s)
 
+                s_star0, prop_sigma0 = find_s_star_and_prop_sigma(np.zeros(2), 0.0, c)
                 log_q_z0 = logpdf_gauss(np.zeros(2), np.zeros(2), A)
-                log_q_cond_s0 = -0.5 * np.log(2.0 * np.pi * sigma_s2)
-                log_q_phys_s0 = -0.5 * (
-                    np.log(2.0 * np.pi * (tau**2)) + ((0.0 - s_phys) ** 2) / (tau**2)
-                )
-                log_q_tail_s0 = logpdf_t_univariate(
-                    0.0, nu, loc=0.0, scale=np.sqrt(sigma_s2) * kappa
-                )
-                log_q_reverse = float(
-                    logsumexp(
-                        [
-                            np.log(w_cond) + log_q_z0 + log_q_cond_s0,
-                            np.log(w_phys) + log_q_z0 + log_q_phys_s0,
-                            np.log(w_tail) + log_q_z0 + log_q_tail_s0,
-                        ]
-                    )
-                )
-                comp = "NullLaplace"
+                log_q_s0 = logpdf_normal_1d(0.0, s_star0, prop_sigma0)
+                log_q_reverse = float(log_q_z0 + log_q_s0)
+
+                w_vec = np.concatenate([z, np.array([s_prop])])
+                psi_star = hat_psi + U3.dot(w_vec)
+
+                comp = "MaxLaplace"
+                s_comp = "MaxLaplace"
                 break
             except Exception as exc:
                 if attempt == 2:
-                    raise RuntimeError(f"Nullspace proposal failed: {exc}") from exc
+                    raise RuntimeError(f"Nullspace max-propose failed: {exc}") from exc
 
     try:
         log_target_star, log_like_star, log_prior_star, state_star = compute_log_target(psi_star)
