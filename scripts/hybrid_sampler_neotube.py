@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import multiprocessing as mp
 import os
 from pathlib import Path
 
@@ -116,6 +117,7 @@ def compute_loglik(
         try:
             for _ in range(2):
                 st_em = propagate_state_kepler(state, epoch, (t_emit,))[0]
+                # Ensure object and site are in the same barycentric frame.
                 sun_bary, _ = _body_posvel_km_single("sun", t_emit)
                 obj_bary = st_em[:3] + sun_bary
                 site_bary = obs_cache.earth_bary_km[i] + obs_cache.site_pos_km[i]
@@ -243,8 +245,10 @@ def generate_nullspace_samples(
     obs_list,
     obs_cache,
     cached_frame: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
-    use_newton: bool,
-) -> list[dict]:
+    newton_mode: str,
+    debug_path: Path | None = None,
+    debug_enabled: bool = False,
+) -> tuple[list[dict], dict, dict | None]:
     """Generate nullspace proposals anchored at seed_theta."""
     samples: list[dict] = []
     stats = {
@@ -286,6 +290,65 @@ def generate_nullspace_samples(
     qz_wide_cov = np.diag([0.05, 0.05])
     qz_tight_prob = 0.8
     lambda_reg = 1e-4
+    chi2_thresh = 25.0
+    try:
+        cov_inv = linalg.inv(cov_eps)
+    except Exception:
+        cov_inv = None
+
+    debug = None
+    if debug_path is not None or debug_enabled:
+        debug = {
+            "theta_lin": [],
+            "z": [],
+            "eps": [],
+            "chi2_lin": [],
+            "used_newton": [],
+            "theta_star": [],
+            "chi2_star": [],
+            "logabsdet": [],
+            "H_svals_seed": [],
+            "H_svals_lin": [],
+            "H_svals_star": [],
+            "reject_reason": [],
+            "state": [],
+            "loglik": [],
+            "logq": [],
+        }
+
+    def _debug_append(
+        theta_lin_val,
+        z_val,
+        eps_val,
+        chi2_lin_val,
+        used_newton_val,
+        theta_star_val,
+        chi2_star_val,
+        logabsdet_val,
+        H_svals_lin_val,
+        H_svals_star_val,
+        reject_reason_val,
+        state_val,
+        loglik_val,
+        logq_val,
+    ) -> None:
+        if debug is None:
+            return
+        debug["theta_lin"].append(theta_lin_val.copy())
+        debug["z"].append(z_val.copy())
+        debug["eps"].append(eps_val.copy())
+        debug["chi2_lin"].append(chi2_lin_val)
+        debug["used_newton"].append(used_newton_val)
+        debug["theta_star"].append(theta_star_val.copy())
+        debug["chi2_star"].append(chi2_star_val)
+        debug["logabsdet"].append(logabsdet_val)
+        debug["H_svals_seed"].append(S.copy())
+        debug["H_svals_lin"].append(H_svals_lin_val.copy())
+        debug["H_svals_star"].append(H_svals_star_val.copy())
+        debug["reject_reason"].append(reject_reason_val)
+        debug["state"].append(state_val.copy())
+        debug["loglik"].append(loglik_val)
+        debug["logq"].append(logq_val)
 
     max_attempts = max(10 * n_samples, n_samples + 1)
     attempts = 0
@@ -303,6 +366,31 @@ def generate_nullspace_samples(
         theta_upper = np.array([1e6, 0.9999, math.pi, 2.0 * math.pi, 2.0 * math.pi, 2.0 * math.pi])
         theta_lin = np.minimum(np.maximum(theta_lin, theta_lower), theta_upper)
 
+        reject_reason = ""
+        chi2_lin = float("nan")
+        chi2_star = float("nan")
+        logabsdet = float("nan")
+        H_svals_lin = np.full(1, np.nan)
+        H_svals_star = np.full(1, np.nan)
+        theta_star = theta_lin
+        used_newton = False
+
+        try:
+            H_lin = compute_H(theta_lin, epoch, obs_ref, cached_frame=cached_frame)
+            _, S_lin, _ = linalg.svd(H_lin, full_matrices=False)
+            H_svals_lin = S_lin.copy()
+            r_km_lin, v_km_lin = state_from_elements(theta_lin, epoch)
+            y_lin = predict_attributable_from_state_cached(
+                np.hstack([r_km_lin, v_km_lin]), *cached_frame
+            )
+            r_vec = y_lin - (y_obs - eps)
+            if cov_inv is not None:
+                chi2_lin = float(r_vec.T @ cov_inv @ r_vec)
+            else:
+                chi2_lin = float(np.dot(r_vec, r_vec))
+        except Exception:
+            reject_reason = "chi2_lin_fail"
+
         def fun(theta_param):
             try:
                 a_val = float(theta_param[0])
@@ -318,6 +406,10 @@ def generate_nullspace_samples(
                 return y - (y_obs - eps)
             except Exception:
                 return np.ones(4) * 1e6
+
+        use_newton = newton_mode == "on"
+        if newton_mode == "auto" and np.isfinite(chi2_lin):
+            use_newton = chi2_lin > chi2_thresh
 
         if use_newton:
             N_mat = N0
@@ -343,26 +435,151 @@ def generate_nullspace_samples(
                 theta_star = theta_lin
                 success = False
                 stats["project_fail"] += 1
+                reject_reason = "project_exception"
+                _debug_append(
+                    theta_lin,
+                    z,
+                    eps,
+                    chi2_lin,
+                    True,
+                    np.full_like(theta_lin, np.nan),
+                    chi2_star,
+                    float("nan"),
+                    H_svals_lin,
+                    H_svals_star,
+                    reject_reason,
+                    np.full(6, np.nan),
+                    float("-inf"),
+                    float("-inf"),
+                )
                 continue
             if not success:
                 stats["project_fail"] += 1
+                reject_reason = "project_fail"
+                _debug_append(
+                    theta_lin,
+                    z,
+                    eps,
+                    chi2_lin,
+                    True,
+                    np.full_like(theta_lin, np.nan),
+                    chi2_star,
+                    float("nan"),
+                    H_svals_lin,
+                    H_svals_star,
+                    reject_reason,
+                    np.full(6, np.nan),
+                    float("-inf"),
+                    float("-inf"),
+                )
                 continue
+            used_newton = True
         else:
             theta_star = theta_lin
+
+        if not used_newton and newton_mode == "auto" and np.isfinite(chi2_lin):
+            if chi2_lin > chi2_thresh:
+                reject_reason = "chi2_too_large_no_newton"
+                stats["sanity_reject"] += 1
+                _debug_append(
+                    theta_lin,
+                    z,
+                    eps,
+                    chi2_lin,
+                    False,
+                    np.full_like(theta_lin, np.nan),
+                    float("nan"),
+                    float("nan"),
+                    H_svals_lin,
+                    H_svals_star,
+                    reject_reason,
+                    np.full(6, np.nan),
+                    float("-inf"),
+                    float("-inf"),
+                )
+                continue
 
         a_au, e_val, inc_rad = float(theta_star[0]), float(theta_star[1]), float(theta_star[2])
         if not np.isfinite(a_au) or not np.isfinite(e_val) or not np.isfinite(inc_rad):
             stats["sanity_reject"] += 1
+            reject_reason = "nan_elements"
+            _debug_append(
+                theta_lin,
+                z,
+                eps,
+                chi2_lin,
+                used_newton,
+                np.full_like(theta_star, np.nan),
+                chi2_star,
+                logabsdet,
+                H_svals_lin,
+                H_svals_star,
+                reject_reason,
+                np.full(6, np.nan),
+                float("-inf"),
+                float("-inf"),
+            )
             continue
         if a_au <= 0.0 or e_val >= 0.99999 or e_val < 0.0:
             stats["sanity_reject"] += 1
+            reject_reason = "ecc_or_a"
+            _debug_append(
+                theta_lin,
+                z,
+                eps,
+                chi2_lin,
+                used_newton,
+                np.full_like(theta_star, np.nan),
+                chi2_star,
+                logabsdet,
+                H_svals_lin,
+                H_svals_star,
+                reject_reason,
+                np.full(6, np.nan),
+                float("-inf"),
+                float("-inf"),
+            )
             continue
         q_au = a_au * (1.0 - e_val)
         if q_au < 0.005:
             stats["sanity_reject"] += 1
+            reject_reason = "q_au"
+            _debug_append(
+                theta_lin,
+                z,
+                eps,
+                chi2_lin,
+                used_newton,
+                np.full_like(theta_star, np.nan),
+                chi2_star,
+                logabsdet,
+                H_svals_lin,
+                H_svals_star,
+                reject_reason,
+                np.full(6, np.nan),
+                float("-inf"),
+                float("-inf"),
+            )
             continue
         if math.degrees(inc_rad) > 90.0:
             stats["sanity_reject"] += 1
+            reject_reason = "inclination"
+            _debug_append(
+                theta_lin,
+                z,
+                eps,
+                chi2_lin,
+                used_newton,
+                np.full_like(theta_star, np.nan),
+                chi2_star,
+                logabsdet,
+                H_svals_lin,
+                H_svals_star,
+                reject_reason,
+                np.full(6, np.nan),
+                float("-inf"),
+                float("-inf"),
+            )
             continue
 
         try:
@@ -380,9 +597,44 @@ def generate_nullspace_samples(
             sign, logabsdet = slogdet(J)
             if sign <= 0 or not np.isfinite(logabsdet):
                 stats["jacobian_fail"] += 1
+                reject_reason = "jacobian_fail"
+                _debug_append(
+                    theta_lin,
+                    z,
+                    eps,
+                    chi2_lin,
+                    used_newton,
+                    theta_star,
+                    chi2_star,
+                    float("nan"),
+                    H_svals_lin,
+                    H_svals_star,
+                    reject_reason,
+                    np.full(6, np.nan),
+                    float("-inf"),
+                    float("-inf"),
+                )
                 continue
+            H_svals_star = S2.copy()
         except Exception:
             stats["jacobian_fail"] += 1
+            reject_reason = "jacobian_exception"
+            _debug_append(
+                theta_lin,
+                z,
+                eps,
+                chi2_lin,
+                used_newton,
+                theta_star,
+                chi2_star,
+                float("nan"),
+                H_svals_lin,
+                H_svals_star,
+                reject_reason,
+                np.full(6, np.nan),
+                float("-inf"),
+                float("-inf"),
+            )
             continue
 
         log_q_eps = multivariate_normal.logpdf(eps, mean=np.zeros(4), cov=cov_eps)
@@ -414,7 +666,110 @@ def generate_nullspace_samples(
             }
         )
         stats["success"] += 1
-    return samples, stats
+        _debug_append(
+            theta_lin,
+            z,
+            eps,
+            chi2_lin,
+            used_newton,
+            theta_star if used_newton else np.full_like(theta_star, np.nan),
+            chi2_star,
+            float(logabsdet),
+            H_svals_lin,
+            H_svals_star,
+            reject_reason,
+            state,
+            float(loglik),
+            float(log_q),
+        )
+    if debug is not None and debug_path is not None:
+        np.savez(
+            debug_path,
+            theta_lin=np.array(debug["theta_lin"]),
+            z=np.array(debug["z"]),
+            eps=np.array(debug["eps"]),
+            chi2_lin=np.array(debug["chi2_lin"]),
+            used_newton=np.array(debug["used_newton"]),
+            theta_star=np.array(debug["theta_star"]),
+            chi2_star=np.array(debug["chi2_star"]),
+            logabsdet=np.array(debug["logabsdet"]),
+            H_svals_seed=np.array(debug["H_svals_seed"], dtype=object),
+            H_svals_lin=np.array(debug["H_svals_lin"], dtype=object),
+            H_svals_star=np.array(debug["H_svals_star"], dtype=object),
+            reject_reason=np.array(debug["reject_reason"], dtype=object),
+            state=np.array(debug["state"]),
+            loglik=np.array(debug["loglik"]),
+            logq=np.array(debug["logq"]),
+        )
+    return samples, stats, debug
+
+
+def _merge_null_debug(debug_list: list[dict] | None) -> dict | None:
+    if not debug_list:
+        return None
+    merged: dict[str, list] = {}
+    for dbg in debug_list:
+        if dbg is None:
+            continue
+        for key, val in dbg.items():
+            merged.setdefault(key, []).extend(list(val))
+    if not merged:
+        return None
+    return merged
+
+
+def _save_null_debug(debug: dict, path: Path) -> None:
+    np.savez(
+        path,
+        theta_lin=np.array(debug["theta_lin"]),
+        z=np.array(debug["z"]),
+        eps=np.array(debug["eps"]),
+        chi2_lin=np.array(debug["chi2_lin"]),
+        used_newton=np.array(debug["used_newton"]),
+        theta_star=np.array(debug["theta_star"]),
+        chi2_star=np.array(debug["chi2_star"]),
+        logabsdet=np.array(debug["logabsdet"]),
+        H_svals_seed=np.array(debug["H_svals_seed"], dtype=object),
+        H_svals_lin=np.array(debug["H_svals_lin"], dtype=object),
+        H_svals_star=np.array(debug["H_svals_star"], dtype=object),
+        reject_reason=np.array(debug["reject_reason"], dtype=object),
+        state=np.array(debug["state"]),
+        loglik=np.array(debug["loglik"]),
+        logq=np.array(debug["logq"]),
+    )
+
+
+def _nullspace_worker(payload: tuple) -> tuple[list[dict], dict, dict | None]:
+    (
+        seed,
+        seed_theta,
+        n_samples,
+        attrib,
+        cov_attrib,
+        epoch,
+        obs_ref,
+        obs_list,
+        obs_cache,
+        cached_frame,
+        newton_mode,
+        enable_debug,
+    ) = payload
+    if seed is not None:
+        np.random.seed(int(seed))
+    return generate_nullspace_samples(
+        seed_theta,
+        n_samples,
+        attrib,
+        cov_attrib,
+        epoch,
+        obs_ref,
+        obs_list,
+        obs_cache,
+        cached_frame,
+        newton_mode,
+        None,
+        enable_debug,
+    )
 
 
 def generate_attrib_samples(
@@ -547,7 +902,19 @@ def main() -> None:
     parser.add_argument("--rho-min-au", type=float, default=1e-3)
     parser.add_argument("--rho-max-au", type=float, default=5.0)
     parser.add_argument("--rhodot-max", type=float, default=120.0)
-    parser.add_argument("--null-newton", action="store_true", help="Use Newton refinement for nullspace proposals.")
+    parser.add_argument(
+        "--null-newton",
+        choices=["off", "on", "auto"],
+        default="off",
+        help="Newton refinement for nullspace proposals.",
+    )
+    parser.add_argument("--null-workers", type=int, default=1, help="Process count for nullspace sampling.")
+    parser.add_argument("--null-seed", type=int, default=None, help="Seed for nullspace RNG.")
+    parser.add_argument(
+        "--null-debug",
+        action="store_true",
+        help="Write per-sample nullspace diagnostics to null_debug.npz.",
+    )
     args = parser.parse_args()
 
     obs_path = Path(args.obs)
@@ -624,18 +991,65 @@ def main() -> None:
     if args.n_null > 0:
         print("Generating nullspace proposals...")
         seed_theta = elements_from_state(jpl_state[:3], jpl_state[3:], t0)
-        null_samples, null_stats = generate_nullspace_samples(
-            seed_theta,
-            args.n_null,
-            attrib,
-            cov_attrib,
-            t0,
-            obs_ref,
-            obs_list,
-            obs_cache,
-            cached_frame,
-            args.null_newton,
-        )
+        debug_path = outdir / "null_debug.npz" if args.null_debug else None
+        if args.null_workers > 1 and args.n_null > 1:
+            workers = min(args.null_workers, args.n_null)
+            base = args.n_null // workers
+            extra = args.n_null % workers
+            counts = [base + (1 if i < extra else 0) for i in range(workers)]
+            seed_seq = np.random.SeedSequence(args.null_seed)
+            child_seeds = seed_seq.spawn(workers)
+            seeds = [int(s.generate_state(1)[0]) for s in child_seeds]
+            payloads = []
+            for idx, n_chunk in enumerate(counts):
+                if n_chunk <= 0:
+                    continue
+                payloads.append(
+                    (
+                        seeds[idx],
+                        seed_theta,
+                        n_chunk,
+                        attrib,
+                        cov_attrib,
+                        t0,
+                        obs_ref,
+                        obs_list,
+                        obs_cache,
+                        cached_frame,
+                        args.null_newton,
+                        args.null_debug,
+                    )
+                )
+            ctx = mp.get_context("fork")
+            with ctx.Pool(processes=workers) as pool:
+                results = pool.map(_nullspace_worker, payloads)
+            null_samples = []
+            null_stats = {"attempted": 0, "project_fail": 0, "sanity_reject": 0, "jacobian_fail": 0, "success": 0}
+            debug_list = []
+            for samples_i, stats_i, debug_i in results:
+                null_samples.extend(samples_i)
+                for key in null_stats:
+                    null_stats[key] += int(stats_i.get(key, 0))
+                if debug_i is not None:
+                    debug_list.append(debug_i)
+            merged_debug = _merge_null_debug(debug_list)
+            if merged_debug is not None and debug_path is not None:
+                _save_null_debug(merged_debug, debug_path)
+        else:
+            null_samples, null_stats, debug = generate_nullspace_samples(
+                seed_theta,
+                args.n_null,
+                attrib,
+                cov_attrib,
+                t0,
+                obs_ref,
+                obs_list,
+                obs_cache,
+                cached_frame,
+                args.null_newton,
+                debug_path,
+                args.null_debug,
+            )
         diag_null = finalize_family(
             null_samples, outdir / "samples_null", extra_diag=null_stats
         )
