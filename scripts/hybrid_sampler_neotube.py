@@ -249,7 +249,14 @@ def generate_nullspace_samples(
     debug_path: Path | None = None,
     debug_enabled: bool = False,
 ) -> tuple[list[dict], dict, dict | None]:
-    """Generate nullspace proposals anchored at seed_theta."""
+    """Generate nullspace proposals anchored at seed_theta.
+
+    Hardened implementation:
+      - local (H evaluated at theta_guess) Tikhonov linear solve
+      - nullspace-aware alpha scaling (uses nz = N0 @ z)
+      - TRF Newton with null penalty and Huber loss
+      - robust regularization and step-halving fallback
+    """
     samples: list[dict] = []
     stats = {
         "attempted": 0,
@@ -259,7 +266,7 @@ def generate_nullspace_samples(
         "success": 0,
     }
     H0 = compute_H(seed_theta, epoch, obs_ref, cached_frame=cached_frame)
-    U, S, Vt = linalg.svd(H0, full_matrices=False)
+    _, S0, _ = linalg.svd(H0, full_matrices=False)
     N0 = linalg.null_space(H0)
     if N0.shape[1] < 2:
         raise RuntimeError("Nullspace dimension < 2 at seed.")
@@ -285,8 +292,11 @@ def generate_nullspace_samples(
     qz_tight_cov = np.diag([0.005, 0.005])
     qz_wide_cov = np.diag([0.05, 0.05])
     qz_tight_prob = 0.8
-    lambda_reg = 1e-3
     chi2_thresh = 25.0
+    alpha_min = 1e-3
+    safety_alpha = 0.9
+    reg_frac = 1e-4
+    lambda_null = 1e-3
     try:
         cov_inv = linalg.inv(cov_eps)
     except Exception:
@@ -338,13 +348,30 @@ def generate_nullspace_samples(
         debug["theta_star"].append(theta_star_val.copy())
         debug["chi2_star"].append(chi2_star_val)
         debug["logabsdet"].append(logabsdet_val)
-        debug["H_svals_seed"].append(S.copy())
+        debug["H_svals_seed"].append(S0.copy())
         debug["H_svals_lin"].append(H_svals_lin_val.copy())
         debug["H_svals_star"].append(H_svals_star_val.copy())
         debug["reject_reason"].append(reject_reason_val)
         debug["state"].append(state_val.copy())
         debug["loglik"].append(loglik_val)
         debug["logq"].append(logq_val)
+
+    def tikhonov_solve(H, r, reg_strength):
+        """Solve min ||H d - r||^2 + reg_strength ||d||^2."""
+        U, S, Vt = linalg.svd(H, full_matrices=False)
+        smax = float(S[0]) if S.size > 0 else 1.0
+        eps_reg = smax * max(1e-12, reg_strength)
+        filt = S / (S * S + eps_reg)
+        delta = Vt.T @ (filt * (U.T @ r))
+        return delta, S
+
+    def _perihelion(a_val, e_val):
+        return a_val * (1.0 - e_val)
+
+    e_min = 1e-6
+    e_max = 0.9999
+    a_min = 1e-6
+    q_min = 0.01
 
     max_attempts = max(10 * n_samples, n_samples + 1)
     attempts = 0
@@ -364,24 +391,24 @@ def generate_nullspace_samples(
         H_svals_star = np.full(1, np.nan)
         theta_star = np.full_like(seed_theta, np.nan)
         used_newton = False
-        # enforce bounds on the initial guess to avoid invalid elements
-        theta_lower = np.array([1e-6, 0.0, 0.0, -2.0 * math.pi, -2.0 * math.pi, -2.0 * math.pi])
-        theta_upper = np.array([1e6, 0.9999, math.pi, 2.0 * math.pi, 2.0 * math.pi, 2.0 * math.pi])
+        theta_lower = np.array(
+            [1e-6, 0.0, 0.0, -2.0 * math.pi, -2.0 * math.pi, -2.0 * math.pi]
+        )
+        theta_upper = np.array(
+            [1e6, 0.9999, math.pi, 2.0 * math.pi, 2.0 * math.pi, 2.0 * math.pi]
+        )
 
         nz = N0 @ z
         res_for_lin = y_obs_vec - y_seed - eps
         theta_lin_guess = seed_theta + nz
         try:
-            H_lin = compute_H(theta_lin_guess, epoch, obs_ref, cached_frame=cached_frame)
-            U_lin, S_lin, Vt_lin = linalg.svd(H_lin, full_matrices=False)
-            smax = S_lin[0] if S_lin.size > 0 else 1.0
-            eps_reg = smax * 1e-4
-            S_reg = np.maximum(S_lin, eps_reg)
-            H_lin_plus = Vt_lin.T @ np.diag(1.0 / S_reg) @ U_lin.T
-            delta_theta = H_lin_plus @ res_for_lin
+            H_loc = compute_H(theta_lin_guess, epoch, obs_ref, cached_frame=cached_frame)
+            delta_theta, S_loc = tikhonov_solve(H_loc, res_for_lin, reg_frac)
+            if np.linalg.norm(delta_theta) > 5.0:
+                delta_theta, S_loc = tikhonov_solve(H_loc, res_for_lin, 1e-3)
         except Exception:
-            stats["jacobian_fail"] += 1
-            reject_reason = "lin_jacobian_fail"
+            stats["project_fail"] += 1
+            reject_reason = "H_loc_fail"
             _debug_append(
                 np.full_like(seed_theta, np.nan),
                 z,
@@ -399,14 +426,6 @@ def generate_nullspace_samples(
                 float("-inf"),
             )
             continue
-
-        def _perihelion(a_val, e_val):
-            return a_val * (1.0 - e_val)
-
-        e_min = 1e-6
-        e_max = 0.9999
-        a_min = 1e-6
-        q_min = 0.01
 
         theta_unclamped = seed_theta + delta_theta + nz
         a_un, e_un = float(theta_unclamped[0]), float(theta_unclamped[1])
@@ -450,9 +469,9 @@ def generate_nullspace_samples(
                 else:
                     alpha_max = min(alpha_max, numer_q / (-denom))
 
-            alpha_max = max(0.0, min(1.0, 0.9 * alpha_max))
-            if alpha_max <= 1e-6:
-                stats["sanity_reject"] += 1
+            alpha_max = max(0.0, min(1.0, safety_alpha * alpha_max))
+            if alpha_max <= alpha_min:
+                stats["project_fail"] += 1
                 reject_reason = "linear_step_infeasible"
                 _debug_append(
                     np.full_like(seed_theta, np.nan),
@@ -463,7 +482,7 @@ def generate_nullspace_samples(
                     np.full_like(seed_theta, np.nan),
                     chi2_star,
                     logabsdet,
-                    H_svals_lin,
+                    S_loc if S_loc.size > 0 else H_svals_lin,
                     H_svals_star,
                     reject_reason,
                     np.full(6, np.nan),
@@ -475,7 +494,7 @@ def generate_nullspace_samples(
             theta_lin = seed_theta + alpha_max * delta_theta + nz
 
         if not np.isfinite(theta_lin).all():
-            stats["sanity_reject"] += 1
+            stats["project_fail"] += 1
             reject_reason = "nan_theta_lin"
             _debug_append(
                 np.full_like(seed_theta, np.nan),
@@ -486,7 +505,7 @@ def generate_nullspace_samples(
                 np.full_like(seed_theta, np.nan),
                 chi2_star,
                 logabsdet,
-                H_svals_lin,
+                S_loc if S_loc.size > 0 else H_svals_lin,
                 H_svals_star,
                 reject_reason,
                 np.full(6, np.nan),
@@ -509,7 +528,25 @@ def generate_nullspace_samples(
             else:
                 chi2_lin = float(np.dot(r_vec, r_vec))
         except Exception:
+            stats["project_fail"] += 1
             reject_reason = "chi2_lin_fail"
+            _debug_append(
+                theta_lin,
+                z,
+                eps,
+                chi2_lin,
+                False,
+                np.full_like(seed_theta, np.nan),
+                chi2_star,
+                logabsdet,
+                H_svals_lin,
+                H_svals_star,
+                reject_reason,
+                np.full(6, np.nan),
+                float("-inf"),
+                float("-inf"),
+            )
+            continue
 
         def fun(theta_param):
             try:
@@ -536,7 +573,7 @@ def generate_nullspace_samples(
 
             def fun_aug(theta_param):
                 res = fun(theta_param)
-                null_res = math.sqrt(lambda_reg) * (N_mat.T.dot(theta_param - theta_lin) - z)
+                null_res = math.sqrt(lambda_null) * (N_mat.T.dot(theta_param - theta_lin) - z)
                 return np.concatenate([res, null_res])
 
             try:
@@ -544,39 +581,44 @@ def generate_nullspace_samples(
                     fun_aug,
                     theta_lin,
                     bounds=(theta_lower, theta_upper),
-                    xtol=1e-8,
-                    ftol=1e-8,
-                    gtol=1e-8,
+                    xtol=1e-10,
+                    ftol=1e-10,
+                    gtol=1e-10,
                     max_nfev=1000,
                     method="trf",
+                    loss="huber",
                 )
                 theta_star = sol.x
                 success = sol.success
+                if not success:
+                    ok = False
+                    for scale in [0.5, 0.25, 0.1]:
+                        theta_try = theta_lin + scale * (theta_star - theta_lin)
+                        sol2 = least_squares(
+                            fun_aug,
+                            theta_try,
+                            bounds=(theta_lower, theta_upper),
+                            xtol=1e-10,
+                            ftol=1e-10,
+                            gtol=1e-10,
+                            max_nfev=500,
+                            method="trf",
+                            loss="huber",
+                        )
+                        if sol2.success:
+                            theta_star = sol2.x
+                            success = True
+                            ok = True
+                            break
+                    if not ok:
+                        success = False
             except Exception:
                 theta_star = theta_lin
                 success = False
-                stats["project_fail"] += 1
-                reject_reason = "project_exception"
-                _debug_append(
-                    theta_lin,
-                    z,
-                    eps,
-                    chi2_lin,
-                    True,
-                    np.full_like(theta_lin, np.nan),
-                    chi2_star,
-                    float("nan"),
-                    H_svals_lin,
-                    H_svals_star,
-                    reject_reason,
-                    np.full(6, np.nan),
-                    float("-inf"),
-                    float("-inf"),
-                )
-                continue
+
             if not success:
                 stats["project_fail"] += 1
-                reject_reason = "project_fail"
+                reject_reason = "project_fail_newton"
                 _debug_append(
                     theta_lin,
                     z,
@@ -716,7 +758,7 @@ def generate_nullspace_samples(
                 N = np.zeros((6, 2), dtype=float)
             J = np.hstack([-H_plus, N])
             sign, logabsdet = slogdet(J)
-            if sign <= 0 or not np.isfinite(logabsdet):
+            if sign == 0 or not np.isfinite(logabsdet):
                 stats["jacobian_fail"] += 1
                 reject_reason = "jacobian_fail"
                 _debug_append(
@@ -772,6 +814,12 @@ def generate_nullspace_samples(
         try:
             r_km, v_km_s = state_from_elements(theta_star, epoch)
             state = np.hstack([r_km, v_km_s])
+            y_star = predict_attributable_from_state_cached(state, *cached_frame)
+            r_vec = y_star - (y_obs_vec - eps)
+            if cov_inv is not None:
+                chi2_star = float(r_vec.T @ cov_inv @ r_vec)
+            else:
+                chi2_star = float(np.dot(r_vec, r_vec))
             loglik = compute_loglik(state, epoch, obs_list, obs_cache)
         except Exception:
             loglik = -np.inf
@@ -802,25 +850,6 @@ def generate_nullspace_samples(
             state,
             float(loglik),
             float(log_q),
-        )
-    if debug is not None and debug_path is not None:
-        np.savez(
-            debug_path,
-            theta_lin=np.array(debug["theta_lin"]),
-            z=np.array(debug["z"]),
-            eps=np.array(debug["eps"]),
-            chi2_lin=np.array(debug["chi2_lin"]),
-            used_newton=np.array(debug["used_newton"]),
-            theta_star=np.array(debug["theta_star"]),
-            chi2_star=np.array(debug["chi2_star"]),
-            logabsdet=np.array(debug["logabsdet"]),
-            H_svals_seed=np.array(debug["H_svals_seed"], dtype=object),
-            H_svals_lin=np.array(debug["H_svals_lin"], dtype=object),
-            H_svals_star=np.array(debug["H_svals_star"], dtype=object),
-            reject_reason=np.array(debug["reject_reason"], dtype=object),
-            state=np.array(debug["state"]),
-            loglik=np.array(debug["loglik"]),
-            logq=np.array(debug["logq"]),
         )
     return samples, stats, debug
 
