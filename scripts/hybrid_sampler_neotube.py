@@ -260,11 +260,6 @@ def generate_nullspace_samples(
     }
     H0 = compute_H(seed_theta, epoch, obs_ref, cached_frame=cached_frame)
     U, S, Vt = linalg.svd(H0, full_matrices=False)
-    rank = np.sum(S > (1e-12 * S[0] if S.size > 0 else 1e-12))
-    s_floor = (S[0] if S.size > 0 else 1.0) * 1e-12
-    S_reg = np.where(S < s_floor, s_floor, S)
-    S_inv = np.array([1 / s if i < rank else 0.0 for i, s in enumerate(S_reg)])
-    H0_plus = Vt.T @ np.diag(S_inv) @ U.T
     N0 = linalg.null_space(H0)
     if N0.shape[1] < 2:
         raise RuntimeError("Nullspace dimension < 2 at seed.")
@@ -290,7 +285,7 @@ def generate_nullspace_samples(
     qz_tight_cov = np.diag([0.005, 0.005])
     qz_wide_cov = np.diag([0.05, 0.05])
     qz_tight_prob = 0.8
-    lambda_reg = 1e-4
+    lambda_reg = 1e-3
     chi2_thresh = 25.0
     try:
         cov_inv = linalg.inv(cov_eps)
@@ -361,20 +356,144 @@ def generate_nullspace_samples(
             z = np.random.multivariate_normal(qz_mean, qz_tight_cov)
         else:
             z = np.random.multivariate_normal(qz_mean, qz_wide_cov)
-        theta_lin = seed_theta + H0_plus @ (y_obs_vec - y_seed - eps) + N0 @ z
-        # enforce bounds on the initial guess to avoid invalid elements
-        theta_lower = np.array([1e-6, 0.0, 0.0, -2.0 * math.pi, -2.0 * math.pi, -2.0 * math.pi])
-        theta_upper = np.array([1e6, 0.9999, math.pi, 2.0 * math.pi, 2.0 * math.pi, 2.0 * math.pi])
-        theta_lin = np.minimum(np.maximum(theta_lin, theta_lower), theta_upper)
-
         reject_reason = ""
         chi2_lin = float("nan")
         chi2_star = float("nan")
         logabsdet = float("nan")
         H_svals_lin = np.full(1, np.nan)
         H_svals_star = np.full(1, np.nan)
-        theta_star = theta_lin
+        theta_star = np.full_like(seed_theta, np.nan)
         used_newton = False
+        # enforce bounds on the initial guess to avoid invalid elements
+        theta_lower = np.array([1e-6, 0.0, 0.0, -2.0 * math.pi, -2.0 * math.pi, -2.0 * math.pi])
+        theta_upper = np.array([1e6, 0.9999, math.pi, 2.0 * math.pi, 2.0 * math.pi, 2.0 * math.pi])
+
+        nz = N0 @ z
+        res_for_lin = y_obs_vec - y_seed - eps
+        theta_lin_guess = seed_theta + nz
+        try:
+            H_lin = compute_H(theta_lin_guess, epoch, obs_ref, cached_frame=cached_frame)
+            U_lin, S_lin, Vt_lin = linalg.svd(H_lin, full_matrices=False)
+            smax = S_lin[0] if S_lin.size > 0 else 1.0
+            eps_reg = smax * 1e-4
+            S_reg = np.maximum(S_lin, eps_reg)
+            H_lin_plus = Vt_lin.T @ np.diag(1.0 / S_reg) @ U_lin.T
+            delta_theta = H_lin_plus @ res_for_lin
+        except Exception:
+            stats["jacobian_fail"] += 1
+            reject_reason = "lin_jacobian_fail"
+            _debug_append(
+                np.full_like(seed_theta, np.nan),
+                z,
+                eps,
+                chi2_lin,
+                False,
+                np.full_like(seed_theta, np.nan),
+                chi2_star,
+                logabsdet,
+                H_svals_lin,
+                H_svals_star,
+                reject_reason,
+                np.full(6, np.nan),
+                float("-inf"),
+                float("-inf"),
+            )
+            continue
+
+        def _perihelion(a_val, e_val):
+            return a_val * (1.0 - e_val)
+
+        e_min = 1e-6
+        e_max = 0.9999
+        a_min = 1e-6
+        q_min = 0.01
+
+        theta_unclamped = seed_theta + delta_theta + nz
+        a_un, e_un = float(theta_unclamped[0]), float(theta_unclamped[1])
+        if (
+            a_un > a_min
+            and e_min <= e_un < e_max
+            and _perihelion(a_un, e_un) >= q_min
+            and math.degrees(float(theta_unclamped[2])) <= 90.0
+        ):
+            theta_lin = theta_unclamped
+        else:
+            seed_a = float(seed_theta[0])
+            seed_e = float(seed_theta[1])
+            nz_a = float(nz[0])
+            nz_e = float(nz[1])
+            delta_a = float(delta_theta[0])
+            delta_e = float(delta_theta[1])
+            alpha_max = 1.0
+            if delta_e < 0.0:
+                numer = (seed_e + nz_e - e_min)
+                if numer <= 0.0:
+                    alpha_max = 0.0
+                else:
+                    alpha_max = min(alpha_max, numer / (-delta_e))
+            elif delta_e > 0.0:
+                alpha_max = min(alpha_max, (e_max - (seed_e + nz_e)) / delta_e)
+
+            if delta_a < 0.0:
+                numer = (seed_a + nz_a - a_min)
+                if numer <= 0.0:
+                    alpha_max = 0.0
+                else:
+                    alpha_max = min(alpha_max, numer / (-delta_a))
+
+            seed_q = _perihelion(seed_a + nz_a, seed_e + nz_e)
+            denom = (delta_a * (1.0 - (seed_e + nz_e)) - (seed_a + nz_a) * delta_e)
+            if denom < 0.0:
+                numer_q = (seed_q - q_min)
+                if numer_q <= 0.0:
+                    alpha_max = 0.0
+                else:
+                    alpha_max = min(alpha_max, numer_q / (-denom))
+
+            alpha_max = max(0.0, min(1.0, 0.9 * alpha_max))
+            if alpha_max <= 1e-6:
+                stats["sanity_reject"] += 1
+                reject_reason = "linear_step_infeasible"
+                _debug_append(
+                    np.full_like(seed_theta, np.nan),
+                    z,
+                    eps,
+                    chi2_lin,
+                    False,
+                    np.full_like(seed_theta, np.nan),
+                    chi2_star,
+                    logabsdet,
+                    H_svals_lin,
+                    H_svals_star,
+                    reject_reason,
+                    np.full(6, np.nan),
+                    float("-inf"),
+                    float("-inf"),
+                )
+                continue
+
+            theta_lin = seed_theta + alpha_max * delta_theta + nz
+
+        if not np.isfinite(theta_lin).all():
+            stats["sanity_reject"] += 1
+            reject_reason = "nan_theta_lin"
+            _debug_append(
+                np.full_like(seed_theta, np.nan),
+                z,
+                eps,
+                chi2_lin,
+                False,
+                np.full_like(seed_theta, np.nan),
+                chi2_star,
+                logabsdet,
+                H_svals_lin,
+                H_svals_star,
+                reject_reason,
+                np.full(6, np.nan),
+                float("-inf"),
+                float("-inf"),
+            )
+            continue
 
         try:
             H_lin = compute_H(theta_lin, epoch, obs_ref, cached_frame=cached_frame)
@@ -428,7 +547,8 @@ def generate_nullspace_samples(
                     xtol=1e-8,
                     ftol=1e-8,
                     gtol=1e-8,
-                    max_nfev=30,
+                    max_nfev=1000,
+                    method="trf",
                 )
                 theta_star = sol.x
                 success = sol.success
