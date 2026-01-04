@@ -22,6 +22,7 @@ import numpy as np
 from numpy.linalg import slogdet
 from scipy import linalg
 from scipy.optimize import least_squares
+from scipy.special import logsumexp
 from scipy.stats import multivariate_normal, norm
 
 from astropy.time import Time
@@ -32,11 +33,13 @@ from neotube.fit_cli import load_observations
 from neotube.propagate import (
     _body_posvel_km_single,
     _prepare_obs_cache,
+    _site_states,
     propagate_state_kepler,
 )
 from neotube.geometry import unit_to_radec
 from neotube.ranging import (
     Attributable,
+    DAY_S,
     build_attributable_vector_fit,
     build_state_from_ranging,
     s_and_sdot,
@@ -153,20 +156,79 @@ def predict_attributable_from_state(state: np.ndarray, obs_ref, epoch: Time) -> 
     )
 
 
-def compute_H(theta: np.ndarray, epoch: Time, obs_ref, h_steps: np.ndarray | None = None) -> np.ndarray:
+def predict_attributable_from_state_cached(
+    state: np.ndarray,
+    earth_helio: np.ndarray,
+    earth_vel_helio: np.ndarray,
+    site_offset: np.ndarray,
+    site_vel: np.ndarray,
+) -> np.ndarray:
+    r_helio = state[:3].astype(float)
+    v_helio = state[3:].astype(float)
+    r_geo = r_helio - earth_helio
+    v_geo = v_helio - earth_vel_helio - site_vel
+    r_topo = r_geo - site_offset
+    rho = float(np.linalg.norm(r_topo))
+    if rho <= 0.0:
+        raise RuntimeError("Non-positive rho in attributable conversion.")
+    s = r_topo / rho
+    rhodot = float(np.dot(v_geo, s))
+    sdot = (v_geo - rhodot * s) / max(rho, 1e-12)
+
+    x, y, z = s
+    xd, yd, zd = sdot
+    rxy2 = max(x * x + y * y, 1e-12)
+    ra = math.atan2(y, x)
+    dec = math.asin(np.clip(z, -1.0, 1.0))
+    ra_dot = (x * yd - y * xd) / rxy2
+    cosdec = max(math.sqrt(rxy2), 1e-12)
+    dec_dot = (zd - z * (x * xd + y * yd) / rxy2) / cosdec
+    return np.array(
+        [
+            float(math.degrees(ra) % 360.0),
+            float(math.degrees(dec)),
+            float(math.degrees(ra_dot) * DAY_S),
+            float(math.degrees(dec_dot) * DAY_S),
+        ],
+        dtype=float,
+    )
+
+
+def compute_H(
+    theta: np.ndarray,
+    epoch: Time,
+    obs_ref,
+    h_steps: np.ndarray | None = None,
+    cached_frame: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
+) -> np.ndarray:
     """Centered finite-difference Jacobian dy/dtheta for attributable."""
     if h_steps is None:
         h_steps = np.array([1e-6, 1e-6, 1e-7, 1e-7, 1e-7, 1e-6], dtype=float)
     r0, v0 = state_from_elements(theta, epoch)
-    y0 = predict_attributable_from_state(np.hstack([r0, v0]), obs_ref, epoch)
+    if cached_frame is None:
+        y0 = predict_attributable_from_state(np.hstack([r0, v0]), obs_ref, epoch)
+    else:
+        earth_helio, earth_vel_helio, site_offset, site_vel = cached_frame
+        y0 = predict_attributable_from_state_cached(
+            np.hstack([r0, v0]), earth_helio, earth_vel_helio, site_offset, site_vel
+        )
     H = np.zeros((4, 6), dtype=float)
     for k in range(6):
         d = np.zeros(6, dtype=float)
         d[k] = h_steps[k]
         rp, vp = state_from_elements(theta + d, epoch)
         rm, vm = state_from_elements(theta - d, epoch)
-        yp = predict_attributable_from_state(np.hstack([rp, vp]), obs_ref, epoch)
-        ym = predict_attributable_from_state(np.hstack([rm, vm]), obs_ref, epoch)
+        if cached_frame is None:
+            yp = predict_attributable_from_state(np.hstack([rp, vp]), obs_ref, epoch)
+            ym = predict_attributable_from_state(np.hstack([rm, vm]), obs_ref, epoch)
+        else:
+            earth_helio, earth_vel_helio, site_offset, site_vel = cached_frame
+            yp = predict_attributable_from_state_cached(
+                np.hstack([rp, vp]), earth_helio, earth_vel_helio, site_offset, site_vel
+            )
+            ym = predict_attributable_from_state_cached(
+                np.hstack([rm, vm]), earth_helio, earth_vel_helio, site_offset, site_vel
+            )
         H[:, k] = (yp - ym) / (2.0 * d[k])
     return H
 
@@ -180,20 +242,33 @@ def generate_nullspace_samples(
     obs_ref,
     obs_list,
     obs_cache,
+    cached_frame: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    use_newton: bool,
 ) -> list[dict]:
     """Generate nullspace proposals anchored at seed_theta."""
     samples: list[dict] = []
-    H0 = compute_H(seed_theta, epoch, obs_ref)
+    stats = {
+        "attempted": 0,
+        "project_fail": 0,
+        "sanity_reject": 0,
+        "jacobian_fail": 0,
+        "success": 0,
+    }
+    H0 = compute_H(seed_theta, epoch, obs_ref, cached_frame=cached_frame)
     U, S, Vt = linalg.svd(H0, full_matrices=False)
     rank = np.sum(S > (1e-12 * S[0] if S.size > 0 else 1e-12))
-    S_inv = np.array([1 / s if i < rank else 0.0 for i, s in enumerate(S)])
+    s_floor = (S[0] if S.size > 0 else 1.0) * 1e-12
+    S_reg = np.where(S < s_floor, s_floor, S)
+    S_inv = np.array([1 / s if i < rank else 0.0 for i, s in enumerate(S_reg)])
     H0_plus = Vt.T @ np.diag(S_inv) @ U.T
     N0 = linalg.null_space(H0)
     if N0.shape[1] < 2:
         raise RuntimeError("Nullspace dimension < 2 at seed.")
 
     r_seed, v_seed = state_from_elements(seed_theta, epoch)
-    y_seed = predict_attributable_from_state(np.hstack([r_seed, v_seed]), obs_ref, epoch)
+    y_seed = predict_attributable_from_state_cached(
+        np.hstack([r_seed, v_seed]), *cached_frame
+    )
 
     y_obs = np.array(
         [
@@ -207,51 +282,118 @@ def generate_nullspace_samples(
 
     cov_eps = np.array(cov_attrib, dtype=float)
     qz_mean = np.zeros(2)
-    qz_cov = np.diag([0.1, 0.1])
+    qz_tight_cov = np.diag([0.005, 0.005])
+    qz_wide_cov = np.diag([0.05, 0.05])
+    qz_tight_prob = 0.8
+    lambda_reg = 1e-4
 
-    for _ in range(n_samples):
+    max_attempts = max(10 * n_samples, n_samples + 1)
+    attempts = 0
+    while len(samples) < n_samples and attempts < max_attempts:
+        attempts += 1
+        stats["attempted"] += 1
         eps = np.random.multivariate_normal(np.zeros(4), cov_eps)
-        z = np.random.multivariate_normal(qz_mean, qz_cov)
+        if np.random.rand() < qz_tight_prob:
+            z = np.random.multivariate_normal(qz_mean, qz_tight_cov)
+        else:
+            z = np.random.multivariate_normal(qz_mean, qz_wide_cov)
         theta_lin = seed_theta + H0_plus @ (y_obs - y_seed - eps) + N0 @ z
+        # enforce bounds on the initial guess to avoid invalid elements
+        theta_lower = np.array([1e-6, 0.0, 0.0, -2.0 * math.pi, -2.0 * math.pi, -2.0 * math.pi])
+        theta_upper = np.array([1e6, 0.9999, math.pi, 2.0 * math.pi, 2.0 * math.pi, 2.0 * math.pi])
+        theta_lin = np.minimum(np.maximum(theta_lin, theta_lower), theta_upper)
 
         def fun(theta_param):
             try:
+                a_val = float(theta_param[0])
+                e_val = float(theta_param[1])
+                if (a_val <= 0.0) or (e_val < 0.0) or (e_val >= 1.0):
+                    return np.ones(4) * 1e6
                 r_km, v_km_s = state_from_elements(theta_param, epoch)
-                y = predict_attributable_from_state(
-                    np.hstack([r_km, v_km_s]), obs_ref, epoch
+                if not (np.isfinite(r_km).all() and np.isfinite(v_km_s).all()):
+                    return np.ones(4) * 1e6
+                y = predict_attributable_from_state_cached(
+                    np.hstack([r_km, v_km_s]), *cached_frame
                 )
                 return y - (y_obs - eps)
             except Exception:
                 return np.ones(4) * 1e6
 
-        try:
-            sol = least_squares(
-                fun, theta_lin, xtol=1e-8, ftol=1e-8, gtol=1e-8, max_nfev=60
-            )
-            theta_star = sol.x
-            success = sol.success
-        except Exception:
+        if use_newton:
+            N_mat = N0
+
+            def fun_aug(theta_param):
+                res = fun(theta_param)
+                null_res = math.sqrt(lambda_reg) * (N_mat.T.dot(theta_param - theta_lin) - z)
+                return np.concatenate([res, null_res])
+
+            try:
+                sol = least_squares(
+                    fun_aug,
+                    theta_lin,
+                    bounds=(theta_lower, theta_upper),
+                    xtol=1e-8,
+                    ftol=1e-8,
+                    gtol=1e-8,
+                    max_nfev=30,
+                )
+                theta_star = sol.x
+                success = sol.success
+            except Exception:
+                theta_star = theta_lin
+                success = False
+                stats["project_fail"] += 1
+                continue
+            if not success:
+                stats["project_fail"] += 1
+                continue
+        else:
             theta_star = theta_lin
-            success = False
+
+        a_au, e_val, inc_rad = float(theta_star[0]), float(theta_star[1]), float(theta_star[2])
+        if not np.isfinite(a_au) or not np.isfinite(e_val) or not np.isfinite(inc_rad):
+            stats["sanity_reject"] += 1
+            continue
+        if a_au <= 0.0 or e_val >= 0.99999 or e_val < 0.0:
+            stats["sanity_reject"] += 1
+            continue
+        q_au = a_au * (1.0 - e_val)
+        if q_au < 0.005:
+            stats["sanity_reject"] += 1
+            continue
+        if math.degrees(inc_rad) > 90.0:
+            stats["sanity_reject"] += 1
+            continue
 
         try:
-            H_star = compute_H(theta_star, epoch, obs_ref)
+            H_star = compute_H(theta_star, epoch, obs_ref, cached_frame=cached_frame)
             U2, S2, Vt2 = linalg.svd(H_star, full_matrices=False)
             rank2 = np.sum(S2 > (1e-12 * S2[0] if S2.size > 0 else 1e-12))
-            S2_inv = np.array([1 / s if i < rank2 else 0.0 for i, s in enumerate(S2)])
+            s2_floor = (S2[0] if S2.size > 0 else 1.0) * 1e-12
+            S2_reg = np.where(S2 < s2_floor, s2_floor, S2)
+            S2_inv = np.array([1 / s if i < rank2 else 0.0 for i, s in enumerate(S2_reg)])
             H_plus = Vt2.T @ np.diag(S2_inv) @ U2.T
             N = linalg.null_space(H_star)
             if N.shape[1] < 2:
                 N = np.zeros((6, 2), dtype=float)
             J = np.hstack([-H_plus, N])
             sign, logabsdet = slogdet(J)
-            if sign <= 0:
-                logabsdet = -np.inf
+            if sign <= 0 or not np.isfinite(logabsdet):
+                stats["jacobian_fail"] += 1
+                continue
         except Exception:
-            logabsdet = -np.inf
+            stats["jacobian_fail"] += 1
+            continue
 
         log_q_eps = multivariate_normal.logpdf(eps, mean=np.zeros(4), cov=cov_eps)
-        log_q_z = multivariate_normal.logpdf(z, mean=qz_mean, cov=qz_cov)
+        log_q_z = logsumexp(
+            [
+                math.log(qz_tight_prob)
+                + multivariate_normal.logpdf(z, mean=qz_mean, cov=qz_tight_cov),
+                math.log(1.0 - qz_tight_prob)
+                + multivariate_normal.logpdf(z, mean=qz_mean, cov=qz_wide_cov),
+            ]
+        )
         log_q = log_q_eps + log_q_z - (logabsdet if np.isfinite(logabsdet) else 1e300)
 
         try:
@@ -259,7 +401,6 @@ def generate_nullspace_samples(
             state = np.hstack([r_km, v_km_s])
             loglik = compute_loglik(state, epoch, obs_list, obs_cache)
         except Exception:
-            success = False
             loglik = -np.inf
             state = np.full(6, np.nan)
 
@@ -269,10 +410,11 @@ def generate_nullspace_samples(
                 "state": state,
                 "log_q": log_q,
                 "loglik": loglik,
-                "success": success,
+                "success": True,
             }
         )
-    return samples
+        stats["success"] += 1
+    return samples, stats
 
 
 def generate_attrib_samples(
@@ -288,7 +430,9 @@ def generate_attrib_samples(
     rhodot_max_kms: float,
 ) -> list[dict]:
     samples: list[dict] = []
+    stats = {"attempted": 0, "prop_fail": 0, "sanity_reject": 0}
     for _ in range(n_samples):
+        stats["attempted"] += 1
         delta_a = np.random.multivariate_normal(np.zeros(4), cov_attrib)
         attrib_draw = Attributable(
             ra_deg=attrib.ra_deg + delta_a[0],
@@ -301,15 +445,28 @@ def generate_attrib_samples(
         state = build_state_from_ranging(
             obs_ref, epoch, attrib_draw, float(rho_au * AU_KM), float(rhodot)
         )
+        r_norm = float(np.linalg.norm(state[:3]))
+        v_norm = float(np.linalg.norm(state[3:]))
+        if r_norm <= 0.0 or not np.isfinite(r_norm) or not np.isfinite(v_norm):
+            stats["sanity_reject"] += 1
+            loglik = -np.inf
+        else:
+            energy = 0.5 * v_norm * v_norm - MU_SUN / r_norm
+            if energy >= 0.0:
+                stats["sanity_reject"] += 1
+                loglik = -np.inf
+            else:
+                loglik = compute_loglik(state, epoch, obs_list, obs_cache)
+                if not np.isfinite(loglik):
+                    stats["prop_fail"] += 1
         log_q_da = multivariate_normal.logpdf(delta_a, mean=np.zeros(4), cov=cov_attrib)
         log_q_rho = -math.log(max(1e-12, rho_max_au - rho_min_au))
         log_q_rhodot = -math.log(max(1e-12, 2.0 * rhodot_max_kms))
         log_q = float(log_q_da + log_q_rho + log_q_rhodot)
-        loglik = compute_loglik(state, epoch, obs_list, obs_cache)
         samples.append(
             {"theta": None, "state": state, "log_q": log_q, "loglik": loglik}
         )
-    return samples
+    return samples, stats
 
 
 def generate_jpl_jitter(
@@ -322,26 +479,33 @@ def generate_jpl_jitter(
     obs_cache,
 ) -> list[dict]:
     samples: list[dict] = []
+    stats = {"attempted": 0, "prop_fail": 0}
     r_seed = seed_state[:3]
     v_seed = seed_state[3:]
     for _ in range(n_samples):
+        stats["attempted"] += 1
         dr = np.random.normal(0.0, sigma_r_km, size=3)
         dv = np.random.normal(0.0, sigma_v_km_s, size=3)
         state = np.hstack([r_seed + dr, v_seed + dv])
         log_q = float(np.sum(norm.logpdf(dr, 0.0, sigma_r_km)) + np.sum(norm.logpdf(dv, 0.0, sigma_v_km_s)))
         loglik = compute_loglik(state, epoch, obs_list, obs_cache)
+        if not np.isfinite(loglik):
+            stats["prop_fail"] += 1
         samples.append({"theta": None, "state": state, "log_q": log_q, "loglik": loglik})
-    return samples
+    return samples, stats
 
 
-def finalize_family(samples: list[dict], out_prefix: Path) -> dict:
+def finalize_family(samples: list[dict], out_prefix: Path, extra_diag: dict | None = None) -> dict:
     logq = np.array([d.get("log_q", -np.inf) for d in samples], dtype=float)
     loglik = np.array([d.get("loglik", -np.inf) for d in samples], dtype=float)
     states = np.array([d.get("state", np.full(6, np.nan)) for d in samples], dtype=float)
     logw = loglik - logq
     finite = np.isfinite(logw)
     if not np.any(finite):
-        return {"n": len(samples), "ess": 0.0}
+        diag = {"n": int(len(samples)), "ess": 0.0}
+        if extra_diag:
+            diag.update(extra_diag)
+        return diag
     maxlw = np.max(logw[finite])
     w = np.exp(logw - maxlw)
     w[~np.isfinite(w)] = 0.0
@@ -356,6 +520,8 @@ def finalize_family(samples: list[dict], out_prefix: Path) -> dict:
         "elliptic_mass": float(np.sum(w[energies < 0])),
         "hyperbolic_mass": float(np.sum(w[energies > 0])),
     }
+    if extra_diag:
+        diag.update(extra_diag)
     np.savez(
         out_prefix.with_suffix(".npz"),
         state=states,
@@ -381,6 +547,7 @@ def main() -> None:
     parser.add_argument("--rho-min-au", type=float, default=1e-3)
     parser.add_argument("--rho-max-au", type=float, default=5.0)
     parser.add_argument("--rhodot-max", type=float, default=120.0)
+    parser.add_argument("--null-newton", action="store_true", help="Use Newton refinement for nullspace proposals.")
     args = parser.parse_args()
 
     obs_path = Path(args.obs)
@@ -393,6 +560,18 @@ def main() -> None:
     t0 = Time(t0_jd, format="jd", scale="tdb")
     attrib, cov_attrib = compute_attributable(obs_list, t0)
     obs_ref = obs_list[0]
+    earth_bary, earth_bary_vel = _body_posvel_km_single("earth", t0)
+    sun_bary, sun_bary_vel = _body_posvel_km_single("sun", t0)
+    earth_helio = earth_bary - sun_bary
+    earth_vel_helio = earth_bary_vel - sun_bary_vel
+    site_pos, site_vel = _site_states(
+        [t0],
+        [obs_ref.site],
+        observer_positions_km=[obs_ref.observer_pos_km],
+        observer_velocities_km_s=None,
+        allow_unknown_site=True,
+    )
+    cached_frame = (earth_helio, earth_vel_helio, site_pos[0], site_vel[0])
 
     if not HAS_POLIASTRO and args.n_null > 0:
         raise SystemExit("poliastro required for nullspace element proposals.")
@@ -412,7 +591,7 @@ def main() -> None:
     jpl_state = _initial_state_from_horizons(str(args.mpc_id), t0)
 
     print("Generating JPL jitter proposals...")
-    jpl_samples = generate_jpl_jitter(
+    jpl_samples, jpl_stats = generate_jpl_jitter(
         jpl_state,
         args.n_jpl,
         sigma_r_km=50.0,
@@ -421,11 +600,11 @@ def main() -> None:
         obs_list=obs_list,
         obs_cache=obs_cache,
     )
-    diag_jpl = finalize_family(jpl_samples, outdir / "samples_jpl")
+    diag_jpl = finalize_family(jpl_samples, outdir / "samples_jpl", extra_diag=jpl_stats)
     print("JPL diag:", diag_jpl)
 
     print("Generating attributable proposals...")
-    attrib_samples = generate_attrib_samples(
+    attrib_samples, attrib_stats = generate_attrib_samples(
         attrib,
         cov_attrib,
         args.n_attrib,
@@ -437,13 +616,15 @@ def main() -> None:
         args.rho_max_au,
         args.rhodot_max,
     )
-    diag_attrib = finalize_family(attrib_samples, outdir / "samples_attrib")
+    diag_attrib = finalize_family(
+        attrib_samples, outdir / "samples_attrib", extra_diag=attrib_stats
+    )
     print("Attrib diag:", diag_attrib)
 
     if args.n_null > 0:
         print("Generating nullspace proposals...")
         seed_theta = elements_from_state(jpl_state[:3], jpl_state[3:], t0)
-        null_samples = generate_nullspace_samples(
+        null_samples, null_stats = generate_nullspace_samples(
             seed_theta,
             args.n_null,
             attrib,
@@ -452,8 +633,12 @@ def main() -> None:
             obs_ref,
             obs_list,
             obs_cache,
+            cached_frame,
+            args.null_newton,
         )
-        diag_null = finalize_family(null_samples, outdir / "samples_null")
+        diag_null = finalize_family(
+            null_samples, outdir / "samples_null", extra_diag=null_stats
+        )
         print("Null diag:", diag_null)
 
 
