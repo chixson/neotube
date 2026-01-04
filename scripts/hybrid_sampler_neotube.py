@@ -274,7 +274,7 @@ def generate_nullspace_samples(
         np.hstack([r_seed, v_seed]), *cached_frame
     )
 
-    y_obs = np.array(
+    y_obs_vec = np.array(
         [
             attrib.ra_deg,
             attrib.dec_deg,
@@ -283,6 +283,7 @@ def generate_nullspace_samples(
         ],
         dtype=float,
     )
+    assert y_obs_vec.shape == (4,), "y_obs_vec must be 4-vector (alpha,delta,alpha_dot,delta_dot)"
 
     cov_eps = np.array(cov_attrib, dtype=float)
     qz_mean = np.zeros(2)
@@ -360,7 +361,7 @@ def generate_nullspace_samples(
             z = np.random.multivariate_normal(qz_mean, qz_tight_cov)
         else:
             z = np.random.multivariate_normal(qz_mean, qz_wide_cov)
-        theta_lin = seed_theta + H0_plus @ (y_obs - y_seed - eps) + N0 @ z
+        theta_lin = seed_theta + H0_plus @ (y_obs_vec - y_seed - eps) + N0 @ z
         # enforce bounds on the initial guess to avoid invalid elements
         theta_lower = np.array([1e-6, 0.0, 0.0, -2.0 * math.pi, -2.0 * math.pi, -2.0 * math.pi])
         theta_upper = np.array([1e6, 0.9999, math.pi, 2.0 * math.pi, 2.0 * math.pi, 2.0 * math.pi])
@@ -383,7 +384,7 @@ def generate_nullspace_samples(
             y_lin = predict_attributable_from_state_cached(
                 np.hstack([r_km_lin, v_km_lin]), *cached_frame
             )
-            r_vec = y_lin - (y_obs - eps)
+            r_vec = y_lin - (y_obs_vec - eps)
             if cov_inv is not None:
                 chi2_lin = float(r_vec.T @ cov_inv @ r_vec)
             else:
@@ -403,7 +404,7 @@ def generate_nullspace_samples(
                 y = predict_attributable_from_state_cached(
                     np.hstack([r_km, v_km_s]), *cached_frame
                 )
-                return y - (y_obs - eps)
+                return y - (y_obs_vec - eps)
             except Exception:
                 return np.ones(4) * 1e6
 
