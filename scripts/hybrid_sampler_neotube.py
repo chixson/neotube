@@ -342,6 +342,7 @@ def generate_nullspace_samples(
             "loglik": [],
             "logq": [],
             "log_null": [],
+            "logq_eff": [],
             "rho_null_bounds": [],
         }
 
@@ -410,6 +411,7 @@ def generate_nullspace_samples(
         loglik_val,
         logq_val,
         log_null_val=None,
+        logq_eff_val=None,
     ) -> None:
         if debug is None:
             return
@@ -431,6 +433,9 @@ def generate_nullspace_samples(
         if log_null_val is None:
             log_null_val = float("nan")
         debug["log_null"].append(log_null_val)
+        if logq_eff_val is None:
+            logq_eff_val = float("nan")
+        debug["logq_eff"].append(logq_eff_val)
 
     def tikhonov_solve(H, r, reg_strength):
         """Solve min ||H d - r||^2 + reg_strength ||d||^2."""
@@ -888,6 +893,7 @@ def generate_nullspace_samples(
         log_q = log_q_eps + log_q_z - (logabsdet if np.isfinite(logabsdet) else 1e300)
 
         log_null = float("nan")
+        log_q_eff = log_q
         try:
             r_km, v_km_s = state_from_elements(theta_star, epoch)
             state = np.hstack([r_km, v_km_s])
@@ -923,17 +929,20 @@ def generate_nullspace_samples(
             _, rho_km, _ = _attrib_rho_from_state(state, obs_ref, epoch)
             rho_au = rho_km / AU_KM
             log_null = log_null_prior(rho_au, rho_min_au, rho_max_au, alpha=0.005)
-            if np.isfinite(loglik):
-                loglik = float(loglik + log_null)
+            if np.isfinite(log_null):
+                log_q_eff = float(log_q + log_null)
         except Exception:
             loglik = -np.inf
             state = np.full(6, np.nan)
+            log_q_eff = log_q
 
         samples.append(
             {
                 "theta": theta_star,
                 "state": state,
-                "log_q": log_q,
+                "log_q": log_q_eff,
+                "log_q_base": log_q,
+                "log_q_eff": log_q_eff,
                 "loglik": loglik,
                 "success": True,
                 "used_newton": used_newton,
@@ -957,6 +966,7 @@ def generate_nullspace_samples(
             float(loglik),
             float(log_q),
             log_null,
+            log_q_eff,
         )
     return samples, stats, debug
 
@@ -1171,7 +1181,11 @@ def audit_family(
     logprior_default: float = 0.0,
 ) -> dict:
     states = np.array([d.get("state", np.full(6, np.nan)) for d in samples], dtype=float)
-    logq = np.array([d.get("log_q", -np.inf) for d in samples], dtype=float)
+    logq = np.array(
+        [d.get("log_q_eff", d.get("log_q", -np.inf)) for d in samples], dtype=float
+    )
+    logq_base = np.array([d.get("log_q_base", d.get("log_q", -np.inf)) for d in samples], dtype=float)
+    log_null = np.array([d.get("log_null", 0.0) for d in samples], dtype=float)
     loglik = np.array([d.get("loglik", -np.inf) for d in samples], dtype=float)
     used_newton = np.array([bool(d.get("used_newton", False)) for d in samples], dtype=bool)
     accepted = np.isfinite(loglik)
@@ -1226,6 +1240,8 @@ def audit_family(
         loglike_phot=loglike_phot,
         logprior=logprior,
         logq=logq,
+        logq_base=logq_base,
+        log_null=log_null,
         logw=logw,
         accepted=accepted,
         used_newton=used_newton,
