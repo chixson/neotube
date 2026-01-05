@@ -1308,15 +1308,13 @@ def _local_mcmc_state(
     epoch: Time,
     obs_list,
     obs_cache,
-    *,
     n_steps: int = 8000,
     burn: int = 2000,
     cov_scale: float = 0.003,
-    rng: np.random.Generator | None = None,
+    rng_seed: int | None = None,
 ) -> list[dict]:
     """Simple random-walk MH around a state; returns list of samples with loglik."""
-    if rng is None:
-        rng = np.random.default_rng()
+    rng = np.random.default_rng(rng_seed)
     state = np.array(start_state, dtype=float)
     loglik = compute_loglik(state, epoch, obs_list, obs_cache)
     if not np.isfinite(loglik):
@@ -1345,10 +1343,12 @@ def auto_local_expand_and_redistribute(
     *,
     delta_logw_trigger: float = 10.0,
     ess_fraction: float = 0.01,
+    khat_trigger: float = 0.7,
     n_local: int = 2000,
     mcmc_steps: int = 8000,
     mcmc_burn: int = 2000,
     cov_scale: float = 0.003,
+    mcmc_chains: int = 4,
 ) -> tuple[list[dict], dict]:
     """Expand around the top-weight sample if weights collapse, then redistribute weight."""
     if not samples:
@@ -1365,21 +1365,64 @@ def auto_local_expand_and_redistribute(
     lw = logw - logsumexp(logw)
     w = np.exp(lw)
     ess = float(1.0 / np.sum(w * w))
-    if (delta_logw < delta_logw_trigger) and (ess >= ess_fraction * len(samples)):
+    khat = float("inf")
+    try:
+        import arviz as az
+
+        khat_val = float(az.psislw(lw)[1])
+        if np.isfinite(khat_val):
+            khat = khat_val
+    except Exception:
+        khat = float("inf")
+    if (delta_logw < delta_logw_trigger) and (ess >= ess_fraction * len(samples)) and (
+        not np.isfinite(khat) or khat < khat_trigger
+    ):
         return samples, stats
     start_state = samples[top].get("state")
     if start_state is None or not np.isfinite(start_state).all():
         return samples, stats
-    draws = _local_mcmc_state(
-        start_state,
-        epoch,
-        obs_list,
-        obs_cache,
-        n_steps=mcmc_steps,
-        burn=mcmc_burn,
-        cov_scale=cov_scale,
-        rng=np.random.default_rng(),
-    )
+    n_chains = max(1, int(mcmc_chains))
+    n_chains = min(n_chains, os.cpu_count() or 1)
+    per_chain_steps = max(1, int(mcmc_steps))
+    per_chain_burn = min(mcmc_burn, max(0, per_chain_steps - 1))
+    seeds = list(range(n_chains))
+    if n_chains > 1:
+        ctx = mp.get_context("fork")
+        with ctx.Pool(processes=n_chains) as pool:
+            results = pool.starmap(
+                _local_mcmc_state,
+                [
+                    (
+                        start_state,
+                        epoch,
+                        obs_list,
+                        obs_cache,
+                        per_chain_steps,
+                        per_chain_burn,
+                        cov_scale,
+                        seeds[i],
+                    )
+                    for i in range(n_chains)
+                ],
+                chunksize=1,
+            )
+    else:
+        results = [
+            _local_mcmc_state(
+                start_state,
+                epoch,
+                obs_list,
+                obs_cache,
+                n_steps=per_chain_steps,
+                burn=per_chain_burn,
+                cov_scale=cov_scale,
+                rng_seed=seeds[0],
+            )
+        ]
+    draws = []
+    for chain in results:
+        if chain:
+            draws.extend(chain)
     if not draws:
         return samples, stats
     if len(draws) > n_local:
@@ -1407,6 +1450,8 @@ def auto_local_expand_and_redistribute(
     stats["expanded_local"] = int(len(draws))
     stats["expanded_delta_logw"] = float(delta_logw)
     stats["expanded_ess_before"] = float(ess)
+    stats["expanded_khat"] = float(khat)
+    stats["expanded_chains"] = int(n_chains)
     return new_samples, stats
 
 
