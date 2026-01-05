@@ -26,6 +26,10 @@ from scipy.optimize import least_squares
 from scipy.special import logsumexp
 from scipy.stats import multivariate_normal, norm
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from astropy.time import Time
 from astropy import units as u
 
@@ -136,6 +140,28 @@ def compute_loglik(
         total += -0.5 * ((dra_arcsec / sigma) ** 2 + (ddec_arcsec / sigma) ** 2)
         total += -math.log(2.0 * math.pi * sigma * sigma)
     return float(total)
+
+
+def state_physicality(state: np.ndarray, mu: float = MU_SUN) -> tuple[bool, float, float, float]:
+    """Return (ok, eps, a, e) for heliocentric state."""
+    try:
+        r = np.asarray(state[:3], dtype=float)
+        v = np.asarray(state[3:], dtype=float)
+        rnorm = float(np.linalg.norm(r))
+        vnorm = float(np.linalg.norm(v))
+        if not np.isfinite(rnorm) or not np.isfinite(vnorm) or rnorm <= 0.0:
+            return False, float("nan"), float("nan"), float("nan")
+        eps = 0.5 * vnorm * vnorm - mu / rnorm
+        a = float("inf")
+        if eps < 0.0:
+            a = -mu / (2.0 * eps)
+        h = np.cross(r, v)
+        evec = (np.cross(v, h) / mu) - (r / rnorm)
+        e = float(np.linalg.norm(evec))
+        ok = np.isfinite(e) and np.isfinite(eps) and eps < 0.0 and e < 1.0
+        return bool(ok), float(eps), float(a), float(e)
+    except Exception:
+        return False, float("nan"), float("nan"), float("nan")
 
 
 def compute_attributable(obs_list, epoch: Time) -> tuple[Attributable, np.ndarray]:
@@ -297,11 +323,6 @@ def generate_nullspace_samples(
     safety_alpha = 0.9
     reg_frac = 1e-4
     lambda_null = 1e-3
-    try:
-        cov_inv = linalg.inv(cov_eps)
-    except Exception:
-        cov_inv = None
-
     debug = None
     if debug_path is not None or debug_enabled:
         debug = {
@@ -320,7 +341,58 @@ def generate_nullspace_samples(
             "state": [],
             "loglik": [],
             "logq": [],
+            "log_null": [],
+            "rho_null_bounds": [],
         }
+
+    try:
+        cov_inv = linalg.inv(cov_eps)
+    except Exception:
+        cov_inv = None
+
+    def log_null_prior(rho_au: float, rho_min_au: float, rho_max_au: float, alpha: float = 0.1) -> float:
+        span = max(1e-12, float(rho_max_au) - float(rho_min_au))
+        tau = max(1e-12, alpha * span)
+        if rho_au < rho_min_au:
+            return - (rho_min_au - rho_au) / tau
+        if rho_au > rho_max_au:
+            return - (rho_au - rho_max_au) / tau
+        return 0.0
+
+    try:
+        zmax = 0.5
+        nz = 21
+        zs = np.linspace(-zmax, zmax, nz)
+        rhos_grid = []
+        earth_helio, earth_vel_helio, site_offset, site_vel = cached_frame
+        for z1 in zs:
+            for z2 in zs:
+                zvec = np.array([z1, z2], dtype=float)
+                try:
+                    theta_lin = seed_theta + (N0 @ zvec)
+                    r_km, v_km = state_from_elements(theta_lin, epoch)
+                    r_helio = r_km
+                    r_geo = r_helio - earth_helio
+                    r_topo = r_geo - site_offset
+                    rho_km = float(np.linalg.norm(r_topo))
+                    if np.isfinite(rho_km) and rho_km > 0.0:
+                        rhos_grid.append(rho_km / AU_KM)
+                except Exception:
+                    continue
+        if rhos_grid:
+            rho_min_au = float(np.min(rhos_grid))
+            rho_max_au = float(np.max(rhos_grid))
+        else:
+            seed_rho_au = float(np.linalg.norm(r_seed) / AU_KM)
+            rho_min_au = max(1e-6, seed_rho_au / 100.0)
+            rho_max_au = max(1e-6, seed_rho_au * 100.0)
+    except Exception:
+        seed_rho_au = float(np.linalg.norm(r_seed) / AU_KM)
+        rho_min_au = max(1e-6, seed_rho_au / 100.0)
+        rho_max_au = max(1e-6, seed_rho_au * 100.0)
+
+    if debug is not None:
+        debug["rho_null_bounds"] = [(rho_min_au, rho_max_au)]
 
     def _debug_append(
         theta_lin_val,
@@ -337,6 +409,7 @@ def generate_nullspace_samples(
         state_val,
         loglik_val,
         logq_val,
+        log_null_val=None,
     ) -> None:
         if debug is None:
             return
@@ -355,6 +428,9 @@ def generate_nullspace_samples(
         debug["state"].append(state_val.copy())
         debug["loglik"].append(loglik_val)
         debug["logq"].append(logq_val)
+        if log_null_val is None:
+            log_null_val = float("nan")
+        debug["log_null"].append(log_null_val)
 
     def tikhonov_solve(H, r, reg_strength):
         """Solve min ||H d - r||^2 + reg_strength ||d||^2."""
@@ -811,6 +887,7 @@ def generate_nullspace_samples(
         )
         log_q = log_q_eps + log_q_z - (logabsdet if np.isfinite(logabsdet) else 1e300)
 
+        log_null = float("nan")
         try:
             r_km, v_km_s = state_from_elements(theta_star, epoch)
             state = np.hstack([r_km, v_km_s])
@@ -820,7 +897,34 @@ def generate_nullspace_samples(
                 chi2_star = float(r_vec.T @ cov_inv @ r_vec)
             else:
                 chi2_star = float(np.dot(r_vec, r_vec))
+            ok_state, eps_state, a_state, e_state = state_physicality(state)
+            if not ok_state:
+                stats["sanity_reject"] += 1
+                reject_reason = "state_ecc"
+                _debug_append(
+                    theta_lin,
+                    z,
+                    eps,
+                    chi2_lin,
+                    used_newton,
+                    np.full_like(theta_star, np.nan),
+                    chi2_star,
+                    logabsdet,
+                    H_svals_lin,
+                    H_svals_star,
+                    reject_reason,
+                    np.full(6, np.nan),
+                    float("-inf"),
+                    float("-inf"),
+                    log_null,
+                )
+                continue
             loglik = compute_loglik(state, epoch, obs_list, obs_cache)
+            _, rho_km, _ = _attrib_rho_from_state(state, obs_ref, epoch)
+            rho_au = rho_km / AU_KM
+            log_null = log_null_prior(rho_au, rho_min_au, rho_max_au, alpha=0.005)
+            if np.isfinite(loglik):
+                loglik = float(loglik + log_null)
         except Exception:
             loglik = -np.inf
             state = np.full(6, np.nan)
@@ -832,6 +936,8 @@ def generate_nullspace_samples(
                 "log_q": log_q,
                 "loglik": loglik,
                 "success": True,
+                "used_newton": used_newton,
+                "log_null": log_null,
             }
         )
         stats["success"] += 1
@@ -850,6 +956,7 @@ def generate_nullspace_samples(
             state,
             float(loglik),
             float(log_q),
+            log_null,
         )
     return samples, stats, debug
 
@@ -969,7 +1076,13 @@ def generate_attrib_samples(
         log_q_rhodot = -math.log(max(1e-12, 2.0 * rhodot_max_kms))
         log_q = float(log_q_da + log_q_rho + log_q_rhodot)
         samples.append(
-            {"theta": None, "state": state, "log_q": log_q, "loglik": loglik}
+            {
+                "theta": None,
+                "state": state,
+                "log_q": log_q,
+                "loglik": loglik,
+                "used_newton": False,
+            }
         )
     return samples, stats
 
@@ -996,7 +1109,15 @@ def generate_jpl_jitter(
         loglik = compute_loglik(state, epoch, obs_list, obs_cache)
         if not np.isfinite(loglik):
             stats["prop_fail"] += 1
-        samples.append({"theta": None, "state": state, "log_q": log_q, "loglik": loglik})
+        samples.append(
+            {
+                "theta": None,
+                "state": state,
+                "log_q": log_q,
+                "loglik": loglik,
+                "used_newton": False,
+            }
+        )
     return samples, stats
 
 
@@ -1039,6 +1160,99 @@ def finalize_family(samples: list[dict], out_prefix: Path, extra_diag: dict | No
     with open(diag_path, "w") as fh:
         json.dump(diag, fh, indent=2)
     return diag
+
+
+def audit_family(
+    samples: list[dict],
+    out_prefix: Path,
+    obs_ref,
+    epoch: Time,
+    *,
+    logprior_default: float = 0.0,
+) -> dict:
+    states = np.array([d.get("state", np.full(6, np.nan)) for d in samples], dtype=float)
+    logq = np.array([d.get("log_q", -np.inf) for d in samples], dtype=float)
+    loglik = np.array([d.get("loglik", -np.inf) for d in samples], dtype=float)
+    used_newton = np.array([bool(d.get("used_newton", False)) for d in samples], dtype=bool)
+    accepted = np.isfinite(loglik)
+    rho_topo = np.full(len(samples), np.nan, dtype=float)
+    for i, st in enumerate(states):
+        try:
+            _, rho_km, _ = _attrib_rho_from_state(st, obs_ref, epoch)
+            rho_topo[i] = rho_km / AU_KM
+        except Exception:
+            continue
+
+    logprior = np.full(len(samples), float(logprior_default), dtype=float)
+    loglike_astrom = loglik.copy()
+    loglike_phot = np.full(len(samples), np.nan, dtype=float)
+    logw = (loglike_astrom + logprior) - logq
+    finite = np.isfinite(logw) & np.isfinite(rho_topo)
+    if np.any(finite):
+        lw = logw[finite]
+        lw = lw - np.max(lw)
+        w = np.exp(lw)
+        w /= np.sum(w) + 1e-300
+        ess = float(1.0 / np.sum(w * w))
+        max_w = float(np.max(w))
+        rho_f = rho_topo[finite]
+        idx = np.argsort(rho_f)
+        rho_sorted = rho_f[idx]
+        w_sorted = w[idx]
+        cdf = np.cumsum(w_sorted)
+        wmed = float(rho_sorted[np.searchsorted(cdf, 0.5)])
+        umed = float(np.median(rho_f))
+    else:
+        ess = 0.0
+        max_w = float("nan")
+        wmed = float("nan")
+        umed = float("nan")
+
+    audit = {
+        "ess": ess,
+        "max_weight": max_w,
+        "rho_weighted_median": wmed,
+        "rho_unweighted_median": umed,
+        "n_samples": int(len(samples)),
+        "n_finite": int(np.sum(finite)),
+    }
+
+    audit_npz = out_prefix.parent / f"{out_prefix.name}_audit.npz"
+    audit_json = out_prefix.parent / f"{out_prefix.name}_audit.json"
+    np.savez_compressed(
+        audit_npz,
+        rho_topo=rho_topo,
+        loglike_astrom=loglike_astrom,
+        loglike_phot=loglike_phot,
+        logprior=logprior,
+        logq=logq,
+        logw=logw,
+        accepted=accepted,
+        used_newton=used_newton,
+    )
+    with open(audit_json, "w") as fh:
+        json.dump(audit, fh, indent=2)
+
+    if np.any(finite):
+        plt.figure(figsize=(6, 4))
+        plt.scatter(rho_topo[finite], logq[finite], s=6, alpha=0.6)
+        plt.xlabel("rho_topo (AU)")
+        plt.ylabel("logq")
+        plt.title(f"{out_prefix.name} logq vs rho")
+        plt.tight_layout()
+        plt.savefig(out_prefix.parent / f"{out_prefix.name}_logq_vs_rho.png", dpi=150)
+        plt.close()
+
+        plt.figure(figsize=(6, 4))
+        plt.scatter(rho_topo[finite], logw[finite], s=6, alpha=0.6)
+        plt.xlabel("rho_topo (AU)")
+        plt.ylabel("logw")
+        plt.title(f"{out_prefix.name} logw vs rho")
+        plt.tight_layout()
+        plt.savefig(out_prefix.parent / f"{out_prefix.name}_logw_vs_rho.png", dpi=150)
+        plt.close()
+
+    return audit
 
 
 def main() -> None:
@@ -1118,6 +1332,7 @@ def main() -> None:
         obs_cache=obs_cache,
     )
     diag_jpl = finalize_family(jpl_samples, outdir / "samples_jpl", extra_diag=jpl_stats)
+    audit_family(jpl_samples, outdir / "samples_jpl", obs_ref, t0)
     print("JPL diag:", diag_jpl)
 
     print("Generating attributable proposals...")
@@ -1136,6 +1351,7 @@ def main() -> None:
     diag_attrib = finalize_family(
         attrib_samples, outdir / "samples_attrib", extra_diag=attrib_stats
     )
+    audit_family(attrib_samples, outdir / "samples_attrib", obs_ref, t0)
     print("Attrib diag:", diag_attrib)
 
     if args.n_null > 0:
@@ -1203,6 +1419,7 @@ def main() -> None:
         diag_null = finalize_family(
             null_samples, outdir / "samples_null", extra_diag=null_stats
         )
+        audit_family(null_samples, outdir / "samples_null", obs_ref, t0)
         print("Null diag:", diag_null)
 
 
