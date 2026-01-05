@@ -1303,6 +1303,113 @@ def audit_family(
     return audit
 
 
+def _local_mcmc_state(
+    start_state: np.ndarray,
+    epoch: Time,
+    obs_list,
+    obs_cache,
+    *,
+    n_steps: int = 8000,
+    burn: int = 2000,
+    cov_scale: float = 0.003,
+    rng: np.random.Generator | None = None,
+) -> list[dict]:
+    """Simple random-walk MH around a state; returns list of samples with loglik."""
+    if rng is None:
+        rng = np.random.default_rng()
+    state = np.array(start_state, dtype=float)
+    loglik = compute_loglik(state, epoch, obs_list, obs_cache)
+    if not np.isfinite(loglik):
+        return []
+    scale = np.maximum(1e-6, np.abs(state))
+    step_sigma = cov_scale * scale
+    out = []
+    for i in range(n_steps):
+        proposal = state + rng.normal(scale=step_sigma, size=state.shape)
+        loglik_p = compute_loglik(proposal, epoch, obs_list, obs_cache)
+        if np.isfinite(loglik_p):
+            if math.log(rng.random()) <= (loglik_p - loglik):
+                state = proposal
+                loglik = loglik_p
+        if i >= burn:
+            out.append({"state": state.copy(), "loglik": float(loglik)})
+    return out
+
+
+def auto_local_expand_and_redistribute(
+    samples: list[dict],
+    stats: dict,
+    obs_list,
+    obs_cache,
+    epoch: Time,
+    *,
+    delta_logw_trigger: float = 10.0,
+    ess_fraction: float = 0.01,
+    n_local: int = 2000,
+    mcmc_steps: int = 8000,
+    mcmc_burn: int = 2000,
+    cov_scale: float = 0.003,
+) -> tuple[list[dict], dict]:
+    """Expand around the top-weight sample if weights collapse, then redistribute weight."""
+    if not samples:
+        return samples, stats
+    loglik = np.array([s.get("loglik", -np.inf) for s in samples], dtype=float)
+    logq = np.array([s.get("log_q", -np.inf) for s in samples], dtype=float)
+    logw = loglik - logq
+    if not np.isfinite(logw).any() or logw.size < 2:
+        return samples, stats
+    order = np.argsort(-logw)
+    top = int(order[0])
+    second = int(order[1])
+    delta_logw = float(logw[top] - logw[second])
+    lw = logw - logsumexp(logw)
+    w = np.exp(lw)
+    ess = float(1.0 / np.sum(w * w))
+    if (delta_logw < delta_logw_trigger) and (ess >= ess_fraction * len(samples)):
+        return samples, stats
+    start_state = samples[top].get("state")
+    if start_state is None or not np.isfinite(start_state).all():
+        return samples, stats
+    draws = _local_mcmc_state(
+        start_state,
+        epoch,
+        obs_list,
+        obs_cache,
+        n_steps=mcmc_steps,
+        burn=mcmc_burn,
+        cov_scale=cov_scale,
+        rng=np.random.default_rng(),
+    )
+    if not draws:
+        return samples, stats
+    if len(draws) > n_local:
+        draws = draws[:n_local]
+    logw_top = float(logw[top])
+    logw_new = logw_top - math.log(len(draws))
+    new_samples = [s for i, s in enumerate(samples) if i != top]
+    for d in draws:
+        loglik_d = float(d["loglik"])
+        logq_d = float(loglik_d - logw_new)
+        new_samples.append(
+            {
+                "state": d["state"],
+                "theta": np.full(6, np.nan),
+                "log_q": logq_d,
+                "log_q_base": logq_d,
+                "log_q_eff": logq_d,
+                "loglik": loglik_d,
+                "success": True,
+                "used_newton": False,
+                "log_null": float("nan"),
+            }
+        )
+    stats = dict(stats)
+    stats["expanded_local"] = int(len(draws))
+    stats["expanded_delta_logw"] = float(delta_logw)
+    stats["expanded_ess_before"] = float(ess)
+    return new_samples, stats
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--obs", required=True, help="Observation CSV")
@@ -1464,6 +1571,19 @@ def main() -> None:
                 debug_path,
                 args.null_debug,
             )
+        null_samples, null_stats = auto_local_expand_and_redistribute(
+            null_samples,
+            null_stats,
+            obs_list,
+            obs_cache,
+            t0,
+            delta_logw_trigger=10.0,
+            ess_fraction=0.01,
+            n_local=2000,
+            mcmc_steps=8000,
+            mcmc_burn=2000,
+            cov_scale=0.003,
+        )
         diag_null = finalize_family(
             null_samples, outdir / "samples_null", extra_diag=null_stats
         )
