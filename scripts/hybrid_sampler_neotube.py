@@ -1365,17 +1365,17 @@ def auto_local_expand_and_redistribute(
     lw = logw - logsumexp(logw)
     w = np.exp(lw)
     ess = float(1.0 / np.sum(w * w))
-    khat = float("inf")
+    khat_pre = float("inf")
     try:
         import arviz as az
 
         khat_val = float(az.psislw(lw)[1])
         if np.isfinite(khat_val):
-            khat = khat_val
+            khat_pre = khat_val
     except Exception:
-        khat = float("inf")
+        khat_pre = float("inf")
     if (delta_logw < delta_logw_trigger) and (ess >= ess_fraction * len(samples)) and (
-        not np.isfinite(khat) or khat < khat_trigger
+        not np.isfinite(khat_pre) or khat_pre < khat_trigger
     ):
         return samples, stats
     start_state = samples[top].get("state")
@@ -1450,7 +1450,8 @@ def auto_local_expand_and_redistribute(
     stats["expanded_local"] = int(len(draws))
     stats["expanded_delta_logw"] = float(delta_logw)
     stats["expanded_ess_before"] = float(ess)
-    stats["expanded_khat"] = float(khat)
+    stats["expanded_khat_pre"] = float(khat_pre)
+    stats["expanded_khat_post"] = float("nan")
     stats["expanded_chains"] = int(n_chains)
     return new_samples, stats
 
