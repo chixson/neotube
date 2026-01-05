@@ -344,6 +344,7 @@ def generate_nullspace_samples(
             "log_null": [],
             "logq_eff": [],
             "rho_null_bounds": [],
+            "log_null_max": [],
         }
 
     try:
@@ -387,13 +388,19 @@ def generate_nullspace_samples(
             seed_rho_au = float(np.linalg.norm(r_seed) / AU_KM)
             rho_min_au = max(1e-6, seed_rho_au / 100.0)
             rho_max_au = max(1e-6, seed_rho_au * 100.0)
+        if rhos_grid:
+            log_null_max = max(log_null_prior(rho, rho_min_au, rho_max_au, alpha=0.005) for rho in rhos_grid)
+        else:
+            log_null_max = 0.0
     except Exception:
         seed_rho_au = float(np.linalg.norm(r_seed) / AU_KM)
         rho_min_au = max(1e-6, seed_rho_au / 100.0)
         rho_max_au = max(1e-6, seed_rho_au * 100.0)
+        log_null_max = 0.0
 
     if debug is not None:
         debug["rho_null_bounds"] = [(rho_min_au, rho_max_au)]
+        debug["log_null_max"] = [float(log_null_max)]
 
     def _debug_append(
         theta_lin_val,
@@ -464,6 +471,31 @@ def generate_nullspace_samples(
             z = np.random.multivariate_normal(qz_mean, qz_tight_cov)
         else:
             z = np.random.multivariate_normal(qz_mean, qz_wide_cov)
+        if np.isfinite(log_null_max):
+            accepted_flag = False
+            for _ in range(200):
+                if np.random.rand() < qz_tight_prob:
+                    z = np.random.multivariate_normal(qz_mean, qz_tight_cov)
+                else:
+                    z = np.random.multivariate_normal(qz_mean, qz_wide_cov)
+                try:
+                    theta_lin_tmp = seed_theta + (N0 @ z)
+                    r_km_tmp, v_km_tmp = state_from_elements(theta_lin_tmp, epoch)
+                    r_geo_tmp = r_km_tmp - earth_helio
+                    r_topo_tmp = r_geo_tmp - site_offset
+                    rho_km_tmp = float(np.linalg.norm(r_topo_tmp))
+                    if not (np.isfinite(rho_km_tmp) and rho_km_tmp > 0.0):
+                        continue
+                    rho_au_tmp = rho_km_tmp / AU_KM
+                    log_null_tmp = log_null_prior(rho_au_tmp, rho_min_au, rho_max_au, alpha=0.005)
+                    if math.log(np.random.rand()) <= (log_null_tmp - log_null_max):
+                        accepted_flag = True
+                        break
+                except Exception:
+                    continue
+            if not accepted_flag:
+                stats["project_fail"] += 1
+                continue
         reject_reason = ""
         chi2_lin = float("nan")
         chi2_star = float("nan")
