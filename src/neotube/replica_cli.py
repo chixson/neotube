@@ -616,6 +616,11 @@ def main() -> int:
         help="If >0, score only the first N seed states (debug).",
     )
     parser.add_argument(
+        "--fit-smc-seed-conditioned-only",
+        action="store_true",
+        help="Force 100% attributable seeds and Laplace refinement before seed scoring.",
+    )
+    parser.add_argument(
         "--fit-smc-halt-before-seed-score",
         action="store_true",
         help="Stop after seeding and write a checkpoint before seed scoring.",
@@ -1003,6 +1008,7 @@ def main() -> int:
             seed_score_limit=int(args.fit_smc_seed_score_limit)
             if int(args.fit_smc_seed_score_limit) > 0
             else None,
+            seed_conditioned_only=bool(args.fit_smc_seed_conditioned_only),
             seed=int(args.seed),
             admissible_bound=args.admissible_bound,
             admissible_q_min_au=args.admissible_q_min_au,

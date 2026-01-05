@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Sequence
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.linalg import svd
 from astropy.time import Time
 
 from .models import Observation
@@ -34,6 +35,7 @@ from .propagate import (
 )
 from .ranging import (
     _admissible_ok,
+    _attrib_rho_from_state,
     _phase_func_hg,
     _ranging_reference_observation,
     Attributable,
@@ -175,6 +177,123 @@ def _state_signature(states: Sequence[object]) -> tuple[str, float, float, np.nd
         float(np.nanmax(np.abs(arr[finite_mask]))) if np.any(finite_mask) else float("nan")
     )
     return sig, median_norm, max_abs, arr
+
+
+def _attrib_vector_from_state(
+    state: np.ndarray, obs_ref: Observation, epoch: Time
+) -> np.ndarray:
+    attrib, _, _ = _attrib_rho_from_state(state, obs_ref, epoch)
+    return np.array(
+        [
+            attrib.ra_deg,
+            attrib.dec_deg,
+            attrib.ra_dot_deg_per_day,
+            attrib.dec_dot_deg_per_day,
+        ],
+        dtype=float,
+    )
+
+
+def _compute_H_state(
+    state: np.ndarray, obs_ref: Observation, epoch: Time
+) -> np.ndarray:
+    """Finite-difference Jacobian dy/dstate for attributable (4x6)."""
+    base = np.asarray(state, dtype=float).copy()
+    base_y = _attrib_vector_from_state(base, obs_ref, epoch)
+    H = np.zeros((4, 6), dtype=float)
+    pos_step = 1.0  # km
+    vel_step = 1e-4  # km/s
+    steps = np.array([pos_step, pos_step, pos_step, vel_step, vel_step, vel_step], dtype=float)
+    for i in range(6):
+        step = steps[i]
+        if step <= 0.0:
+            continue
+        plus = base.copy()
+        minus = base.copy()
+        plus[i] += step
+        minus[i] -= step
+        yp = _attrib_vector_from_state(plus, obs_ref, epoch)
+        ym = _attrib_vector_from_state(minus, obs_ref, epoch)
+        H[:, i] = (yp - ym) / (2.0 * step)
+    return H
+
+
+def _tikhonov_solve(H: np.ndarray, r: np.ndarray, reg_frac: float) -> tuple[np.ndarray, np.ndarray]:
+    """Solve min ||H d - r||^2 + reg ||d||^2 using SVD Tikhonov."""
+    U, S, Vt = svd(H, full_matrices=False)
+    smax = float(S[0]) if S.size > 0 else 1.0
+    eps_reg = smax * max(1e-12, reg_frac)
+    filt = S / (S * S + eps_reg)
+    delta = Vt.T @ (filt * (U.T @ r))
+    return delta, S
+
+
+def _nullspace_rejuvenate_states(
+    states: np.ndarray,
+    rng: np.random.Generator,
+    attrib_mean: np.ndarray,
+    attrib_cov: np.ndarray,
+    obs_ref: Observation,
+    epoch: Time,
+    *,
+    reg_frac: float = 1e-4,
+    max_delta_norm: float = 5.0,
+    qz_tight_cov: np.ndarray | None = None,
+    qz_wide_cov: np.ndarray | None = None,
+    qz_tight_prob: float = 0.8,
+    pos_scale_km: float = 5_000.0,
+    vel_scale_km_s: float = 0.02,
+    max_backtrack: int = 8,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Nullspace-aware rejuvenation step in state space."""
+    if qz_tight_cov is None:
+        qz_tight_cov = np.diag([0.005, 0.005])
+    if qz_wide_cov is None:
+        qz_wide_cov = np.diag([0.05, 0.05])
+    stats = {"attempted": 0, "accepted": 0, "failed": 0, "backtracked": 0}
+    out = np.array(states, dtype=float, copy=True)
+    for i in range(len(states)):
+        stats["attempted"] += 1
+        state = np.array(states[i], dtype=float, copy=True)
+        try:
+            eps = rng.multivariate_normal(np.zeros(4), attrib_cov)
+            y_seed = _attrib_vector_from_state(state, obs_ref, epoch)
+            target = attrib_mean - eps
+            H = _compute_H_state(state, obs_ref, epoch)
+            U, S, Vt = svd(H, full_matrices=True)
+            V = Vt.T
+            if V.shape[1] < 6:
+                raise RuntimeError("nullspace_dim")
+            N = V[:, 4:6]
+            delta, _ = _tikhonov_solve(H, target - y_seed, reg_frac)
+            if np.linalg.norm(delta) > max_delta_norm:
+                delta, _ = _tikhonov_solve(H, target - y_seed, 1e-3)
+            if rng.random() < qz_tight_prob:
+                z = rng.multivariate_normal(np.zeros(2), qz_tight_cov)
+            else:
+                z = rng.multivariate_normal(np.zeros(2), qz_wide_cov)
+            scale = np.diag([pos_scale_km] * 3 + [vel_scale_km_s] * 3)
+            nz = scale @ (N @ z)
+            cand = state + delta + nz
+            ok, *_ = _state_physicality(cand)
+            if not ok:
+                alpha = 1.0
+                for _ in range(max_backtrack):
+                    alpha *= 0.5
+                    cand = state + alpha * delta + nz
+                    ok, *_ = _state_physicality(cand)
+                    if ok:
+                        stats["backtracked"] += 1
+                        break
+            if not ok:
+                stats["failed"] += 1
+                continue
+            out[i] = cand
+            stats["accepted"] += 1
+        except Exception:
+            stats["failed"] += 1
+            continue
+    return out, stats
 
 try:
     from scipy.stats import qmc  # type: ignore
@@ -1163,6 +1282,7 @@ def sequential_fit_replicas(
     rhodot_max_km_s: float = 120.0,
     v_max_km_s: float = 120.0,
     conditioned_frac: float = 0.3,
+    seed_conditioned_only: bool = False,
     laplace_rejuvenation: bool = True,
     laplace_obs_window: int = 3,
     laplace_n_candidates: int = 3,
@@ -1434,6 +1554,7 @@ def sequential_fit_replicas(
     smc_iter_every_obs = max(1, int(smc_iter_every_obs))
     debug_proposals = os.environ.get("NEOTUBE_SMC_DEBUG_PROPOSALS") == "1"
     debug_likelihood = os.environ.get("NEOTUBE_SMC_DEBUG_LIKELIHOOD") == "1"
+    use_nullspace_rejuv = os.environ.get("NEOTUBE_SMC_NULLSPACE_REJUV") == "1"
 
     _log(
         "start n_particles={} obs={} use_kepler={} full_physics_final={} auto_grow={} "
@@ -1804,54 +1925,55 @@ def sequential_fit_replicas(
                 sigma_rate_deg_per_day**2,
             ]
         )
+    obs_ref = _ranging_reference_observation(obs3, epoch)
 
     used_level = np.array([], dtype=int)
     max_delta = np.array([], dtype=float)
 
     if not resume:
-        obs_ref = _ranging_reference_observation(obs3, epoch)
         seed_states: list[np.ndarray] = []
-        grid_hits = coarse_systematic_grid_scan(
-            obs_ref,
-            obs3,
-            attrib,
-            epoch,
-            rho_min_km=rho_min_au * AU_KM,
-            rho_max_km=rho_max_au * AU_KM,
-            rhodot_min=-float(rhodot_max_km_s),
-            rhodot_max=float(rhodot_max_km_s),
-            nx=40,
-            ny=40,
-            site_kappas=site_kappas,
-            s_seed=s_seed,
-            sdot_seed=sdot_seed,
-        )
-        if grid_hits:
-            grid_local = 10
-            max_grid = max(0, n_particles // 2)
-            if len(grid_hits) * grid_local > max_grid:
-                grid_hits = grid_hits[: max(1, max_grid // grid_local)]
-            for rho_km, rhodot_km_s, _ in grid_hits:
-                for _ in range(grid_local):
-                    a = rng.multivariate_normal(attrib_mean, attrib_cov)
-                    attrib_i = Attributable(
-                        ra_deg=float(a[0]),
-                        dec_deg=float(a[1]),
-                        ra_dot_deg_per_day=float(a[2]),
-                        dec_dot_deg_per_day=float(a[3]),
-                    )
-                    s_i, sdot_i = s_and_sdot(attrib_i)
-                    rho_local = float(rho_km) * (1.0 + rng.normal(scale=0.01))
-                    rhodot_local = float(rhodot_km_s) + rng.normal(
-                        scale=max(0.1, 0.05 * abs(rhodot_km_s))
-                    )
-                    try:
-                        state = build_state_from_ranging_s_sdot(
-                            obs_ref, epoch, s_i, sdot_i, rho_local, rhodot_local
+        if not seed_conditioned_only:
+            grid_hits = coarse_systematic_grid_scan(
+                obs_ref,
+                obs3,
+                attrib,
+                epoch,
+                rho_min_km=rho_min_au * AU_KM,
+                rho_max_km=rho_max_au * AU_KM,
+                rhodot_min=-float(rhodot_max_km_s),
+                rhodot_max=float(rhodot_max_km_s),
+                nx=40,
+                ny=40,
+                site_kappas=site_kappas,
+                s_seed=s_seed,
+                sdot_seed=sdot_seed,
+            )
+            if grid_hits:
+                grid_local = 10
+                max_grid = max(0, n_particles // 2)
+                if len(grid_hits) * grid_local > max_grid:
+                    grid_hits = grid_hits[: max(1, max_grid // grid_local)]
+                for rho_km, rhodot_km_s, _ in grid_hits:
+                    for _ in range(grid_local):
+                        a = rng.multivariate_normal(attrib_mean, attrib_cov)
+                        attrib_i = Attributable(
+                            ra_deg=float(a[0]),
+                            dec_deg=float(a[1]),
+                            ra_dot_deg_per_day=float(a[2]),
+                            dec_dot_deg_per_day=float(a[3]),
                         )
-                        seed_states.append(state)
-                    except Exception:
-                        continue
+                        s_i, sdot_i = s_and_sdot(attrib_i)
+                        rho_local = float(rho_km) * (1.0 + rng.normal(scale=0.01))
+                        rhodot_local = float(rhodot_km_s) + rng.normal(
+                            scale=max(0.1, 0.05 * abs(rhodot_km_s))
+                        )
+                        try:
+                            state = build_state_from_ranging_s_sdot(
+                                obs_ref, epoch, s_i, sdot_i, rho_local, rhodot_local
+                            )
+                            seed_states.append(state)
+                        except Exception:
+                            continue
 
         states_list: list[np.ndarray] = []
         valid_mask: list[bool] = []
@@ -1877,7 +1999,10 @@ def sequential_fit_replicas(
             _append_state(state)
 
         n_remaining = max(0, n_particles - len(states_list))
-        cond_frac = max(0.0, min(1.0, float(conditioned_frac)))
+        if seed_conditioned_only:
+            cond_frac = 1.0
+        else:
+            cond_frac = max(0.0, min(1.0, float(conditioned_frac)))
         n_cond = int(round(n_remaining * cond_frac))
         conditioned_states = _propose_conditioned_on_obs(
             obs_ref,
@@ -1900,28 +2025,137 @@ def sequential_fit_replicas(
             for state in conditioned_states:
                 _append_state(state)
 
-        n_remaining = max(0, n_particles - len(states_list))
-        rho_sobol, rhodot_sobol = sobol_logrho_rhodot(
-            n_remaining,
-            rho_min_au * AU_KM,
-            rho_max_au * AU_KM,
-            -float(rhodot_max_km_s),
-            float(rhodot_max_km_s),
-            rng,
-        )
-        for i in range(n_remaining):
-            a = rng.multivariate_normal(attrib_mean, attrib_cov)
-            attrib_i = Attributable(
-                ra_deg=float(a[0]),
-                dec_deg=float(a[1]),
-                ra_dot_deg_per_day=float(a[2]),
-                dec_dot_deg_per_day=float(a[3]),
+        if seed_conditioned_only:
+            parent_states = conditioned_states
+            if parent_states is None or len(parent_states) == 0:
+                _log("seed_conditioned_only requested but no conditioned proposals available")
+            else:
+                parents = list(range(len(parent_states)))
+                refine_results = _parallel_refine_parents(
+                    parents,
+                    parent_states,
+                    obs3,
+                    obs_ref,
+                    epoch,
+                    s_seed,
+                    sdot_seed,
+                    (rho_min_au * AU_KM, rho_max_au * AU_KM),
+                    (-float(rhodot_max_km_s), float(rhodot_max_km_s)),
+                    perturbers,
+                    max_step,
+                    light_time_iters,
+                    laplace_max_nfev,
+                    max_workers=min(len(parents), max(1, (os.cpu_count() or 1))),
+                    timeout_s=60.0,
+                )
+
+                refined_states: list[np.ndarray] = []
+                diag_ok = []
+                diag_rho = []
+                diag_rhodot = []
+                diag_parent_rho = []
+                for st in parent_states:
+                    try:
+                        _, rho_km, _ = _attrib_rho_from_state(st, obs_ref, epoch)
+                        diag_parent_rho.append(float(rho_km))
+                    except Exception:
+                        diag_parent_rho.append(float("nan"))
+                for p in parents:
+                    res = refine_results.get(p, {})
+                    if res.get("ok"):
+                        rho_hat = float(res.get("rho_hat", 0.0) or 0.0)
+                        rhodot_hat = float(res.get("rhodot_hat", 0.0) or 0.0)
+                        diag_ok.append(True)
+                        diag_rho.append(rho_hat)
+                        diag_rhodot.append(rhodot_hat)
+                        try:
+                            st = build_state_from_ranging_s_sdot(
+                                obs_ref, epoch, s_seed, sdot_seed, rho_hat, rhodot_hat
+                            )
+                            refined_states.append(st)
+                        except Exception:
+                            refined_states.append(parent_states[p])
+                    else:
+                        diag_ok.append(False)
+                        diag_rho.append(float("nan"))
+                        diag_rhodot.append(float("nan"))
+                        refined_states.append(parent_states[p])
+
+                try:
+                    diag_dir = Path("runs/ceres-ground-test/smc_debug")
+                    diag_dir.mkdir(parents=True, exist_ok=True)
+                    diag_path = diag_dir / "seed_conditioned_only_diag.npz"
+                    np.savez_compressed(
+                        diag_path,
+                        ok=np.array(diag_ok, dtype=bool),
+                        rho_hat=np.array(diag_rho, dtype=float),
+                        rhodot_hat=np.array(diag_rhodot, dtype=float),
+                        parent_rho_km=np.array(diag_parent_rho, dtype=float),
+                        rho_min_km=float(rho_min_au * AU_KM),
+                        rho_max_km=float(rho_max_au * AU_KM),
+                    )
+                    ok_arr = np.array(diag_ok, dtype=bool)
+                    rho_arr = np.array(diag_rho, dtype=float)
+                    rho_min_km = float(rho_min_au * AU_KM)
+                    rho_max_km = float(rho_max_au * AU_KM)
+                    n_ok = int(np.sum(ok_arr))
+                    n_bound = int(np.sum(np.isfinite(rho_arr) & ((np.abs(rho_arr - rho_min_km) < 1e-6) | (np.abs(rho_arr - rho_max_km) < 1e-6))))
+                    _log(
+                        "seed_conditioned_only refine ok={}/{} rho_hat[min/med/max]={:.3e}/{:.3e}/{:.3e} bound_hits={}".format(
+                            n_ok,
+                            len(ok_arr),
+                            float(np.nanmin(rho_arr)) if np.any(np.isfinite(rho_arr)) else float("nan"),
+                            float(np.nanmedian(rho_arr)) if np.any(np.isfinite(rho_arr)) else float("nan"),
+                            float(np.nanmax(rho_arr)) if np.any(np.isfinite(rho_arr)) else float("nan"),
+                            n_bound,
+                        )
+                    )
+                    _log(f"seed_conditioned_only refine diag saved to {diag_path}")
+                except Exception as exc:
+                    _log(f"seed_conditioned_only refine diag failed: {exc}")
+
+                states_list = []
+                valid_mask = []
+                for state in refined_states:
+                    _append_state(state)
+
+                n_remaining = max(0, n_particles - len(states_list))
+                if n_remaining > 0 and len(states_list) > 0:
+                    idx = rng.choice(len(states_list), size=n_remaining, replace=True)
+                    for i in idx:
+                        base = np.array(states_list[i], dtype=float)
+                        factor = 10.0 ** rng.normal(scale=0.005)
+                        new = base.copy()
+                        new[:3] = new[:3] * factor
+                        new[3:] = new[3:] + rng.normal(scale=0.01, size=3) * (
+                            np.linalg.norm(base[3:]) + 1e-6
+                        )
+                        states_list.append(new)
+                        valid_mask.append(True)
+
+        if not seed_conditioned_only:
+            n_remaining = max(0, n_particles - len(states_list))
+            rho_sobol, rhodot_sobol = sobol_logrho_rhodot(
+                n_remaining,
+                rho_min_au * AU_KM,
+                rho_max_au * AU_KM,
+                -float(rhodot_max_km_s),
+                float(rhodot_max_km_s),
+                rng,
             )
-            s_i, sdot_i = s_and_sdot(attrib_i)
-            state = build_state_from_ranging_s_sdot(
-                obs_ref, epoch, s_i, sdot_i, rho_sobol[i], rhodot_sobol[i]
-            )
-            _append_state(state)
+            for i in range(n_remaining):
+                a = rng.multivariate_normal(attrib_mean, attrib_cov)
+                attrib_i = Attributable(
+                    ra_deg=float(a[0]),
+                    dec_deg=float(a[1]),
+                    ra_dot_deg_per_day=float(a[2]),
+                    dec_dot_deg_per_day=float(a[3]),
+                )
+                s_i, sdot_i = s_and_sdot(attrib_i)
+                state = build_state_from_ranging_s_sdot(
+                    obs_ref, epoch, s_i, sdot_i, rho_sobol[i], rhodot_sobol[i]
+                )
+                _append_state(state)
 
         try:
             states = np.array(states_list, dtype=float)
@@ -2891,7 +3125,27 @@ def sequential_fit_replicas(
                     cov = cov * rejuvenation_scale
                     cov[:3, :3] += np.eye(3) * (pos_floor_km**2)
                     cov[3:, 3:] += np.eye(3) * (vel_floor_km_s**2)
-                    jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
+                    if use_nullspace_rejuv:
+                        states, ns_stats = _nullspace_rejuvenate_states(
+                            states,
+                            rng,
+                            attrib_mean,
+                            attrib_cov,
+                            obs_ref,
+                            epoch,
+                        )
+                        if debug_proposals:
+                            _log(
+                                "[smc debug] obs{} nullspace rejuv attempted={} accepted={} failed={} backtracked={}".format(
+                                    ob_idx,
+                                    ns_stats.get("attempted"),
+                                    ns_stats.get("accepted"),
+                                    ns_stats.get("failed"),
+                                    ns_stats.get("backtracked"),
+                                )
+                            )
+                    else:
+                        jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
                     if debug_proposals:
                         sig_before, median_norm, max_abs, arr_before = _state_signature(
                             states
@@ -2936,7 +3190,8 @@ def sequential_fit_replicas(
                             states=states,
                             cov_diag=cov_diag,
                         )
-                    states = states + jitter
+                    if not use_nullspace_rejuv:
+                        states = states + jitter
                 if debug_proposals:
                     _debug_proposal_stats(states, "post-mutate")
                     sig_after, median_norm2, max_abs2, arr_after = _state_signature(
