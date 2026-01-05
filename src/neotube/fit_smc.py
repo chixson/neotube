@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass, replace
 from typing import Any, Sequence
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, minimize
 from scipy.linalg import svd
 from astropy.time import Time
 
@@ -796,6 +796,156 @@ def _refine_logrho_rhodot(
         return float(math.exp(logrho0)), float(rhodot0), np.diag([1e-2, 1e-2])
 
 
+def _local_grid_posterior_refine(
+    obs_chunk: Sequence[Observation],
+    obs_ref: Observation,
+    epoch: Time,
+    s_seed: np.ndarray,
+    sdot_seed: np.ndarray,
+    rho_bounds: tuple[float, float],
+    rhodot_bounds: tuple[float, float],
+    perturbers: Sequence[str],
+    max_step: float,
+    light_time_iters: int,
+    *,
+    use_kepler: bool = True,
+    full_physics: bool = False,
+    rho_window_factor: float = 100.0,
+    n_logrho: int = 41,
+    n_rhodot: int = 9,
+    n_starts: int = 3,
+    initial_guess: tuple[float, float] | None = None,
+) -> tuple[float, float, np.ndarray]:
+    """Local grid + posterior-based refine for (rho, rhodot)."""
+    rho_lo, rho_hi = rho_bounds
+    rhodot_lo, rhodot_hi = rhodot_bounds
+    rho0 = math.sqrt(max(1.0, rho_lo * rho_hi))
+    rhodot0 = 0.0
+    if initial_guess is not None:
+        try:
+            rho0 = float(initial_guess[0])
+            rhodot0 = float(initial_guess[1])
+        except Exception:
+            pass
+    if not np.isfinite(rho0) or rho0 <= 0.0:
+        rho0 = math.sqrt(max(1.0, rho_lo * rho_hi))
+    rho_lo_local = max(rho_lo, rho0 / rho_window_factor)
+    rho_hi_local = min(rho_hi, rho0 * rho_window_factor)
+    if rho_lo_local >= rho_hi_local:
+        rho_lo_local = rho_lo
+        rho_hi_local = rho_hi
+
+    logrho_lo = math.log(max(1e-12, rho_lo_local))
+    logrho_hi = math.log(max(1e-12, rho_hi_local))
+    logrhos = np.linspace(logrho_lo, logrho_hi, max(2, int(n_logrho)))
+
+    rhodot_span = max(1.0, abs(rhodot0) * 2.0)
+    rd_lo = max(rhodot_lo, rhodot0 - rhodot_span)
+    rd_hi = min(rhodot_hi, rhodot0 + rhodot_span)
+    if rd_lo >= rd_hi:
+        rd_lo = rhodot_lo
+        rd_hi = rhodot_hi
+    rhodots = np.linspace(rd_lo, rd_hi, max(2, int(n_rhodot)))
+
+    best_ll = -1e300
+    best_trip = None
+    grid_scores = []
+    for lr in logrhos:
+        rho = float(math.exp(lr))
+        for rd in rhodots:
+            ll, _ = _full_logposterior_for_rho_rhodot(
+                rho,
+                float(rd),
+                obs_chunk,
+                obs_ref,
+                epoch,
+                s_seed,
+                sdot_seed,
+                perturbers,
+                max_step,
+                light_time_iters,
+                use_kepler=use_kepler,
+                full_physics=full_physics,
+            )
+            grid_scores.append((ll, rho, float(rd)))
+            if ll > best_ll:
+                best_ll = ll
+                best_trip = (rho, float(rd))
+
+    if best_trip is None:
+        return float(rho0), float(rhodot0), np.diag([1e-2, 1e-2])
+
+    grid_scores.sort(reverse=True, key=lambda x: x[0])
+    starts = [(rho, rd) for _, rho, rd in grid_scores[: max(1, int(n_starts))]]
+
+    def _neg_logpost(x: np.ndarray) -> float:
+        logrho = float(x[0])
+        rhodot = float(x[1])
+        rho = float(math.exp(logrho))
+        ll, _ = _full_logposterior_for_rho_rhodot(
+            rho,
+            rhodot,
+            obs_chunk,
+            obs_ref,
+            epoch,
+            s_seed,
+            sdot_seed,
+            perturbers,
+            max_step,
+            light_time_iters,
+            use_kepler=use_kepler,
+            full_physics=full_physics,
+        )
+        return -float(ll)
+
+    best_local_ll = best_ll
+    best_local = best_trip
+    b_lo = logrho_lo
+    b_hi = logrho_hi
+    for rho_s, rd_s in starts:
+        x0 = np.array([math.log(max(1e-12, float(rho_s))), float(rd_s)], dtype=float)
+        bounds = [(b_lo, b_hi), (rd_lo, rd_hi)]
+        try:
+            res = minimize(
+                _neg_logpost,
+                x0,
+                bounds=bounds,
+                method="L-BFGS-B",
+                options={"maxiter": 200},
+            )
+            if res.success:
+                rho_opt = float(math.exp(res.x[0]))
+                rd_opt = float(res.x[1])
+                ll_opt, _ = _full_logposterior_for_rho_rhodot(
+                    rho_opt,
+                    rd_opt,
+                    obs_chunk,
+                    obs_ref,
+                    epoch,
+                    s_seed,
+                    sdot_seed,
+                    perturbers,
+                    max_step,
+                    light_time_iters,
+                    use_kepler=use_kepler,
+                    full_physics=full_physics,
+                )
+                if ll_opt > best_local_ll:
+                    best_local_ll = ll_opt
+                    best_local = (rho_opt, rd_opt)
+        except Exception:
+            continue
+
+    rho_best, rd_best = best_local
+    tol = 1e-6
+    if (
+        abs(rho_best - rho_lo_local) / max(1.0, rho_best) < tol
+        or abs(rho_best - rho_hi_local) / max(1.0, rho_best) < tol
+    ):
+        rho_best, rd_best = best_trip
+    return float(rho_best), float(rd_best), np.diag([1e-2, 1e-2])
+
+
 def _laplace_refine_worker(
     args: tuple[
         np.ndarray,
@@ -834,7 +984,7 @@ def _laplace_refine_worker(
         rho0 = math.sqrt(max(1.0, rho_bounds[0] * rho_bounds[1]))
         rhodot0 = 0.0
     try:
-        rho_hat, rhodot_hat, cov = _refine_logrho_rhodot(
+        rho_hat, rhodot_hat, cov = _local_grid_posterior_refine(
             obs_chunk,
             obs_ref,
             epoch,
@@ -846,7 +996,7 @@ def _laplace_refine_worker(
             max_step,
             light_time_iters,
             use_kepler=True,
-            max_nfev=max_nfev,
+            full_physics=False,
             initial_guess=(rho0, rhodot0),
         )
         return {"ok": True, "rho_hat": rho_hat, "rhodot_hat": rhodot_hat, "cov": cov}
@@ -2031,10 +2181,11 @@ def sequential_fit_replicas(
                 _log("seed_conditioned_only requested but no conditioned proposals available")
             else:
                 parents = list(range(len(parent_states)))
+                refine_obs = obs if len(obs) > len(obs3) else obs3
                 refine_results = _parallel_refine_parents(
                     parents,
                     parent_states,
-                    obs3,
+                    refine_obs,
                     obs_ref,
                     epoch,
                     s_seed,
