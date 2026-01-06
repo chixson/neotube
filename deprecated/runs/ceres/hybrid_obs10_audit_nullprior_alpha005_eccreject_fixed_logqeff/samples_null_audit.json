@@ -1,0 +1,8 @@
+{
+  "ess": 1.0,
+  "max_weight": 1.0,
+  "rho_weighted_median": 0.8269115976516224,
+  "rho_unweighted_median": 2.047331346336417,
+  "n_samples": 500,
+  "n_finite": 500
+}

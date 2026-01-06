@@ -1,0 +1,20 @@
+Imported neotube propagation helpers.
+Selected object rows:
+{'t_utc': '2021-10-21T03:38:07.008', 'ra_deg': 70.66245833333333, 'dec_deg': 16.24377777777778, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:38:07.008000')}
+{'t_utc': '2021-10-21T03:40:46.848', 'ra_deg': 70.66225, 'dec_deg': 16.243833333333335, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:40:46.848000')}
+Observer sites: Z22 Z22
+obs1 ra/dec (deg): 70.66245833333333 16.24377777777778
+obs2 ra/dec (deg): 70.66225 16.243833333333335
+Sampling Variant A ...
+Variant A proposal diagnostics:
+ n_proposed_G: 0 n_proposed_T: 0
+ n_accepted_G: 0 n_accepted_T: 0
+ n_unbound_proposed: 188 n_unbound_accepted: 183
+ rho prior breakdown: tri: 27 flat_linear: 24 sso_counts: {'NEO': 11, 'EarthVicinity': 50, 'MainBelt': 58, 'Jupiter': 7, 'TNO': 16, 'Comet': 4}
+ velocity-mode breakdown: circular: 131 flat: 66
+Skipping Variant B (joint Laplace) -- focusing on Variant A only.
+Querying JPL/Horizons for 393 unique emission times ...
+--- Variant A ---
+Obs2 angular residual arcsec: mean 5.278 med 1.839 std 5.680
+Pos residual @ em1 km: mean 1398967672.305 med 272674864.439 std 2271241530.798
+Pos residual @ em2 km: mean 1398969086.096 med 272671161.480 std 2271240725.380

@@ -1,0 +1,30 @@
+Imported neotube propagation helpers.
+Selected object rows:
+{'t_utc': '2021-10-21T03:38:07.008', 'ra_deg': 70.66245833333333, 'dec_deg': 16.24377777777778, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:38:07.008000')}
+{'t_utc': '2021-10-21T03:40:46.848', 'ra_deg': 70.66225, 'dec_deg': 16.243833333333335, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:40:46.848000')}
+Observer sites: Z22 Z22
+obs1 ra/dec (deg): 70.66245833333333 16.24377777777778
+obs2 ra/dec (deg): 70.66225 16.243833333333335
+Sampling Variant A ...
+/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py:1135: RuntimeWarning: Mean of empty slice
+  % (np.nanmean(ang_res_obs2), np.nanmedian(ang_res_obs2), np.nanstd(ang_res_obs2))
+/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/lib/nanfunctions.py:1215: RuntimeWarning: Mean of empty slice
+  return np.nanmean(a, axis, out=out, keepdims=keepdims)
+/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/lib/nanfunctions.py:1879: RuntimeWarning: Degrees of freedom <= 0 for slice.
+  var = nanvar(a, axis=axis, dtype=dtype, out=out, ddof=ddof,
+/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py:1139: RuntimeWarning: Mean of empty slice
+  % (np.nanmean(pos_res_em1), np.nanmedian(pos_res_em1), np.nanstd(pos_res_em1))
+/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py:1143: RuntimeWarning: Mean of empty slice
+  % (np.nanmean(pos_res_em2), np.nanmedian(pos_res_em2), np.nanstd(pos_res_em2))
+Variant A proposal diagnostics:
+ n_proposed_G: 0 n_proposed_T: 0
+ n_accepted_G: 0 n_accepted_T: 0
+ n_unbound_proposed: 0 n_unbound_accepted: 0
+ rho prior breakdown: tri: 0 flat_linear: 0 sso_counts: {'NEO': 0, 'EarthVicinity': 0, 'MainBelt': 0, 'Jupiter': 0, 'TNO': 0, 'Comet': 0}
+ velocity-mode breakdown: circular: 0 flat: 0
+Skipping Variant B (joint Laplace) -- focusing on Variant A only.
+Querying JPL/Horizons for 0 unique emission times ...
+--- Variant A ---
+Obs2 angular residual arcsec: mean nan med nan std nan
+Pos residual @ em1 km: mean nan med nan std nan
+Pos residual @ em2 km: mean nan med nan std nan

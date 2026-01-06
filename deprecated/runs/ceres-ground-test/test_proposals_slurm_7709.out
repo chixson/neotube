@@ -1,0 +1,9 @@
+Imported neotube propagation helpers.
+Selected object rows:
+{'t_utc': '2021-10-21T03:38:07.008', 'ra_deg': 70.66245833333333, 'dec_deg': 16.24377777777778, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:38:07.008000')}
+{'t_utc': '2021-10-21T03:40:46.848', 'ra_deg': 70.66225, 'dec_deg': 16.243833333333335, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:40:46.848000')}
+Observer sites: Z22 Z22
+obs1 ra/dec (deg): 70.66245833333333 16.24377777777778
+obs2 ra/dec (deg): 70.66225 16.243833333333335
+Sampling Variant A ...
+slurmstepd-cody: error: *** JOB 7709 ON cody CANCELLED AT 2026-01-02T14:38:13 ***

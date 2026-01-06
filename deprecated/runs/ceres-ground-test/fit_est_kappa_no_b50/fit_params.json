@@ -1,0 +1,14 @@
+{
+  "target": "CERES",
+  "perturbers": [
+    "earth",
+    "mars",
+    "jupiter"
+  ],
+  "sigma_arcsec": null,
+  "obs_file": "runs/ceres-ground-test/obs_no_b50.csv",
+  "seed_method": "attributable",
+  "likelihood": "gaussian",
+  "nu": 4.0,
+  "allow_unknown_site": false
+}

@@ -1,0 +1,185 @@
+Imported neotube propagation helpers.
+Selected object rows:
+{'t_utc': '2021-10-21T03:38:07.008', 'ra_deg': 70.66245833333333, 'dec_deg': 16.24377777777778, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:38:07.008000')}
+{'t_utc': '2021-10-22T03:41:28.320', 'ra_deg': 70.57470833333333, 'dec_deg': 16.255222222222223, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-22 03:41:28.320000')}
+Observer sites: Z22 Z22
+obs1 ra/dec (deg): 70.66245833333333 16.24377777777778
+obs2 ra/dec (deg): 70.57470833333333 16.255222222222223
+JPL state fetch uses fit._initial_state_from_horizons (Horizons location='@sun').
+Sampling Variant A ...
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:656: RuntimeWarning: overflow encountered in scalar multiply
+  (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:657: RuntimeWarning: overflow encountered in scalar multiply
+  + (1.0 - alpha * r0_norm) * chi**3 * C3
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:662: RuntimeWarning: overflow encountered in scalar multiply
+  (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:663: RuntimeWarning: overflow encountered in scalar multiply
+  + (1.0 - alpha * r0_norm) * chi * chi * C2
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:666: RuntimeWarning: invalid value encountered in scalar divide
+  step = F / (dF + 1e-30)
+/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py:1988: RuntimeWarning: Mean of empty slice
+  % (np.nanmean(ang_res_obs2), np.nanmedian(ang_res_obs2), np.nanstd(ang_res_obs2))
+/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/lib/nanfunctions.py:1215: RuntimeWarning: Mean of empty slice
+  return np.nanmean(a, axis, out=out, keepdims=keepdims)
+/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/lib/nanfunctions.py:1879: RuntimeWarning: Degrees of freedom <= 0 for slice.
+  var = nanvar(a, axis=axis, dtype=dtype, out=out, ddof=ddof,
+/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py:1992: RuntimeWarning: Mean of empty slice
+  % (np.nanmean(pos_res_em1), np.nanmedian(pos_res_em1), np.nanstd(pos_res_em1))
+/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py:1996: RuntimeWarning: Mean of empty slice
+  % (np.nanmean(pos_res_em2), np.nanmedian(pos_res_em2), np.nanstd(pos_res_em2))
+/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/core/fromnumeric.py:3504: RuntimeWarning: Mean of empty slice.
+  return _methods._mean(a, axis=axis, dtype=dtype,
+/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/core/_methods.py:129: RuntimeWarning: invalid value encountered in scalar divide
+  ret = ret.dtype.type(ret / rcount)
+/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/core/_methods.py:206: RuntimeWarning: Degrees of freedom <= 0 for slice
+  ret = _var(a, axis=axis, dtype=dtype, out=out, ddof=ddof,
+/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/core/_methods.py:163: RuntimeWarning: invalid value encountered in divide
+  arrmean = um.true_divide(arrmean, div, out=arrmean,
+/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/core/_methods.py:198: RuntimeWarning: invalid value encountered in scalar divide
+  ret = ret.dtype.type(ret / rcount)
+Variant A proposal diagnostics:
+ n_proposed_G: 0 n_proposed_T: 0
+ n_accepted_G: 0 n_accepted_T: 0
+ n_unbound_proposed: 0 n_unbound_accepted: 0
+ rho prior breakdown: tri: 0 flat_linear: 0 sso_counts: {'NEO': 0, 'EarthVicinity': 0, 'MainBelt': 0, 'Jupiter': 0, 'TNO': 0, 'Comet': 0}
+ velocity-mode breakdown: circular: 0 flat: 0 jpl: 0
+Skipping Variant B (joint Laplace) -- focusing on Variant A only.
+Querying JPL/Horizons for 0 unique emission times ...
+--- Variant A (all) ---
+Obs2 angular residual arcsec: mean nan med nan std nan
+Pos residual @ em1 km: mean nan med nan std nan
+Pos residual @ em2 km: mean nan med nan std nan
+=== em1 residuals (km) ===
+em1: mean nan  med nan  std nan
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py", line 2379, in <module>
+    summarize_and_plot(
+  File "/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py", line 2077, in summarize_and_plot
+    summarize_resids(A_p1, A_p2, A_t, A_jplr, A_propr, A_obs)
+  File "/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py", line 1916, in summarize_resids
+    print_pct(r1, "em1")
+  File "/home/chixson/programming/agents/agent-2/neotube/scripts/test_proposals_from_obs_csv.py", line 1910, in print_pct
+    print(f"  p{p:02d}: {np.percentile(x, p):.6g}")
+                         ^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/lib/function_base.py", line 4283, in percentile
+    return _quantile_unchecked(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/lib/function_base.py", line 4555, in _quantile_unchecked
+    return _ureduce(a,
+           ^^^^^^^^^^^
+  File "/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/lib/function_base.py", line 3823, in _ureduce
+    r = func(a, **kwargs)
+        ^^^^^^^^^^^^^^^^^
+  File "/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/lib/function_base.py", line 4722, in _quantile_ureduce_func
+    result = _quantile(arr,
+             ^^^^^^^^^^^^^^
+  File "/home/chixson/miniforge3/lib/python3.12/site-packages/numpy/lib/function_base.py", line 4831, in _quantile
+    slices_having_nans = np.isnan(arr[-1, ...])
+                                  ~~~^^^^^^^^^
+IndexError: index -1 is out of bounds for axis 0 with size 0

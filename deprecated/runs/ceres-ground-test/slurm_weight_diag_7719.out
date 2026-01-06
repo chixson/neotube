@@ -1,0 +1,51 @@
+Imported neotube propagation helpers.
+Variant A proposal diagnostics:
+ n_proposed_G: 0 n_proposed_T: 0
+ n_accepted_G: 0 n_accepted_T: 0
+ n_unbound_proposed: 1650 n_unbound_accepted: 1648
+ rho prior breakdown: tri: 80 flat_linear: 13 sso_counts: {'NEO': 75, 'EarthVicinity': 230, 'MainBelt': 260, 'Jupiter': 29, 'TNO': 3, 'Comet': 15}
+ velocity-mode breakdown: circular: 734 flat: 971 jpl: 0
+Posterior mass: JPL subset = 2.4149708258010916e-183 Base subset = 1.0
+idx 477 subset BASE log_prior -11.62 log_lik -1.00 log_q -12.90 log_w +0.28 rho_em2 1.069e+07
+  energy: -99.51129528779984
+idx 149 subset BASE log_prior -7.78 log_lik -1.02 log_q -8.15 log_w -0.64 rho_em2 7.458e+06
+  energy: -330.99397696226094
+idx 335 subset BASE log_prior -9.53 log_lik -0.09 log_q -5.00 log_w -4.63 rho_em2 1.166e+07
+  energy: -281.90964029246186
+idx 535 subset BASE log_prior -10.33 log_lik -0.48 log_q -4.47 log_w -6.34 rho_em2 1.513e+07
+  energy: -246.50674499513786
+idx 246 subset BASE log_prior -11.82 log_lik -0.80 log_q -5.51 log_w -7.11 rho_em2 1.243e+07
+  energy: -254.1966262746372
+idx 409 subset BASE log_prior -10.88 log_lik -0.35 log_q -3.72 log_w -7.51 rho_em2 1.802e+07
+  energy: -191.70137166373365
+idx 193 subset BASE log_prior -11.90 log_lik -1.53 log_q -4.98 log_w -8.45 rho_em2 2.377e+07
+  energy: -120.94467254629001
+idx 104 subset BASE log_prior -11.35 log_lik -1.18 log_q -3.56 log_w -8.96 rho_em2 2.049e+07
+  energy: -148.7583964557067
+idx 625 subset BASE log_prior -12.46 log_lik -1.10 log_q -4.53 log_w -9.03 rho_em2 1.452e+07
+  energy: -256.5856829241676
+idx 565 subset BASE log_prior -12.48 log_lik -2.90 log_q -4.73 log_w -10.66 rho_em2 2.865e+07
+  energy: -61.49059130016519
+idx 459 subset BASE log_prior -12.20 log_lik -2.43 log_q -3.65 log_w -10.97 rho_em2 2.641e+07
+  energy: -80.15588553905764
+idx 552 subset BASE log_prior -11.39 log_lik -4.74 log_q -4.93 log_w -11.19 rho_em2 2.261e+07
+  energy: -162.4462987108634
+idx 13 subset BASE log_prior -16.31 log_lik -2.29 log_q -6.15 log_w -12.44 rho_em2 1.610e+07
+  energy: -220.9264041556837
+idx 364 subset BASE log_prior -17.41 log_lik -0.02 log_q -4.63 log_w -12.80 rho_em2 1.697e+07
+  energy: -240.3979023768385
+idx 578 subset BASE log_prior -18.50 log_lik -0.33 log_q -5.69 log_w -13.15 rho_em2 1.573e+07
+  energy: -182.7922166996011
+idx 656 subset BASE log_prior -17.34 log_lik -0.26 log_q -4.34 log_w -13.27 rho_em2 1.672e+07
+  energy: -215.09169676942565
+idx 161 subset BASE log_prior -12.80 log_lik -4.99 log_q -3.85 log_w -13.94 rho_em2 3.288e+07
+  energy: -5.673175576869312
+idx 22 subset BASE log_prior -18.75 log_lik -0.09 log_q -4.70 log_w -14.15 rho_em2 1.683e+07
+  energy: -188.6879022591272
+idx 62 subset BASE log_prior -18.37 log_lik -4.04 log_q -5.13 log_w -17.28 rho_em2 1.930e+07
+  energy: -213.77204886984737
+idx 328 subset BASE log_prior -21.13 log_lik -0.75 log_q -4.31 log_w -17.56 rho_em2 1.852e+07
+  energy: -198.54205995610187
+50% of mass in top 0 samples
+90% of mass in top 1 samples
+99% of mass in top 1 samples

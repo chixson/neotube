@@ -1,0 +1,22 @@
+Imported neotube propagation helpers.
+Selected object rows:
+{'t_utc': '2021-10-21T03:38:07.008', 'ra_deg': 70.66245833333333, 'dec_deg': 16.24377777777778, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:38:07.008000')}
+{'t_utc': '2021-10-21T03:40:46.848', 'ra_deg': 70.66225, 'dec_deg': 16.243833333333335, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:40:46.848000')}
+Observer sites: Z22 Z22
+obs1 ra/dec (deg): 70.66245833333333 16.24377777777778
+obs2 ra/dec (deg): 70.66225 16.243833333333335
+Sampling Variant A ...
+Variant A proposal diagnostics:
+ n_proposed_G: 166 n_proposed_T: 0
+ n_accepted_G: 65 n_accepted_T: 0
+ n_unbound_proposed: 104 n_unbound_accepted: 55
+Sampling Variant B ...
+Querying JPL/Horizons for 599 unique emission times ...
+--- Variant A ---
+Obs2 angular residual arcsec: mean 105.711 med 0.440 std 463.419
+Pos residual @ em1 km: mean 281497114.613 med 304016660.332 std 44616317.558
+Pos residual @ em2 km: mean 281495755.731 med 304013324.354 std 44614591.074
+--- Variant B ---
+Obs2 angular residual arcsec: mean 11.141 med 11.245 std 0.560
+Pos residual @ em1 km: mean 4518890885.379 med 4195293517.611 std 1665848426.338
+Pos residual @ em2 km: mean 4518895225.107 med 4195294564.407 std 1665849578.164

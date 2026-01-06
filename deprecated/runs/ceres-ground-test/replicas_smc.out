@@ -1,0 +1,7 @@
+[fit_smc 2026-01-01 03:02:57 +     0.0s] start n_particles=500 obs=10 use_kepler=True full_physics_final=True auto_grow=False workers=1 chunk_size=2
+[fit_smc 2026-01-01 03:02:57 +     0.0s] resumed from checkpoint stage=pre_final next_obs_index=10 n=2000
+[fit_smc 2026-01-01 03:02:57 +     0.6s] full-physics final scoring start n=2000
+[fit_smc 2026-01-01 03:02:57 +     0.7s] full-physics final scoring uses serial workers=1
+[fit_smc 2026-01-01 03:09:05 +   368.4s] full-physics final scoring done
+[fit_smc 2026-01-01 03:09:05 +   368.4s] done n=2000 ess=1.0
+Wrote 500 replicas to replicas.csv

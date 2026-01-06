@@ -1,0 +1,17 @@
+{
+  "n": 2499,
+  "ess": 2000.0,
+  "elliptic_mass": 1.0000000000000002,
+  "hyperbolic_mass": 0.0,
+  "attempted": 510,
+  "project_fail": 10,
+  "sanity_reject": 0,
+  "jacobian_fail": 0,
+  "success": 500,
+  "expanded_local": 2000,
+  "expanded_delta_logw": 3415.887685030699,
+  "expanded_ess_before": 1.0,
+  "expanded_khat_pre": Infinity,
+  "expanded_khat_post": NaN,
+  "expanded_chains": 4
+}

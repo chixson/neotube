@@ -1,0 +1,23 @@
+Imported neotube propagation helpers.
+Selected object rows:
+{'t_utc': '2021-10-21T03:38:07.008', 'ra_deg': 70.66245833333333, 'dec_deg': 16.24377777777778, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:38:07.008000')}
+{'t_utc': '2021-10-21T03:40:46.848', 'ra_deg': 70.66225, 'dec_deg': 16.243833333333335, 'sigma_arcsec': 0.5, 'site': 'Z22', 'parsed_time': Timestamp('2021-10-21 03:40:46.848000')}
+Observer sites: Z22 Z22
+obs1 ra/dec (deg): 70.66245833333333 16.24377777777778
+obs2 ra/dec (deg): 70.66225 16.243833333333335
+Sampling Variant A ...
+Variant A proposal diagnostics:
+ n_proposed_G: 139 n_proposed_T: 6
+ n_accepted_G: 143 n_accepted_T: 2
+ n_unbound_proposed: 139 n_unbound_accepted: 139
+Sampling Variant B ...
+Querying JPL/Horizons for 615 unique emission times ...
+Horizons fetch failed for 2459508.6310912375 : HTTPSConnectionPool(host='ssd.jpl.nasa.gov', port=443): Max retries exceeded with url: /api/horizons.api?format=text&EPHEM_TYPE=VECTORS&OUT_UNITS=AU-D&COMMAND=%22Ceres%3B%22&CSV_FORMAT=%22YES%22&REF_PLANE=ECLIPTIC&REF_SYSTEM=ICRF&TP_TYPE=ABSOLUTE&VEC_LABELS=YES&VEC_CORR=%22NONE%22&VEC_DELTA_T=NO&OBJ_DATA=YES&CENTER=%27%40sun%27&TLIST=2459508.6310912375 (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x757c23c59970>, 'Connection to ssd.jpl.nasa.gov timed out. (connect timeout=30)'))
+--- Variant A ---
+Obs2 angular residual arcsec: mean 504180.942 med 647681.257 std 266890.845
+Pos residual @ em1 km: mean 874811871.613 med 303764899.676 std 1615041093.705
+Pos residual @ em2 km: mean 874815657.338 med 303763235.062 std 1615041169.667
+--- Variant B ---
+Obs2 angular residual arcsec: mean 647961.500 med 647961.480 std 0.654
+Pos residual @ em1 km: mean 221736290.857 med 214181791.806 std 50021413.575
+Pos residual @ em2 km: mean 222182640.551 med 214249287.375 std 50291079.216

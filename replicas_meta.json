@@ -1,6 +1,6 @@
 {
-  "epoch_utc": "2018-04-03T14:53:30.336",
-  "n": 2000,
+  "epoch_utc": "2021-10-21T03:40:46.848",
+  "n": 200,
   "seed": 0,
   "posterior": "None",
   "perturbers": [
@@ -12,14 +12,14 @@
   "nu": 4.0,
   "fit_scale": 1.0,
   "ranged": false,
-  "obs": "runs/ceres/obs.csv",
+  "obs": "runs/ceres-ground-test/obs.csv",
   "n_proposals": 50000,
   "rho_min_au": 0.0001,
   "rho_max_au": 5.0,
   "rhodot_max_kms": 50.0,
   "rho_prior": "log",
   "rho_prior_power": 2.0,
-  "scoring_mode": "nbody",
+  "scoring_mode": "kepler",
   "chunk_size": null,
   "top_k_nbody": 2000,
   "n_workers": 32,
@@ -35,11 +35,12 @@
   "range_jitter_likelihood": "studentt",
   "fit_smc": true,
   "fit_smc_meta": {
-    "n_particles": 2000,
+    "n_particles": 200,
     "rho_min_au": 0.0001,
     "rho_max_au": 5.0,
     "rhodot_max_km_s": 50.0,
     "v_max_km_s": 50.0,
+    "conditioned_frac": 0.3,
     "ess_threshold": 0.3,
     "rejuvenation_scale": 0.05,
     "full_physics_final": true,
@@ -52,9 +53,9 @@
     "epsilon_ast_ceiling_arcsec": null,
     "auto_grow": false,
     "auto_grow_diag": null,
-    "shadow_max_arcsec": 20.48120667213725,
-    "shadow_p95_arcsec": 10.44126182498672,
-    "shadow_mean_arcsec": 9.127112922097638
+    "shadow_max_arcsec": 0.00434670577101264,
+    "shadow_p95_arcsec": 0.003073585126505738,
+    "shadow_mean_arcsec": 0.001094952134942885
   },
   "fit_smc_diag": null,
   "fit_smc_auto_grow": false,
@@ -64,6 +65,6 @@
   "fit_smc_psis_khat": 0.7,
   "fit_smc_logrho_bins": 8,
   "fit_smc_min_per_decade": 20,
-  "fit_smc_workers": 50,
+  "fit_smc_workers": 1,
   "fit_smc_chunk_size": 512
 }

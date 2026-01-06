@@ -1,0 +1,11 @@
+{
+  "n": 50,
+  "ess": 1.0,
+  "elliptic_mass": 1.0,
+  "hyperbolic_mass": 0.0,
+  "attempted": 50,
+  "project_fail": 0,
+  "sanity_reject": 0,
+  "jacobian_fail": 0,
+  "success": 50
+}

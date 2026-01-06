@@ -1,0 +1,2483 @@
+[fit_smc 2026-01-01 18:28:07 +     0.0s] start n_particles=200 obs=10 use_kepler=True full_physics_final=True auto_grow=False workers=1 chunk_size=512
+[fit_smc 2026-01-01 18:28:44 +    37.0s] conditioned proposals requested=30 accepted=30
+[fit_smc 2026-01-01 18:28:44 +    37.1s] seeded 200 states (valid=74)
+[fit_smc 2026-01-01 18:28:44 +    37.1s] seed scoring start (n=200)
+[fit_smc 2026-01-01 18:28:50 +    43.0s] seed scoring done ess=5.0 used_level_max=0 shadow_max_arcsec=0.0031 (n=200)
+[fit_smc 2026-01-01 18:28:50 +    43.0s] seed scoring complete; starting assimilation from obs index 3
+[fit_smc 2026-01-01 18:28:50 +    43.0s] entering obs loop at index 3
+[fit_smc 2026-01-01 18:28:50 +    43.0s] obs 3 start (n=200)
+[fit_smc 2026-01-01 18:28:53 +    45.8s] obs 3 ess=3.0 used_level_max=0 shadow_max_arcsec=0.0031
+[fit_smc 2026-01-01 18:28:53 +    45.8s] obs 3 loglike[min/med/max]=[-797618355651.458/-6242429.716/-4314.662] weight[min/med/max]=[0.000e+00/0.000e+00/3.333e-01]
+[fit_smc 2026-01-01 18:28:53 +    45.8s] laplace rejuvenation start obs3 duplicates=197
+[fit_smc 2026-01-01 18:36:43 +   515.8s] laplace rejuvenation done obs3
+[fit_smc 2026-01-01 18:36:43 +   515.8s] resampled ess=3.0 -> uniform weights
+[fit_smc 2026-01-01 18:36:43 +   515.8s] obs 4 start (n=200)
+[fit_smc 2026-01-01 18:36:50 +   522.8s] obs 4 ess=1.0 used_level_max=0 shadow_max_arcsec=0.0031
+[fit_smc 2026-01-01 18:36:50 +   522.8s] obs 4 loglike[min/med/max]=[-6372.843/-2313.194/-297.770] weight[min/med/max]=[0.000e+00/0.000e+00/1.000e+00]
+[fit_smc 2026-01-01 18:36:50 +   522.8s] laplace rejuvenation start obs4 duplicates=199
+[fit_smc 2026-01-01 18:49:11 +  1263.7s] laplace rejuvenation done obs4
+[fit_smc 2026-01-01 18:49:11 +  1263.7s] resampled ess=1.0 -> uniform weights
+[fit_smc 2026-01-01 18:49:11 +  1263.7s] obs 5 start (n=200)
+[fit_smc 2026-01-01 18:49:18 +  1270.6s] obs 5 ess=1.0 used_level_max=0 shadow_max_arcsec=0.0043
+[fit_smc 2026-01-01 18:49:18 +  1270.6s] obs 5 loglike[min/med/max]=[-5389.941/-2142.956/-331.007] weight[min/med/max]=[0.000e+00/0.000e+00/1.000e+00]
+[fit_smc 2026-01-01 18:49:18 +  1270.6s] laplace rejuvenation start obs5 duplicates=199
+[fit_smc 2026-01-01 19:06:02 +  2275.2s] laplace rejuvenation done obs5
+[fit_smc 2026-01-01 19:06:02 +  2275.2s] resampled ess=1.0 -> uniform weights
+[fit_smc 2026-01-01 19:06:02 +  2275.2s] obs 6 start (n=200)
+[fit_smc 2026-01-01 19:06:13 +  2285.3s] obs 6 ess=1.0 used_level_max=0 shadow_max_arcsec=0.0031
+[fit_smc 2026-01-01 19:06:13 +  2285.3s] obs 6 loglike[min/med/max]=[-27771.612/-8487.668/-813.902] weight[min/med/max]=[0.000e+00/0.000e+00/1.000e+00]
+[fit_smc 2026-01-01 19:06:13 +  2285.3s] laplace rejuvenation start obs6 duplicates=199
+[fit_smc 2026-01-01 19:26:07 +  3479.4s] laplace rejuvenation done obs6
+[fit_smc 2026-01-01 19:26:07 +  3479.4s] resampled ess=1.0 -> uniform weights
+[fit_smc 2026-01-01 19:26:07 +  3479.4s] obs 7 start (n=200)
+[fit_smc 2026-01-01 19:26:17 +  3489.4s] obs 7 ess=1.0 used_level_max=0 shadow_max_arcsec=0.0031
+[fit_smc 2026-01-01 19:26:17 +  3489.4s] obs 7 loglike[min/med/max]=[-24270.868/-8423.122/-777.377] weight[min/med/max]=[0.000e+00/0.000e+00/1.000e+00]
+[fit_smc 2026-01-01 19:26:17 +  3489.4s] laplace rejuvenation start obs7 duplicates=199
+[fit_smc 2026-01-01 19:49:20 +  4872.9s] laplace rejuvenation done obs7
+[fit_smc 2026-01-01 19:49:20 +  4872.9s] resampled ess=1.0 -> uniform weights
+[fit_smc 2026-01-01 19:49:20 +  4872.9s] obs 8 start (n=200)
+[fit_smc 2026-01-01 19:49:45 +  4898.2s] obs 8 ess=1.0 used_level_max=0 shadow_max_arcsec=0.0031
+[fit_smc 2026-01-01 19:49:45 +  4898.2s] obs 8 loglike[min/med/max]=[-223207.745/-115491.526/-27400.568] weight[min/med/max]=[0.000e+00/0.000e+00/1.000e+00]
+[fit_smc 2026-01-01 19:49:45 +  4898.2s] laplace rejuvenation start obs8 duplicates=199
+[fit_smc 2026-01-01 20:51:38 +  8610.3s] laplace rejuvenation done obs8
+[fit_smc 2026-01-01 20:51:38 +  8610.3s] resampled ess=1.0 -> uniform weights
+[fit_smc 2026-01-01 20:51:38 +  8610.3s] obs 9 start (n=200)
+[fit_smc 2026-01-01 20:56:26 +  8898.5s] obs 9 ess=1.0 used_level_max=0 shadow_max_arcsec=0.0043
+[fit_smc 2026-01-01 20:56:26 +  8898.5s] obs 9 loglike[min/med/max]=[-2492201118.318/-2009403862.172/-1947045918.540] weight[min/med/max]=[0.000e+00/0.000e+00/1.000e+00]
+[fit_smc 2026-01-01 20:56:26 +  8898.5s] laplace rejuvenation start obs9 duplicates=199
+[fit_smc 2026-01-02 01:45:26 + 26238.7s] laplace rejuvenation done obs9
+[fit_smc 2026-01-02 01:45:26 + 26238.7s] resampled ess=1.0 -> uniform weights
+[fit_smc 2026-01-02 01:45:26 + 26238.7s] full-physics final scoring start n=200
+[fit_smc 2026-01-02 01:45:26 + 26238.7s] full-physics final scoring uses serial workers=1
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:602: RuntimeWarning: overflow encountered in cosh
+  return float((np.cosh(s) - 1.0) / (-z))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:620: RuntimeWarning: overflow encountered in sinh
+  return float((np.sinh(s) - s) / (s**3))
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:656: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:662: RuntimeWarning: invalid value encountered in scalar add
+  (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:656: RuntimeWarning: overflow encountered in scalar multiply
+  (r0_norm * vr0 / sqrt_mu) * chi * chi * C2
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:657: RuntimeWarning: overflow encountered in scalar multiply
+  + (1.0 - alpha * r0_norm) * chi**3 * C3
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:662: RuntimeWarning: overflow encountered in scalar multiply
+  (r0_norm * vr0 / sqrt_mu) * chi * (1.0 - z * C3)
+/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py:663: RuntimeWarning: overflow encountered in scalar multiply
+  + (1.0 - alpha * r0_norm) * chi * chi * C2
+[fit_smc worker pid=922376] full scoring failed idx=0: Kepler solver produced pathological z=-1.164e+07 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.164e+07 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=1: Kepler solver produced pathological z=-1.429e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.429e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=2: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=3: Kepler solver produced pathological z=-1.012e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.012e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=4: Kepler solver produced pathological z=-1.208e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.208e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=5: Kepler solver produced pathological z=-1.295e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.295e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=6: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=7: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=8: Kepler solver produced pathological z=-1.227e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.227e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=9: Kepler solver produced pathological z=-1.522e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.522e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=10: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=11: Kepler solver produced pathological z=-1.707e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.707e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=12: Kepler solver produced pathological z=-1.198e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.198e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=13: Kepler solver produced pathological z=-1.288e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.288e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=14: Kepler solver produced pathological z=-1.181e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.181e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=15: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=16: Kepler solver produced pathological z=-1.327e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.327e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=17: Kepler solver produced pathological z=-1.177e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.177e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=18: Kepler solver produced pathological z=-1.300e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.300e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=19: Kepler solver produced pathological z=-1.563e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.563e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=20: Kepler solver produced pathological z=-1.504e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.504e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=21: Kepler solver produced pathological z=-1.594e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.594e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=22: Kepler solver produced pathological z=-1.237e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.237e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=23: Kepler solver did not converge for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 677, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver did not converge for dt={dt}")
+ValueError: Kepler solver did not converge for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=24: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=25: Kepler solver produced pathological z=-1.544e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.544e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=26: Kepler solver produced pathological z=-1.088e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.088e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=27: Kepler solver produced pathological z=-1.165e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.165e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=28: Kepler solver produced pathological z=-1.021e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.021e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=29: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=30: Kepler solver produced pathological z=-1.602e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.602e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=31: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=32: Kepler solver produced pathological z=-1.031e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.031e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=33: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=34: Kepler solver produced pathological z=-1.152e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.152e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=35: Kepler solver produced pathological z=-1.016e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.016e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=36: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=37: Kepler solver produced pathological z=-1.139e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.139e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=38: Kepler solver produced pathological z=-1.592e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.592e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=39: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=40: Kepler solver produced pathological z=-1.518e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.518e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=41: Kepler solver produced pathological z=-1.521e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.521e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=42: Kepler solver produced pathological z=-1.179e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.179e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=43: Kepler solver produced pathological z=-1.323e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.323e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=44: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=45: Kepler solver produced pathological z=-1.280e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.280e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=46: Kepler solver produced pathological z=-1.233e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.233e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=47: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=48: Kepler solver produced pathological z=-1.158e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.158e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=49: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=50: Kepler solver produced pathological z=-1.683e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.683e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=51: Kepler solver produced pathological z=-1.169e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.169e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=52: Kepler solver produced pathological z=-1.133e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.133e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=53: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=54: Kepler solver produced pathological z=-1.399e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.399e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=55: Kepler solver produced pathological z=-1.065e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.065e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=56: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=57: Kepler solver produced pathological z=-1.258e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.258e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=58: Kepler solver produced pathological z=-1.805e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.805e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=59: Kepler solver produced pathological z=-1.347e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.347e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=60: Kepler solver produced pathological z=-1.104e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.104e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=61: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=62: Kepler solver produced pathological z=-1.259e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.259e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=63: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=64: Kepler solver produced pathological z=-1.357e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.357e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=65: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=66: Kepler solver produced pathological z=-1.394e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.394e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=67: Kepler solver produced pathological z=-1.434e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.434e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=68: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=69: Kepler solver produced pathological z=-1.174e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.174e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=70: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=71: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=72: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=73: Kepler solver produced pathological z=-1.118e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.118e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=74: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=75: Kepler solver produced pathological z=-1.330e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.330e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=76: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=77: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=78: Kepler solver produced pathological z=-1.421e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.421e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=79: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=80: Kepler solver produced pathological z=-1.254e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.254e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=81: Kepler solver produced pathological z=-1.365e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.365e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=82: Kepler solver produced pathological z=-1.038e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.038e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=83: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=84: Kepler solver produced pathological z=-1.209e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.209e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=85: Kepler solver produced pathological z=-1.261e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.261e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=86: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=87: Kepler solver produced pathological z=-1.112e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.112e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=88: Kepler solver produced pathological z=-1.398e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.398e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=89: Kepler solver produced pathological z=-1.867e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.867e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=90: Kepler solver produced pathological z=-1.572e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.572e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=91: Kepler solver produced pathological z=-1.028e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.028e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=92: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=93: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=94: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=95: Kepler solver produced pathological z=-1.049e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.049e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=96: Kepler solver produced pathological z=-1.228e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.228e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=97: Kepler solver produced pathological z=-1.091e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.091e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=98: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=99: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=100: Kepler solver produced pathological z=-1.070e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.070e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=101: Kepler solver produced pathological z=-1.392e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.392e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=102: Kepler solver produced pathological z=-1.053e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.053e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=103: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=104: Kepler solver produced pathological z=-1.306e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.306e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=105: Kepler solver produced pathological z=-1.009e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.009e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=106: Kepler solver produced pathological z=-1.338e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.338e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=107: Kepler solver produced pathological z=-1.215e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.215e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=108: Kepler solver produced pathological z=-1.250e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.250e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=109: Kepler solver produced pathological z=-1.124e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.124e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=110: Kepler solver produced pathological z=-1.073e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.073e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=111: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=112: Kepler solver produced pathological z=-1.279e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.279e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=113: Kepler solver produced pathological z=-1.355e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.355e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=114: Kepler solver produced pathological z=-1.239e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.239e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=115: Kepler solver produced pathological z=-1.382e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.382e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=116: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=117: Kepler solver produced pathological z=-1.894e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.894e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=118: Kepler solver produced pathological z=-1.153e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.153e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=119: Kepler solver produced pathological z=-1.505e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.505e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=120: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=121: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=122: Kepler solver produced pathological z=-1.202e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.202e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=123: Kepler solver produced pathological z=-1.421e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.421e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=124: Kepler solver produced pathological z=-1.285e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.285e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=125: Kepler solver produced pathological z=-1.034e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.034e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=126: Kepler solver produced pathological z=-1.780e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.780e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=127: Kepler solver produced pathological z=-1.034e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.034e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=128: Kepler solver produced pathological z=-1.069e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.069e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=129: Kepler solver produced pathological z=-1.297e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.297e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=130: Kepler solver produced pathological z=-1.272e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.272e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=131: Kepler solver produced pathological z=-1.591e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.591e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=132: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=133: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=134: Kepler solver produced pathological z=-1.037e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.037e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=135: Kepler solver produced pathological z=-1.144e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.144e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=136: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=137: Kepler solver produced pathological z=-1.266e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.266e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=138: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=139: Kepler solver produced pathological z=-1.068e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.068e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=140: Kepler solver produced pathological z=-1.630e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.630e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=141: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=142: Kepler solver produced pathological z=-1.112e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.112e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=143: Kepler solver produced pathological z=-1.023e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.023e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=144: Kepler solver produced pathological z=-1.318e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.318e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=145: Kepler solver produced pathological z=-1.330e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.330e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=146: Kepler solver produced pathological z=-1.349e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.349e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=147: Kepler solver produced pathological z=-1.062e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.062e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=148: Kepler solver produced pathological z=-1.099e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.099e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=149: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=150: Kepler solver produced pathological z=-1.511e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.511e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=151: Kepler solver produced pathological z=-1.114e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.114e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=152: Kepler solver produced pathological z=-1.469e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.469e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=153: Kepler solver produced pathological z=-1.080e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.080e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=154: Kepler solver produced pathological z=-1.274e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.274e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=155: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=156: Kepler solver produced pathological z=-1.289e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.289e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=157: Kepler solver produced pathological z=-1.090e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.090e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=158: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=159: Kepler solver produced pathological z=-1.312e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.312e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=160: Kepler solver produced pathological z=-1.119e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.119e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=161: Kepler solver produced pathological z=-1.514e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.514e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=162: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=163: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=164: Kepler solver produced pathological z=-1.216e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.216e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=165: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=166: Kepler solver produced pathological z=-1.551e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.551e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=167: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=168: Kepler solver produced pathological z=-1.004e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.004e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=169: Kepler solver produced pathological z=-1.211e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.211e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=170: Kepler solver produced pathological z=-1.144e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.144e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=171: Kepler solver produced pathological z=-1.076e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.076e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=172: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=173: Kepler solver produced pathological z=-1.426e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.426e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=174: Kepler solver produced pathological z=-1.009e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.009e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=175: Kepler solver produced pathological z=-1.151e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.151e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=176: Kepler solver produced pathological z=-1.306e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.306e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=177: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=178: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=179: Kepler solver produced pathological z=-1.095e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.095e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=180: Kepler solver produced pathological z=-1.492e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.492e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=181: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=182: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=183: Kepler solver produced pathological z=-1.238e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.238e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=184: Kepler solver produced pathological z=-1.326e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.326e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=185: Kepler solver produced pathological z=-1.143e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.143e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=186: Kepler solver produced pathological z=-1.256e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.256e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=187: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=188: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=189: Kepler solver produced pathological z=-1.245e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.245e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=190: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=191: Kepler solver produced pathological z=-1.465e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.465e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=192: Kepler solver produced pathological z=-1.563e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.563e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=193: Kepler solver produced pathological z=-1.219e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.219e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=194: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=195: Kepler solver produced pathological z=-1.549e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.549e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=196: Kepler solver produced pathological z=-1.211e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.211e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=197: Kepler solver produced pathological z=-1.457e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.457e+06 for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=198: Kepler update became non-finite for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 668, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler update became non-finite for dt={dt}")
+ValueError: Kepler update became non-finite for dt=86279.04
+
+[fit_smc worker pid=922376] full scoring failed idx=199: Kepler solver produced pathological z=-1.175e+06 for dt=86279.04
+Traceback (most recent call last):
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 256, in _score_states_full_chunk_args
+    st_at_obs = propagate_state_kepler(
+                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 847, in propagate_state_kepler
+    out[i] = _propagate_state_kepler_single(r0, v0, dt, mu_km3_s2, max_iter, tol)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/propagate.py", line 652, in _propagate_state_kepler_single
+    raise ValueError(f"Kepler solver produced pathological z={z:.3e} for dt={dt}")
+ValueError: Kepler solver produced pathological z=-1.175e+06 for dt=86279.04
+
+[fit_smc 2026-01-02 01:51:28 + 26601.0s] final loglikes all non-finite; aborting
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/replica_cli.py", line 1653, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/replica_cli.py", line 955, in main
+    cloud = sequential_fit_replicas(
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 3038, in sequential_fit_replicas
+    loglikes = _sanitize_loglikes(loglikes, label="final", log_fn=_log)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chixson/programming/agents/agent-2/neotube/src/neotube/fit_smc.py", line 427, in _sanitize_loglikes
+    raise RuntimeError(f"{label} loglikes all non-finite")
+RuntimeError: final loglikes all non-finite

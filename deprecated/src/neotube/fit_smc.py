@@ -1,0 +1,3777 @@
+from __future__ import annotations
+
+import json
+import traceback
+import math
+import os
+import time
+import hashlib
+from pathlib import Path
+from concurrent.futures import Executor, ThreadPoolExecutor, ProcessPoolExecutor
+import faulthandler
+import multiprocessing as mp
+import sys
+from dataclasses import dataclass, replace
+from typing import Any, Sequence
+import numpy as np
+from scipy.optimize import least_squares, minimize
+from scipy.linalg import svd
+from astropy.time import Time
+
+from .models import Observation
+from .fit_adapt import AdaptiveConfig, adaptively_grow_cloud
+from .propagate import (
+    _body_posvel_km,
+    _body_posvel_km_single,
+    _prepare_obs_cache,
+    GM_SUN,
+    ObsCache,
+    PropagationConfig,
+    default_propagation_ladder,
+    propagate_state,
+    propagate_state_kepler,
+    predict_radec_from_epoch,
+    predict_radec_with_contract,
+)
+from .ranging import (
+    _admissible_ok,
+    _attrib_rho_from_state,
+    _phase_func_hg,
+    _ranging_reference_observation,
+    Attributable,
+    build_attributable_vector_fit,
+    build_state_from_ranging_s_sdot,
+    build_state_from_ranging,
+    s_and_sdot,
+)
+from .rng import make_rng
+
+AU_KM = 149597870.7
+DAY_S = 86400.0
+
+_SCORE_CONTEXT: dict[str, object] = {}
+_SCORE_FULL_CONTEXT: dict[str, object] = {}
+_PREDICT_CONTEXT: dict[str, object] = {}
+_WORKER_ERROR_COUNT = 0
+_CKPT_STATES: np.ndarray | None = None
+
+
+class _StateVector(np.ndarray):
+    """Numpy-backed state vector with .pos/.vel/.epoch attributes."""
+
+    def __new__(cls, arr: np.ndarray, epoch: object):
+        obj = np.asarray(arr, dtype=float).view(cls)
+        obj.epoch = epoch
+        return obj
+
+    def __array_finalize__(self, obj: object) -> None:
+        if obj is None:
+            return
+        self.epoch = getattr(obj, "epoch", None)
+
+    @property
+    def pos(self) -> np.ndarray:
+        return np.asarray(self[:3], dtype=float)
+
+    @property
+    def vel(self) -> np.ndarray:
+        return np.asarray(self[3:6], dtype=float)
+
+
+def _as_state_obj(state: object, epoch: object):
+    """Ensure state is an object with .pos, .vel, and .epoch for prediction."""
+    try:
+        if hasattr(state, "pos") and hasattr(state, "vel"):
+            if getattr(state, "epoch", None) is None and epoch is not None:
+                try:
+                    setattr(state, "epoch", epoch)
+                except Exception:
+                    pass
+            return state
+    except Exception:
+        pass
+
+    if isinstance(state, (np.ndarray, list, tuple)):
+        arr = np.asarray(state, dtype=float).ravel()
+        if arr.size >= 6:
+            return _StateVector(arr[:6], epoch)
+    return state
+
+
+def _state_physicality(
+    state: object, mu: float = 1.32712440018e11
+) -> tuple[bool, float, float, float, float]:
+    """
+    Return (is_ok, eps, a, e, rnorm) for a state.
+
+    Reject pathological orbits (NaNs, hyperbolic, extreme eccentricity) that
+    can break the Kepler solver or dominate scores with non-finite values.
+    """
+    try:
+        if hasattr(state, "pos") and hasattr(state, "vel"):
+            r = np.asarray(state.pos, dtype=float)
+            v = np.asarray(state.vel, dtype=float)
+        else:
+            arr = np.asarray(state, dtype=float).ravel()
+            if arr.size < 6:
+                return False, float("nan"), float("nan"), float("nan"), float("nan")
+            r = arr[:3]
+            v = arr[3:6]
+        rnorm = float(np.linalg.norm(r))
+        vnorm = float(np.linalg.norm(v))
+        eps = 0.5 * (vnorm**2) - mu / (rnorm + 1e-300)
+        a = float("inf")
+        if eps < 0.0:
+            a = -mu / (2.0 * eps)
+        h = np.cross(v, r)
+        evec = (np.cross(v, h) / mu) - (r / (rnorm + 1e-300))
+        e = float(np.linalg.norm(evec))
+        ok = (
+            np.isfinite(eps)
+            and np.isfinite(e)
+            and eps < 0.0
+            and e < 0.9999
+            and 1e5 < rnorm < 1e10
+        )
+        return bool(ok), float(eps), float(a), float(e), float(rnorm)
+    except Exception:
+        return False, float("nan"), float("nan"), float("nan"), float("nan")
+
+
+def _state_array_from_states(states: Sequence[object]) -> np.ndarray:
+    """Return an (N,6) float array for states with best-effort conversion."""
+    try:
+        arr = np.asarray(states, dtype=float)
+        if arr.ndim == 2 and arr.shape[1] >= 6:
+            return arr[:, :6].astype(float)
+    except Exception:
+        pass
+
+    n = len(states)
+    out = np.full((n, 6), np.nan, dtype=float)
+    for i, s in enumerate(states):
+        try:
+            if hasattr(s, "pos") and hasattr(s, "vel"):
+                p = np.asarray(getattr(s, "pos"), dtype=float).ravel()
+                v = np.asarray(getattr(s, "vel"), dtype=float).ravel()
+            else:
+                arr = np.asarray(s, dtype=float).ravel()
+                p = arr[:3]
+                v = arr[3:6]
+            out[i, :3] = p[:3]
+            out[i, 3:6] = v[:3]
+        except Exception:
+            continue
+    return out
+
+
+def _state_signature(states: Sequence[object]) -> tuple[str, float, float, np.ndarray]:
+    """Return a SHA1 signature and simple summary stats for states."""
+    arr = _state_array_from_states(states)
+    arr = np.ascontiguousarray(arr.astype(np.float64))
+    sig = hashlib.sha1(arr.tobytes()).hexdigest()
+    pos_norms = np.linalg.norm(arr[:, :3], axis=1)
+    median_norm = float(np.nanmedian(pos_norms))
+    finite_mask = ~np.isnan(arr)
+    max_abs = (
+        float(np.nanmax(np.abs(arr[finite_mask]))) if np.any(finite_mask) else float("nan")
+    )
+    return sig, median_norm, max_abs, arr
+
+
+def _attrib_vector_from_state(
+    state: np.ndarray, obs_ref: Observation, epoch: Time
+) -> np.ndarray:
+    attrib, _, _ = _attrib_rho_from_state(state, obs_ref, epoch)
+    return np.array(
+        [
+            attrib.ra_deg,
+            attrib.dec_deg,
+            attrib.ra_dot_deg_per_day,
+            attrib.dec_dot_deg_per_day,
+        ],
+        dtype=float,
+    )
+
+
+def _compute_H_state(
+    state: np.ndarray, obs_ref: Observation, epoch: Time
+) -> np.ndarray:
+    """Finite-difference Jacobian dy/dstate for attributable (4x6)."""
+    base = np.asarray(state, dtype=float).copy()
+    base_y = _attrib_vector_from_state(base, obs_ref, epoch)
+    H = np.zeros((4, 6), dtype=float)
+    pos_step = 1.0  # km
+    vel_step = 1e-4  # km/s
+    steps = np.array([pos_step, pos_step, pos_step, vel_step, vel_step, vel_step], dtype=float)
+    for i in range(6):
+        step = steps[i]
+        if step <= 0.0:
+            continue
+        plus = base.copy()
+        minus = base.copy()
+        plus[i] += step
+        minus[i] -= step
+        yp = _attrib_vector_from_state(plus, obs_ref, epoch)
+        ym = _attrib_vector_from_state(minus, obs_ref, epoch)
+        H[:, i] = (yp - ym) / (2.0 * step)
+    return H
+
+
+def _tikhonov_solve(H: np.ndarray, r: np.ndarray, reg_frac: float) -> tuple[np.ndarray, np.ndarray]:
+    """Solve min ||H d - r||^2 + reg ||d||^2 using SVD Tikhonov."""
+    U, S, Vt = svd(H, full_matrices=False)
+    smax = float(S[0]) if S.size > 0 else 1.0
+    eps_reg = smax * max(1e-12, reg_frac)
+    filt = S / (S * S + eps_reg)
+    delta = Vt.T @ (filt * (U.T @ r))
+    return delta, S
+
+
+def _nullspace_rejuvenate_states(
+    states: np.ndarray,
+    rng: np.random.Generator,
+    attrib_mean: np.ndarray,
+    attrib_cov: np.ndarray,
+    obs_ref: Observation,
+    epoch: Time,
+    *,
+    reg_frac: float = 1e-4,
+    max_delta_norm: float = 5.0,
+    qz_tight_cov: np.ndarray | None = None,
+    qz_wide_cov: np.ndarray | None = None,
+    qz_tight_prob: float = 0.8,
+    pos_scale_km: float = 5_000.0,
+    vel_scale_km_s: float = 0.02,
+    max_backtrack: int = 8,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Nullspace-aware rejuvenation step in state space."""
+    if qz_tight_cov is None:
+        qz_tight_cov = np.diag([0.005, 0.005])
+    if qz_wide_cov is None:
+        qz_wide_cov = np.diag([0.05, 0.05])
+    stats = {"attempted": 0, "accepted": 0, "failed": 0, "backtracked": 0}
+    out = np.array(states, dtype=float, copy=True)
+    for i in range(len(states)):
+        stats["attempted"] += 1
+        state = np.array(states[i], dtype=float, copy=True)
+        try:
+            eps = rng.multivariate_normal(np.zeros(4), attrib_cov)
+            y_seed = _attrib_vector_from_state(state, obs_ref, epoch)
+            target = attrib_mean - eps
+            H = _compute_H_state(state, obs_ref, epoch)
+            U, S, Vt = svd(H, full_matrices=True)
+            V = Vt.T
+            if V.shape[1] < 6:
+                raise RuntimeError("nullspace_dim")
+            N = V[:, 4:6]
+            delta, _ = _tikhonov_solve(H, target - y_seed, reg_frac)
+            if np.linalg.norm(delta) > max_delta_norm:
+                delta, _ = _tikhonov_solve(H, target - y_seed, 1e-3)
+            if rng.random() < qz_tight_prob:
+                z = rng.multivariate_normal(np.zeros(2), qz_tight_cov)
+            else:
+                z = rng.multivariate_normal(np.zeros(2), qz_wide_cov)
+            scale = np.diag([pos_scale_km] * 3 + [vel_scale_km_s] * 3)
+            nz = scale @ (N @ z)
+            cand = state + delta + nz
+            ok, *_ = _state_physicality(cand)
+            if not ok:
+                alpha = 1.0
+                for _ in range(max_backtrack):
+                    alpha *= 0.5
+                    cand = state + alpha * delta + nz
+                    ok, *_ = _state_physicality(cand)
+                    if ok:
+                        stats["backtracked"] += 1
+                        break
+            if not ok:
+                stats["failed"] += 1
+                continue
+            out[i] = cand
+            stats["accepted"] += 1
+        except Exception:
+            stats["failed"] += 1
+            continue
+    return out, stats
+
+try:
+    from scipy.stats import qmc  # type: ignore
+
+    _HAS_SOBOL = True
+except Exception:
+    qmc = None
+_HAS_SOBOL = False
+
+
+def _smc_worker_init(enable_faulthandler: bool) -> None:
+    """
+    Initializer for worker processes/threads.
+
+    - Enables faulthandler in the worker if requested.
+    - Limits native-library parallelism to avoid oversubscription.
+    """
+    try:
+        if enable_faulthandler:
+            faulthandler.enable(all_threads=True, file=sys.stderr)
+    except Exception:
+        pass
+
+    try:
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    except Exception:
+        pass
+
+    try:
+        import numba as _nb
+
+        try:
+            _nb.set_num_threads(1)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    try:
+        import numpy as _np
+
+        _np.seterr(divide="raise", over="raise", invalid="raise", under="ignore")
+    except Exception:
+        pass
+
+    try:
+        import signal as _sig
+
+        try:
+            faulthandler.register(_sig.SIGSEGV, all_threads=True, chain=False)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _q1_only_ladder(ladder: Sequence[PropagationConfig]) -> list[PropagationConfig]:
+    """Return a ladder that always produces canonical Q1 (no aberration/refraction)."""
+    return [replace(cfg, full_physics=False, include_refraction=False) for cfg in ladder]
+
+
+def _set_native_thread_env() -> None:
+    """Limit native library thread counts in the parent before spawning workers."""
+    try:
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    except Exception:
+        pass
+
+
+def _score_states_contract_chunk_args(args: tuple[np.ndarray, dict[str, object]]) -> np.ndarray:
+    states, ctx = args
+    obs_chunk = ctx["obs_chunk"]
+    ra_pred, dec_pred, _, _ = predict_radec_with_contract(
+        states,
+        ctx["epoch"],
+        obs_chunk,
+        epsilon_ast_arcsec=ctx["eps_arcsec"],
+        allow_unknown_site=ctx["allow_unknown_site"],
+        configs=ctx["ladder"],
+    )
+    loglikes_local = np.zeros(len(states), dtype=float)
+    for idx, ob in enumerate(obs_chunk):
+        sigma = _sigma_arcsec(ob, ctx["site_kappas"])
+        for i in range(len(states)):
+            loglikes_local[i] += _gaussian_loglike(
+                float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma
+            )
+    return loglikes_local
+
+
+def _score_states_full_chunk_args(args: tuple[np.ndarray, dict[str, object]]) -> np.ndarray:
+    states, ctx = args
+    obs = ctx["obs"]
+    loglikes_local = np.zeros(len(states), dtype=float)
+    for i, state in enumerate(states):
+        try:
+            state_epoch = None
+            try:
+                state_epoch = getattr(state, "epoch", None)
+            except Exception:
+                state_epoch = None
+            if state_epoch is None:
+                state_epoch = ctx.get("epoch", _PREDICT_CONTEXT.get("epoch", None))
+            if state_epoch is None:
+                raise RuntimeError(
+                    "SMC scoring: state has no epoch and no ctx['epoch'] available."
+                )
+            state_obj = _as_state_obj(state, state_epoch)
+            ok, _, _, _, _ = _state_physicality(state_obj)
+            if not ok:
+                loglikes_local[i] = float("-inf")
+                continue
+            ra_pred = np.empty(len(obs), dtype=float)
+            dec_pred = np.empty(len(obs), dtype=float)
+            for j, ob in enumerate(obs):
+                try:
+                    if ctx["use_kepler"]:
+                        st_at_obs = propagate_state_kepler(
+                            np.asarray(state_obj, dtype=float),
+                            state_epoch,
+                            [ob.time],
+                        )[0]
+                    else:
+                        st_at_obs = propagate_state(
+                            np.asarray(state_obj, dtype=float),
+                            state_epoch,
+                            [ob.time],
+                            perturbers=ctx["perturbers"],
+                            max_step=ctx["max_step"],
+                        )[0]
+                except Exception as exc:
+                    pid = os.getpid()
+                    print(
+                        f"[fit_smc worker pid={pid}] propagate failed idx={i} obs={j}: {exc}",
+                        flush=True,
+                    )
+                    ra_pred[j] = float("nan")
+                    dec_pred[j] = float("nan")
+                    break
+                ra_tmp, dec_tmp = predict_radec_from_epoch(
+                    st_at_obs,
+                    ob.time,
+                    [ob],
+                    ctx["perturbers"],
+                    ctx["max_step"],
+                    use_kepler=ctx["use_kepler"],
+                    allow_unknown_site=ctx["allow_unknown_site"],
+                    light_time_iters=ctx["light_time_iters"],
+                    full_physics=True,
+                    obs_cache=ctx["obs_cache"],
+                )
+                ra_pred[j] = float(ra_tmp[0])
+                dec_pred[j] = float(dec_tmp[0])
+            ll = 0.0
+            for ra, dec, ob in zip(ra_pred, dec_pred, obs):
+                if not np.isfinite(ra) or not np.isfinite(dec):
+                    ll = float("-inf")
+                    break
+                ll += _gaussian_loglike(
+                    float(ra),
+                    float(dec),
+                    ob,
+                    _sigma_arcsec(ob, ctx["site_kappas"]),
+                )
+            loglikes_local[i] = ll
+        except Exception as exc:
+            pid = os.getpid()
+            print(
+                f"[fit_smc worker pid={pid}] full scoring failed idx={i}: {exc}",
+                flush=True,
+            )
+            print(traceback.format_exc(), flush=True)
+            loglikes_local[i] = float("-inf")
+    return loglikes_local
+
+
+def _predict_contract_chunk_args(
+    args: tuple[np.ndarray, dict[str, object]]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    states, ctx = args
+    if os.environ.get("NEOTUBE_TRACE_SEED", "0") == "1":
+        pid = os.getpid()
+        print(
+            f"[seed-trace] pid={pid} n_states={len(states)} n_obs={len(ctx['obs_chunk'])} start",
+            flush=True,
+        )
+    if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
+        print("[astropy-trace] predict_radec_with_contract start", flush=True)
+    n_obs = len(ctx["obs_chunk"])
+    try:
+        result = predict_radec_with_contract(
+            states,
+            ctx["epoch"],
+            ctx["obs_chunk"],
+            epsilon_ast_arcsec=ctx["eps_arcsec"],
+            allow_unknown_site=ctx["allow_unknown_site"],
+            configs=ctx["ladder"],
+            obs_cache=ctx.get("obs_cache"),
+            obs_times_jd=ctx.get("obs_times_jd"),
+            sun_bary_km=ctx.get("sun_bary_km"),
+            use_cached_ephem=bool(ctx.get("use_cached_ephem")),
+        )
+    except Exception as exc:
+        global _WORKER_ERROR_COUNT
+        _WORKER_ERROR_COUNT += 1
+        if _WORKER_ERROR_COUNT <= 3:
+            pid = os.getpid()
+            msg = f"[fit_smc worker pid={pid}] predict_radec_with_contract failed: {exc}"
+            print(msg, flush=True)
+            print(traceback.format_exc(), flush=True)
+        ra = np.full((len(states), n_obs), np.nan, dtype=float)
+        dec = np.full((len(states), n_obs), np.nan, dtype=float)
+        used_level = np.zeros(len(states), dtype=int)
+        max_delta = np.zeros(len(states), dtype=float)
+        result = (ra, dec, used_level, max_delta)
+    if os.environ.get("NEOTUBE_TRACE_ASTROPY", "0") == "1":
+        print("[astropy-trace] predict_radec_with_contract end", flush=True)
+    if os.environ.get("NEOTUBE_TRACE_SEED", "0") == "1":
+        pid = os.getpid()
+        print(f"[seed-trace] pid={pid} n_states={len(states)} end", flush=True)
+    return result
+
+
+@dataclass
+class ReplicaCloud:
+    states: np.ndarray
+    weights: np.ndarray
+    epoch: Time
+    metadata: dict[str, Any]
+
+
+def save_replica_cloud(cloud: ReplicaCloud, path: str) -> None:
+    np.savez_compressed(
+        path,
+        states=cloud.states,
+        weights=cloud.weights,
+        epoch=cloud.epoch.isot,
+        metadata=json.dumps(cloud.metadata, sort_keys=True),
+    )
+
+
+def _tangent_residuals(ra_pred: float, dec_pred: float, ob: Observation) -> tuple[float, float]:
+    delta_ra = ((ob.ra_deg - ra_pred + 180.0) % 360.0) - 180.0
+    # Use the observation declination as the reference latitude when
+    # converting RA difference into arcseconds on the tangent plane.
+    # Using dec_pred (per-particle) biases RA residuals because the scale
+    # depends on the particle; this can artificially favor particles with
+    # particular dec_pred values (we observed this producing a large-r bias).
+    ra_arcsec = delta_ra * math.cos(math.radians(ob.dec_deg)) * 3600.0
+    dec_arcsec = (ob.dec_deg - dec_pred) * 3600.0
+    return ra_arcsec, dec_arcsec
+
+
+def _sigma_arcsec(ob: Observation, site_kappas: dict[str, float] | None) -> float:
+    kappa = 1.0
+    if site_kappas:
+        kappa = site_kappas.get(ob.site or "UNK", 1.0)
+    return max(1e-6, float(ob.sigma_arcsec) * float(kappa))
+
+
+def _finite_energy_mask(states: np.ndarray, mu_km3_s2: float = GM_SUN) -> np.ndarray:
+    r = states[:, :3]
+    v = states[:, 3:]
+    r_norm = np.linalg.norm(r, axis=1)
+    v2 = np.sum(v * v, axis=1)
+    energy = 0.5 * v2 - mu_km3_s2 / np.maximum(r_norm, 1e-12)
+    return np.isfinite(energy) & np.isfinite(r_norm) & (r_norm > 0.0)
+
+
+def _epsilon_arcsec_for_obs(
+    ob: Observation,
+    *,
+    epsilon_ast_arcsec: float,
+    epsilon_ast_scale: float,
+    epsilon_ast_floor_arcsec: float,
+    epsilon_ast_ceiling_arcsec: float | None,
+) -> float:
+    eps = epsilon_ast_arcsec
+    if epsilon_ast_scale > 0.0:
+        eps = max(epsilon_ast_floor_arcsec, float(ob.sigma_arcsec) * epsilon_ast_scale)
+        if epsilon_ast_ceiling_arcsec is not None:
+            eps = min(eps, epsilon_ast_ceiling_arcsec)
+    return eps
+
+
+def _gaussian_loglike(ra_pred: float, dec_pred: float, ob: Observation, sigma_arcsec: float) -> float:
+    if not (np.isfinite(ra_pred) and np.isfinite(dec_pred)):
+        return float("-inf")
+    dra, ddec = _tangent_residuals(ra_pred, dec_pred, ob)
+    res2 = (dra / sigma_arcsec) ** 2 + (ddec / sigma_arcsec) ** 2
+    return float(-0.5 * res2)
+
+
+def _sanitize_loglikes(
+    loglikes: np.ndarray, *, label: str, log_fn: callable | None
+) -> np.ndarray:
+    finite_mask = np.isfinite(loglikes)
+    if not np.any(finite_mask):
+        if log_fn is not None:
+            log_fn(f"{label} loglikes all non-finite; aborting")
+        raise RuntimeError(f"{label} loglikes all non-finite")
+    if not np.all(finite_mask):
+        if log_fn is not None:
+            log_fn(f"{label} loglikes non-finite count={int(np.sum(~finite_mask))}")
+        loglikes = np.where(finite_mask, loglikes, -1e30)
+    return loglikes
+
+
+def _systematic_resample(
+    states: np.ndarray, weights: np.ndarray, rng: np.random.Generator
+) -> tuple[np.ndarray, np.ndarray]:
+    n = int(len(weights))
+    if n == 0:
+        return states.copy(), np.empty(0, dtype=int)
+
+    positions = (rng.random() + np.arange(n)) / float(n)
+    cumulative = np.cumsum(weights)
+    idx = np.empty(n, dtype=int)
+    i = 0
+    for j, pos in enumerate(positions):
+        while pos > cumulative[i]:
+            i += 1
+        idx[j] = i
+
+    out = states[idx].copy()
+    if os.environ.get("NEOTUBE_SMC_DEBUG_PROPOSALS") == "1":
+        try:
+            if not np.array_equal(out, states[idx]):
+                _log(
+                    "[proposal debug] systematic_resample: gathered output != states[idx]"
+                )
+        except Exception:
+            pass
+    return out, idx
+
+
+def _stratified_log_rho_samples(
+    n_samples: int,
+    rho_min_km: float,
+    rho_max_km: float,
+    rng: np.random.Generator,
+    decades: int = 8,
+) -> np.ndarray:
+    lo = math.log10(max(1e-12, rho_min_km))
+    hi = math.log10(max(rho_min_km, rho_max_km))
+    span = hi - lo
+    if span <= 0:
+        return np.full(n_samples, rho_min_km, dtype=float)
+    bins = max(1, min(decades, int(math.ceil(span))))
+    per_bin = max(1, int(math.ceil(n_samples / bins)))
+    out: list[float] = []
+    edges = np.linspace(lo, hi, bins + 1)
+    for i in range(bins):
+        a = edges[i]
+        b = edges[i + 1]
+        count = min(per_bin, n_samples - len(out))
+        if count <= 0:
+            break
+        logs = rng.random(count) * (b - a) + a
+        out.extend((10.0 ** logs).tolist())
+    while len(out) < n_samples:
+        val = 10.0 ** (rng.random() * (hi - lo) + lo)
+        out.append(val)
+    return np.array(out[:n_samples], dtype=float)
+
+
+def _propose_conditioned_on_obs(
+    obs_ref: "Observation",
+    epoch: Time,
+    s_seed: np.ndarray,
+    sdot_seed: np.ndarray,
+    n_samples: int,
+    rho_min_km: float,
+    rho_max_km: float,
+    rhodot_max_km_s: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Propose states conditioned on observed angles (alpha, delta).
+
+    Samples (rho, rhodot) and maps to Cartesian states using the fixed
+    direction (s_seed) and its time derivative (sdot_seed). This keeps
+    proposals aligned with the tight angular constraints.
+    """
+    if n_samples <= 0:
+        return np.empty((0, 6), dtype=float)
+    rhos = _stratified_log_rho_samples(n_samples, rho_min_km, rho_max_km, rng)
+    rhodots = rng.uniform(-float(rhodot_max_km_s), float(rhodot_max_km_s), size=n_samples)
+    out: list[np.ndarray] = []
+    for rho_km, rhodot_km_s in zip(rhos, rhodots):
+        try:
+            state = build_state_from_ranging_s_sdot(
+                obs_ref,
+                epoch,
+                s_seed,
+                sdot_seed,
+                float(rho_km),
+                float(rhodot_km_s),
+            )
+            out.append(state)
+        except Exception:
+            continue
+    if not out:
+        return np.empty((0, 6), dtype=float)
+    return np.array(out, dtype=float)
+
+
+def _refine_logrho_rhodot(
+    obs_chunk: Sequence[Observation],
+    obs_ref: Observation,
+    epoch: Time,
+    s_seed: np.ndarray,
+    sdot_seed: np.ndarray,
+    rho_bounds: tuple[float, float],
+    rhodot_bounds: tuple[float, float],
+    perturbers: Sequence[str],
+    max_step: float,
+    light_time_iters: int,
+    *,
+    use_kepler: bool = True,
+    max_nfev: int = 200,
+    initial_guess: tuple[float, float] | None = None,
+) -> tuple[float, float, np.ndarray]:
+    """Refine (logrho, rhodot) by minimizing angular residuals over obs_chunk."""
+
+    def _build_state(logrho: float, rhodot: float) -> np.ndarray | None:
+        rho = float(math.exp(logrho))
+        try:
+            return build_state_from_ranging_s_sdot(
+                obs_ref, epoch, s_seed, sdot_seed, rho, float(rhodot)
+            )
+        except Exception:
+            return None
+
+    def _residual_vec(x: np.ndarray) -> np.ndarray:
+        logrho = float(x[0])
+        rhodot = float(x[1])
+        state = _build_state(logrho, rhodot)
+        if state is None:
+            return np.full(len(obs_chunk) * 2, 1e6, dtype=float)
+        try:
+            ra_pred, dec_pred = predict_radec_from_epoch(
+                state,
+                epoch,
+                obs_chunk,
+                perturbers=perturbers,
+                max_step=max_step,
+                use_kepler=use_kepler,
+                allow_unknown_site=True,
+                light_time_iters=light_time_iters,
+                full_physics=False,
+                include_refraction=False,
+            )
+        except Exception:
+            return np.full(len(obs_chunk) * 2, 1e6, dtype=float)
+        res: list[float] = []
+        for ra, dec, ob in zip(ra_pred, dec_pred, obs_chunk):
+            sigma = _sigma_arcsec(ob, None)
+            if sigma is None or sigma <= 0:
+                sigma = 1.0
+            dra, ddec = _tangent_residuals(float(ra), float(dec), ob)
+            res.append(dra / sigma)
+            res.append(ddec / sigma)
+        return np.array(res, dtype=float)
+
+    rho_lo, rho_hi = rho_bounds
+    rhodot_lo, rhodot_hi = rhodot_bounds
+    logrho0 = math.log(max(1.0, math.sqrt(rho_lo * rho_hi)))
+    rhodot0 = 0.0
+    if initial_guess is not None:
+        try:
+            rho0, rhodot0 = float(initial_guess[0]), float(initial_guess[1])
+            rho0 = min(max(rho0, rho_lo), rho_hi)
+            rhodot0 = min(max(rhodot0, rhodot_lo), rhodot_hi)
+            logrho0 = math.log(max(1e-12, rho0))
+        except Exception:
+            pass
+    try:
+        sol = least_squares(
+            _residual_vec,
+            x0=[logrho0, rhodot0],
+            bounds=([math.log(rho_lo), rhodot_lo], [math.log(rho_hi), rhodot_hi]),
+            max_nfev=max_nfev,
+            xtol=1e-6,
+            ftol=1e-6,
+        )
+        xhat = sol.x
+        try:
+            jtj = sol.jac.T @ sol.jac
+            cov = np.linalg.pinv(jtj)
+        except Exception:
+            cov = np.diag([1e-2, 1e-2])
+        return float(math.exp(xhat[0])), float(xhat[1]), cov
+    except Exception:
+        return float(math.exp(logrho0)), float(rhodot0), np.diag([1e-2, 1e-2])
+
+
+def _local_grid_posterior_refine(
+    obs_chunk: Sequence[Observation],
+    obs_ref: Observation,
+    epoch: Time,
+    s_seed: np.ndarray,
+    sdot_seed: np.ndarray,
+    rho_bounds: tuple[float, float],
+    rhodot_bounds: tuple[float, float],
+    perturbers: Sequence[str],
+    max_step: float,
+    light_time_iters: int,
+    *,
+    use_kepler: bool = True,
+    full_physics: bool = False,
+    rho_window_factor: float = 100.0,
+    n_logrho: int = 41,
+    n_rhodot: int = 9,
+    n_starts: int = 3,
+    initial_guess: tuple[float, float] | None = None,
+) -> tuple[float, float, np.ndarray]:
+    """Local grid + posterior-based refine for (rho, rhodot)."""
+    rho_lo, rho_hi = rho_bounds
+    rhodot_lo, rhodot_hi = rhodot_bounds
+    rho0 = math.sqrt(max(1.0, rho_lo * rho_hi))
+    rhodot0 = 0.0
+    if initial_guess is not None:
+        try:
+            rho0 = float(initial_guess[0])
+            rhodot0 = float(initial_guess[1])
+        except Exception:
+            pass
+    if not np.isfinite(rho0) or rho0 <= 0.0:
+        rho0 = math.sqrt(max(1.0, rho_lo * rho_hi))
+    rho_lo_local = max(rho_lo, rho0 / rho_window_factor)
+    rho_hi_local = min(rho_hi, rho0 * rho_window_factor)
+    if rho_lo_local >= rho_hi_local:
+        rho_lo_local = rho_lo
+        rho_hi_local = rho_hi
+
+    logrho_lo = math.log(max(1e-12, rho_lo_local))
+    logrho_hi = math.log(max(1e-12, rho_hi_local))
+    logrhos = np.linspace(logrho_lo, logrho_hi, max(2, int(n_logrho)))
+
+    rhodot_span = max(1.0, abs(rhodot0) * 2.0)
+    rd_lo = max(rhodot_lo, rhodot0 - rhodot_span)
+    rd_hi = min(rhodot_hi, rhodot0 + rhodot_span)
+    if rd_lo >= rd_hi:
+        rd_lo = rhodot_lo
+        rd_hi = rhodot_hi
+    rhodots = np.linspace(rd_lo, rd_hi, max(2, int(n_rhodot)))
+
+    best_ll = -1e300
+    best_trip = None
+    grid_scores = []
+    for lr in logrhos:
+        rho = float(math.exp(lr))
+        for rd in rhodots:
+            ll, _ = _full_logposterior_for_rho_rhodot(
+                rho,
+                float(rd),
+                obs_chunk,
+                obs_ref,
+                epoch,
+                s_seed,
+                sdot_seed,
+                perturbers,
+                max_step,
+                light_time_iters,
+                use_kepler=use_kepler,
+                full_physics=full_physics,
+            )
+            grid_scores.append((ll, rho, float(rd)))
+            if ll > best_ll:
+                best_ll = ll
+                best_trip = (rho, float(rd))
+
+    if best_trip is None:
+        return float(rho0), float(rhodot0), np.diag([1e-2, 1e-2])
+
+    grid_scores.sort(reverse=True, key=lambda x: x[0])
+    starts = [(rho, rd) for _, rho, rd in grid_scores[: max(1, int(n_starts))]]
+
+    def _neg_logpost(x: np.ndarray) -> float:
+        logrho = float(x[0])
+        rhodot = float(x[1])
+        rho = float(math.exp(logrho))
+        ll, _ = _full_logposterior_for_rho_rhodot(
+            rho,
+            rhodot,
+            obs_chunk,
+            obs_ref,
+            epoch,
+            s_seed,
+            sdot_seed,
+            perturbers,
+            max_step,
+            light_time_iters,
+            use_kepler=use_kepler,
+            full_physics=full_physics,
+        )
+        return -float(ll)
+
+    best_local_ll = best_ll
+    best_local = best_trip
+    b_lo = logrho_lo
+    b_hi = logrho_hi
+    for rho_s, rd_s in starts:
+        x0 = np.array([math.log(max(1e-12, float(rho_s))), float(rd_s)], dtype=float)
+        bounds = [(b_lo, b_hi), (rd_lo, rd_hi)]
+        try:
+            res = minimize(
+                _neg_logpost,
+                x0,
+                bounds=bounds,
+                method="L-BFGS-B",
+                options={"maxiter": 200},
+            )
+            if res.success:
+                rho_opt = float(math.exp(res.x[0]))
+                rd_opt = float(res.x[1])
+                ll_opt, _ = _full_logposterior_for_rho_rhodot(
+                    rho_opt,
+                    rd_opt,
+                    obs_chunk,
+                    obs_ref,
+                    epoch,
+                    s_seed,
+                    sdot_seed,
+                    perturbers,
+                    max_step,
+                    light_time_iters,
+                    use_kepler=use_kepler,
+                    full_physics=full_physics,
+                )
+                if ll_opt > best_local_ll:
+                    best_local_ll = ll_opt
+                    best_local = (rho_opt, rd_opt)
+        except Exception:
+            continue
+
+    rho_best, rd_best = best_local
+    tol = 1e-6
+    if (
+        abs(rho_best - rho_lo_local) / max(1.0, rho_best) < tol
+        or abs(rho_best - rho_hi_local) / max(1.0, rho_best) < tol
+    ):
+        rho_best, rd_best = best_trip
+    return float(rho_best), float(rd_best), np.diag([1e-2, 1e-2])
+
+
+def _laplace_refine_worker(
+    args: tuple[
+        np.ndarray,
+        Sequence[Observation],
+        Observation,
+        Time,
+        np.ndarray,
+        np.ndarray,
+        tuple[float, float],
+        tuple[float, float],
+        Sequence[str],
+        float,
+        int,
+        int,
+    ]
+) -> dict[str, object]:
+    """Worker wrapper for Laplace refinement (kepler surrogate)."""
+    (
+        parent_state,
+        obs_chunk,
+        obs_ref,
+        epoch,
+        s_seed,
+        sdot_seed,
+        rho_bounds,
+        rhodot_bounds,
+        perturbers,
+        max_step,
+        light_time_iters,
+        max_nfev,
+    ) = args
+    try:
+        rho0 = float(np.linalg.norm(parent_state[:3]))
+        rhodot0 = float(np.dot(parent_state[3:6], s_seed))
+    except Exception:
+        rho0 = math.sqrt(max(1.0, rho_bounds[0] * rho_bounds[1]))
+        rhodot0 = 0.0
+    try:
+        rho_hat, rhodot_hat, cov = _local_grid_posterior_refine(
+            obs_chunk,
+            obs_ref,
+            epoch,
+            s_seed,
+            sdot_seed,
+            rho_bounds,
+            rhodot_bounds,
+            perturbers,
+            max_step,
+            light_time_iters,
+            use_kepler=True,
+            full_physics=False,
+            initial_guess=(rho0, rhodot0),
+        )
+        return {"ok": True, "rho_hat": rho_hat, "rhodot_hat": rhodot_hat, "cov": cov}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _parallel_refine_parents(
+    parents: list[int],
+    states: np.ndarray,
+    obs_chunk: Sequence[Observation],
+    obs_ref: Observation,
+    epoch: Time,
+    s_seed: np.ndarray,
+    sdot_seed: np.ndarray,
+    rho_bounds: tuple[float, float],
+    rhodot_bounds: tuple[float, float],
+    perturbers: Sequence[str],
+    max_step: float,
+    light_time_iters: int,
+    max_nfev: int,
+    *,
+    max_workers: int | None = None,
+    timeout_s: float = 60.0,
+) -> dict[int, dict[str, object]]:
+    if not parents:
+        return {}
+    parent_states = _state_array_from_states(states)
+    if max_workers is None:
+        max_workers = max(1, min(len(parents), (os.cpu_count() or 1)))
+    ctx = mp.get_context("spawn")
+    results: dict[int, dict[str, object]] = {}
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=ctx,
+        initializer=_smc_worker_init,
+        initargs=(False,),
+    ) as executor:
+        futures = {}
+        for parent in parents:
+            args = (
+                parent_states[parent],
+                obs_chunk,
+                obs_ref,
+                epoch,
+                s_seed,
+                sdot_seed,
+                rho_bounds,
+                rhodot_bounds,
+                perturbers,
+                max_step,
+                light_time_iters,
+                max_nfev,
+            )
+            futures[executor.submit(_laplace_refine_worker, args)] = parent
+        for fut in futures:
+            parent = futures[fut]
+            try:
+                res = fut.result(timeout=timeout_s)
+            except Exception as exc:
+                res = {"ok": False, "error": str(exc)}
+            results[parent] = res
+    return results
+
+
+def _full_logposterior_for_rho_rhodot(
+    rho: float,
+    rhodot: float,
+    obs_chunk: Sequence[Observation],
+    obs_ref: Observation,
+    epoch: Time,
+    s_seed: np.ndarray,
+    sdot_seed: np.ndarray,
+    perturbers: Sequence[str],
+    max_step: float,
+    light_time_iters: int,
+    *,
+    use_kepler: bool,
+    full_physics: bool,
+) -> tuple[float, np.ndarray | None]:
+    """Compute log posterior for a candidate (rho, rhodot)."""
+    try:
+        state = build_state_from_ranging_s_sdot(
+            obs_ref, epoch, s_seed, sdot_seed, float(rho), float(rhodot)
+        )
+    except Exception:
+        return -1e300, None
+    ok, _, _, _, _ = _state_physicality(state)
+    if not ok:
+        return -1e300, None
+    try:
+        ra_pred, dec_pred = predict_radec_from_epoch(
+            state,
+            epoch,
+            obs_chunk,
+            perturbers=perturbers,
+            max_step=max_step,
+            use_kepler=use_kepler,
+            allow_unknown_site=True,
+            light_time_iters=light_time_iters,
+            full_physics=full_physics,
+            include_refraction=False,
+        )
+    except Exception:
+        return -1e300, state
+    ll = 0.0
+    for ra, dec, ob in zip(ra_pred, dec_pred, obs_chunk):
+        sigma = _sigma_arcsec(ob, None)
+        if sigma is None or sigma <= 0:
+            sigma = 1.0
+        dra, ddec = _tangent_residuals(float(ra), float(dec), ob)
+        ll += -0.5 * ((dra / sigma) ** 2 + (ddec / sigma) ** 2)
+    ll -= math.log(max(1e-12, float(rho)))
+    return float(ll), state
+
+
+def _rejuvenate_duplicates_laplace_mh(
+    states: np.ndarray,
+    resample_idx: np.ndarray,
+    obs_chunk: Sequence[Observation],
+    obs_ref: Observation,
+    epoch: Time,
+    s_seed: np.ndarray,
+    sdot_seed: np.ndarray,
+    rho_bounds: tuple[float, float],
+    rhodot_bounds: tuple[float, float],
+    perturbers: Sequence[str],
+    max_step: float,
+    light_time_iters: int,
+    rng: np.random.Generator,
+    *,
+    n_candidates: int = 3,
+    mh_steps: int = 2,
+    max_nfev: int = 200,
+    mh_logrho_scale: float = 0.02,
+    mh_rhodot_scale: float = 0.01,
+) -> np.ndarray:
+    """Rejuvenate resample duplicates using Laplace refine + short MH steps."""
+    from collections import Counter
+
+    if len(states) == 0:
+        return states
+
+    counts = Counter(resample_idx.tolist())
+    dup_parents = [p for p, c in counts.items() if c > 1]
+    if not dup_parents:
+        return states
+
+    parent_to_indices: dict[int, list[int]] = {}
+    for j, p in enumerate(resample_idx.tolist()):
+        parent_to_indices.setdefault(int(p), []).append(int(j))
+
+    refine_results = _parallel_refine_parents(
+        dup_parents,
+        states,
+        obs_chunk,
+        obs_ref,
+        epoch,
+        s_seed,
+        sdot_seed,
+        rho_bounds,
+        rhodot_bounds,
+        perturbers,
+        max_step,
+        light_time_iters,
+        max_nfev,
+        max_workers=min(len(dup_parents), max(1, (os.cpu_count() or 1))),
+        timeout_s=60.0,
+    )
+
+    for parent in dup_parents:
+        idxs = parent_to_indices.get(parent, [])
+        if len(idxs) <= 1:
+            continue
+        refine = refine_results.get(parent, {})
+        if not refine.get("ok"):
+            continue
+        rho_hat = float(refine.get("rho_hat", 0.0) or 0.0)
+        rhodot_hat = float(refine.get("rhodot_hat", 0.0) or 0.0)
+        cov = refine.get("cov", None)
+        mean = np.array([math.log(max(1e-12, rho_hat)), float(rhodot_hat)])
+        try:
+            cov = np.array(cov, dtype=float)
+            if cov.shape != (2, 2):
+                cov = np.diag([1e-2, 1e-2])
+        except Exception:
+            cov = np.diag([1e-2, 1e-2])
+
+        for ridx in idxs[1:]:
+            best_ll = -1e300
+            best_state = None
+            best_rho = rho_hat
+            best_rhodot = rhodot_hat
+            for _ in range(max(1, n_candidates)):
+                try:
+                    cand = rng.multivariate_normal(mean, cov * 0.2)
+                    logrho_c, rhodot_c = float(cand[0]), float(cand[1])
+                    rho_c = float(math.exp(logrho_c))
+                    ll_c, cand_state = _full_logposterior_for_rho_rhodot(
+                        rho_c,
+                        rhodot_c,
+                        obs_chunk,
+                        obs_ref,
+                        epoch,
+                        s_seed,
+                        sdot_seed,
+                        perturbers,
+                        max_step,
+                        light_time_iters,
+                        use_kepler=True,
+                        full_physics=False,
+                    )
+                    if ll_c > best_ll and cand_state is not None:
+                        best_ll = ll_c
+                        best_state = cand_state
+                        best_rho = rho_c
+                        best_rhodot = rhodot_c
+                except Exception:
+                    continue
+
+            if best_state is None:
+                continue
+            ok, _, _, _, _ = _state_physicality(best_state)
+            if not ok:
+                continue
+
+            cur_rho = best_rho
+            cur_rhodot = best_rhodot
+            cur_ll, _ = _full_logposterior_for_rho_rhodot(
+                cur_rho,
+                cur_rhodot,
+                obs_chunk,
+                obs_ref,
+                epoch,
+                s_seed,
+                sdot_seed,
+                perturbers,
+                max_step,
+                light_time_iters,
+                use_kepler=False,
+                full_physics=True,
+            )
+            for _ in range(max(1, mh_steps)):
+                cand_logrho = math.log(max(1e-12, cur_rho)) + rng.normal(
+                    scale=mh_logrho_scale
+                )
+                cand_rhodot = cur_rhodot + rng.normal(scale=mh_rhodot_scale)
+                cand_rho = float(math.exp(cand_logrho))
+                cand_ll, cand_state = _full_logposterior_for_rho_rhodot(
+                    cand_rho,
+                    cand_rhodot,
+                    obs_chunk,
+                    obs_ref,
+                    epoch,
+                    s_seed,
+                    sdot_seed,
+                    perturbers,
+                    max_step,
+                    light_time_iters,
+                    use_kepler=False,
+                    full_physics=True,
+                )
+                if cand_state is None:
+                    continue
+                ok, _, _, _, _ = _state_physicality(cand_state)
+                if not ok:
+                    continue
+                if math.log(rng.random()) < (cand_ll - cur_ll):
+                    cur_ll = cand_ll
+                    cur_rho = cand_rho
+                    cur_rhodot = cand_rhodot
+                    best_state = cand_state
+
+            try:
+                ok, _, _, _, _ = _state_physicality(best_state)
+                if not ok:
+                    continue
+                states[ridx] = np.asarray(best_state, dtype=float)
+            except Exception:
+                try:
+                    ok, _, _, _, _ = _state_physicality(best_state)
+                    if not ok:
+                        continue
+                    states[ridx] = np.array(best_state, dtype=float)
+                except Exception:
+                    pass
+
+    return states
+
+
+def sobol_logrho_rhodot(
+    n_points: int,
+    rho_min_km: float,
+    rho_max_km: float,
+    rhodot_min: float,
+    rhodot_max: float,
+    rng: np.random.Generator,
+    *,
+    scramble: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    lo = math.log10(max(1e-12, rho_min_km))
+    hi = math.log10(max(rho_min_km, rho_max_km))
+    if _HAS_SOBOL:
+        sampler = qmc.Sobol(d=2, scramble=scramble)
+        pts = sampler.random(n_points)
+        u1 = pts[:, 0]
+        u2 = pts[:, 1]
+    else:
+        u1 = np.linspace(0.0, 1.0, n_points, endpoint=False) + rng.random(n_points) / n_points
+        rng.shuffle(u1)
+        u2 = np.linspace(0.0, 1.0, n_points, endpoint=False) + rng.random(n_points) / n_points
+        rng.shuffle(u2)
+    logrho = lo + u1 * (hi - lo)
+    rho = (10.0 ** logrho).astype(float)
+    rhodot = (rhodot_min + u2 * (rhodot_max - rhodot_min)).astype(float)
+    return rho, rhodot
+
+
+def coarse_systematic_grid_scan(
+    obs_ref: Observation,
+    obs3: Sequence[Observation],
+    attrib_hat: Attributable,
+    epoch: Time,
+    *,
+    rho_min_km: float,
+    rho_max_km: float,
+    rhodot_min: float,
+    rhodot_max: float,
+    nx: int = 40,
+    ny: int = 40,
+    site_kappas: dict[str, float] | None = None,
+    s_seed: np.ndarray | None = None,
+    sdot_seed: np.ndarray | None = None,
+) -> list[tuple[float, float, float]]:
+    log_lo = math.log10(max(1e-12, rho_min_km))
+    log_hi = math.log10(max(rho_min_km, rho_max_km))
+    logrs = np.linspace(log_lo, log_hi, nx)
+    rds = np.linspace(rhodot_min, rhodot_max, ny)
+    candidates: list[tuple[float, float, float]] = []
+    for lr in logrs:
+        rho_km = 10.0 ** lr
+        for rd in rds:
+            try:
+                if s_seed is None or sdot_seed is None:
+                    state = build_state_from_ranging(obs_ref, epoch, attrib_hat, rho_km, float(rd))
+                else:
+                    state = build_state_from_ranging_s_sdot(
+                        obs_ref,
+                        epoch,
+                        s_seed,
+                        sdot_seed,
+                        rho_km,
+                        float(rd),
+                    )
+                ra_pred, dec_pred = predict_radec_from_epoch(
+                    state,
+                    epoch,
+                    obs3,
+                    perturbers=("earth", "mars", "jupiter"),
+                    max_step=3600.0,
+                    use_kepler=True,
+                    allow_unknown_site=True,
+                    light_time_iters=1,
+                    full_physics=False,
+                )
+                score = 0.0
+                for ra, dec, ob in zip(ra_pred, dec_pred, obs3):
+                    sigma = _sigma_arcsec(ob, site_kappas)
+                    dra, ddec = _tangent_residuals(float(ra), float(dec), ob)
+                    score -= (dra / sigma) ** 2 + (ddec / sigma) ** 2
+                candidates.append((float(rho_km), float(rd), float(score)))
+            except Exception:
+                continue
+    if not candidates:
+        return []
+    candidates.sort(key=lambda x: -x[2])
+    keep = max(8, min(64, int(len(candidates) * 0.01)))
+    return candidates[:keep]
+
+
+def _photometry_loglike_marginal(
+    sum_inv_var: np.ndarray,
+    sum_y_inv_var: np.ndarray,
+    sum_y2_inv_var: np.ndarray,
+    n: int,
+    sigma_h: float,
+    logdet_v: float,
+) -> np.ndarray:
+    denom = 1.0 / (sigma_h**2) + sum_inv_var
+    quad = sum_y2_inv_var - (sum_y_inv_var**2) / denom
+    logterm = np.log1p((sigma_h**2) * sum_inv_var)
+    return -0.5 * (quad + logdet_v + logterm + n * np.log(2.0 * np.pi))
+
+
+def _photometry_accumulate(
+    states: np.ndarray,
+    ob: Observation,
+    obs_helio: np.ndarray,
+    mu_h: float,
+    g: float,
+    sum_inv_var: np.ndarray,
+    sum_y_inv_var: np.ndarray,
+    sum_y2_inv_var: np.ndarray,
+) -> None:
+    if ob.mag is None:
+        return
+    sigma_mag = float(ob.sigma_mag) if ob.sigma_mag is not None else 0.15
+    r_vec = states[:, :3]
+    r_norm = np.linalg.norm(r_vec, axis=1)
+    topo_vec = r_vec - obs_helio
+    topo_norm = np.linalg.norm(topo_vec, axis=1)
+    denom = np.maximum(r_norm * topo_norm, 1e-12)
+    cos_phase = np.sum(r_vec * (-topo_vec), axis=1) / denom
+    cos_phase = np.clip(cos_phase, -1.0, 1.0)
+    phase = np.arccos(cos_phase)
+    phi = np.array([max(_phase_func_hg(float(p), g), 1e-12) for p in phase], dtype=float)
+    r_au = r_norm / AU_KM
+    delta_au = topo_norm / AU_KM
+    b_pred = 5.0 * np.log10(np.maximum(r_au * delta_au, 1e-12)) - 2.5 * np.log10(phi)
+    y = float(ob.mag) - b_pred - mu_h
+    inv_var = 1.0 / max(1e-12, sigma_mag**2)
+    sum_inv_var += inv_var
+    sum_y_inv_var += y * inv_var
+    sum_y2_inv_var += (y * y) * inv_var
+
+
+def sequential_fit_replicas(
+    observations: Sequence[Observation],
+    *,
+    n_particles: int = 2000,
+    rho_min_au: float = 1e-5,
+    rho_max_au: float = 100.0,
+    rhodot_max_km_s: float = 120.0,
+    v_max_km_s: float = 120.0,
+    conditioned_frac: float = 0.3,
+    seed_conditioned_only: bool = False,
+    laplace_rejuvenation: bool = True,
+    laplace_obs_window: int = 3,
+    laplace_n_candidates: int = 3,
+    laplace_mh_steps: int = 2,
+    laplace_max_nfev: int = 200,
+    laplace_mh_logrho_scale: float = 0.02,
+    laplace_mh_rhodot_scale: float = 0.01,
+    perturbers: Sequence[str] = ("earth", "mars", "jupiter"),
+    max_step: float = 3600.0,
+    use_kepler: bool = True,
+    ess_threshold: float = 0.3,
+    rejuvenation_scale: float = 0.05,
+    light_time_iters: int = 2,
+    allow_unknown_site: bool = True,
+    full_physics_final: bool = True,
+    mu_h: float = 20.0,
+    sigma_h: float = 3.0,
+    g: float = 0.15,
+    epsilon_ast_arcsec: float = 0.1,
+    epsilon_ast_scale: float = 0.0,
+    epsilon_ast_floor_arcsec: float = 0.01,
+    epsilon_ast_ceiling_arcsec: float | None = None,
+    shadow_diagnostics: bool = True,
+    diagnostics_path: str | None = None,
+    auto_grow: bool = False,
+    auto_n_max: int = 50000,
+    auto_n_add: int = 3000,
+    auto_ess_target: float = 500.0,
+    auto_psis_khat: float = 0.7,
+    auto_logrho_bins: int = 8,
+    auto_min_per_decade: int = 20,
+    auto_w_min_mode: float = 0.001,
+    auto_min_per_mode: int = 20,
+    workers: int | None = None,
+    chunk_size: int = 512,
+    target_chunks: int = 1000,
+    site_kappas: dict[str, float] | None = None,
+    seed: int | None = None,
+    admissible_bound: bool = True,
+    admissible_q_min_au: float | None = None,
+    admissible_q_max_au: float | None = None,
+    log_every_obs: int = 1,
+    verbose: bool = True,
+    checkpoint_path: str | None = None,
+    resume: bool = False,
+    checkpoint_every_obs: int = 1,
+    smc_iter_dir: str | None = None,
+    smc_iter_every_obs: int = 1,
+    halt_before_seed_score: bool = False,
+    seed_score_limit: int | None = None,
+    seed_score_log_every: int = 10,
+    mp_start_method: str | None = None,
+    worker_faulthandler: bool = False,
+) -> ReplicaCloud:
+    """Fit an SMC replica cloud from observations and return the final weighted states."""
+    if len(observations) < 3:
+        raise ValueError("Need at least 3 observations to seed SMC.")
+
+    if os.environ.get("NEOTUBE_FAULTHANDLER_MAIN", "0") == "1":
+        faulthandler.enable(all_threads=True, file=sys.stderr)
+
+    if os.environ.get("NEOTUBE_LIMIT_NATIVE_THREADS", "0") == "1":
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+    if smc_iter_dir is None and checkpoint_path:
+        ckpt_path = Path(checkpoint_path).expanduser().resolve()
+        smc_iter_dir = str(ckpt_path.with_name(f"{ckpt_path.stem}_iters"))
+
+    t_start = time.perf_counter()
+
+    def _log(msg: str) -> None:
+        if not verbose:
+            return
+        elapsed = time.perf_counter() - t_start
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[fit_smc {stamp} +{elapsed:8.1f}s] {msg}", flush=True)
+
+    def _save_checkpoint(
+        *,
+        states: np.ndarray,
+        weights: np.ndarray,
+        next_obs_index: int,
+        stage: str,
+        metadata: dict[str, object] | None = None,
+        error: str | None = None,
+        checkpoint_path_override: Path | None = None,
+    ) -> None:
+        if not checkpoint_path and checkpoint_path_override is None:
+            return
+        if checkpoint_path_override is not None:
+            ckpt_path = Path(checkpoint_path_override).expanduser().resolve()
+        else:
+            ckpt_path = Path(checkpoint_path).expanduser().resolve()
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "next_obs_index": int(next_obs_index),
+            "stage": stage,
+            "epoch_isot": epoch.isot,
+            "metadata": json.dumps(metadata or {}, sort_keys=True),
+        }
+        if error:
+            payload["error"] = str(error)
+        rng_state = rng.bit_generator.state
+        np.savez_compressed(
+            ckpt_path,
+            states=states,
+            weights=weights,
+            rng_state=np.array([rng_state], dtype=object),
+            **payload,
+        )
+
+    def _dump_smc_iter(
+        ob_idx: int,
+        states: np.ndarray,
+        weights: np.ndarray,
+        loglikes: np.ndarray,
+        obs_cache_single: ObsCache,
+    ) -> None:
+        if not smc_iter_dir:
+            return
+        dump_dir = Path(smc_iter_dir).expanduser().resolve()
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        out = dump_dir / f"smc_iter_{ob_idx:04d}.npz"
+        obs_bary = obs_cache_single.earth_bary_km[0] + obs_cache_single.site_pos_km[0]
+        obs_bary_vel = obs_cache_single.earth_bary_vel_km_s[0] + obs_cache_single.site_vel_km_s[0]
+        rel_pos = states[:, :3] - obs_bary[None, :]
+        rel_vel = states[:, 3:] - obs_bary_vel[None, :]
+        rho = np.linalg.norm(rel_pos, axis=1)
+        rho_safe = np.where(rho > 0.0, rho, np.nan)
+        rhodot = np.sum(rel_vel * rel_pos, axis=1) / rho_safe
+        ess = 1.0 / np.sum(weights**2)
+        unique_states = -1
+        if len(states) <= 50000:
+            unique_states = np.unique(np.round(states, 12), axis=0).shape[0]
+        summary = dict(
+            iter=int(ob_idx),
+            t=time.time(),
+            ess=float(ess),
+            mean_rho=float(np.nanmean(rho)),
+            std_rho=float(np.nanstd(rho)),
+            mean_rhodot=float(np.nanmean(rhodot)),
+            std_rhodot=float(np.nanstd(rhodot)),
+            n_unique_states=int(unique_states),
+            min_loglike=float(np.nanmin(loglikes)) if loglikes.size else float("nan"),
+            max_loglike=float(np.nanmax(loglikes)) if loglikes.size else float("nan"),
+        )
+        np.savez_compressed(out, states=states, weights=weights, summary=summary)
+
+    def _debug_proposal_stats(states: np.ndarray, name: str = "pre", n_print: int = 5) -> None:
+        if states.size == 0:
+            _log("[proposal debug] {}: empty states".format(name))
+            return
+        stds = np.std(states, axis=0)
+        uniques = np.unique(np.round(states, 12), axis=0).shape[0]
+        _log(
+            "[proposal debug] {}: std per-dim (first 6) {} unique={}/{}".format(
+                name, np.array2string(stds[:6], precision=6), uniques, len(states)
+            )
+        )
+        sample_rows = states[:n_print]
+        _log("[proposal debug] {}: sample rows:\n{}".format(name, sample_rows))
+
+    def _percentiles(arr: np.ndarray) -> np.ndarray:
+        return np.percentile(arr, [0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100])
+
+    def _summarize_loglikes_and_weights(
+        loglikes: np.ndarray, *, label: str
+    ) -> tuple[dict[str, object], np.ndarray]:
+        ll = np.asarray(loglikes, dtype=float)
+        finite_mask = np.isfinite(ll)
+        n_finite = int(np.sum(finite_mask))
+        if n_finite == 0:
+            _log(f"[ll diag {label}] finite loglikes=0/{len(ll)}")
+            return {"finite": 0}, np.zeros_like(ll)
+        ll_finite = ll[finite_mask]
+        ll_max = float(np.nanmax(ll_finite))
+        denom = ll_max + float(np.log(np.sum(np.exp(ll_finite - ll_max))))
+        weights = np.zeros_like(ll, dtype=float)
+        weights[finite_mask] = np.exp(ll_finite - denom)
+        pct_ll = _percentiles(ll_finite)
+        pct_w = _percentiles(weights[finite_mask])
+        sorted_idx = np.argsort(-ll_finite)
+        topk = min(10, len(sorted_idx))
+        top_idx = sorted_idx[:topk]
+        top_ll = ll_finite[top_idx]
+        top_w = weights[finite_mask][top_idx]
+        top_mass = float(np.sum(top_w))
+        ll_range = float(pct_ll[-1] - pct_ll[5])
+        _log(
+            "[ll diag {}] ll min/med/max: {:.3f}/{:.3f}/{:.3f} range(max-med)={:.3f} "
+            "topk mass={:.6f} finite={}/{}".format(
+                label,
+                float(pct_ll[0]),
+                float(pct_ll[5]),
+                float(pct_ll[-1]),
+                ll_range,
+                top_mass,
+                n_finite,
+                len(ll),
+            )
+        )
+        return (
+            {
+                "ll_min_max": (float(pct_ll[0]), float(pct_ll[-1])),
+                "ll_percentiles": pct_ll.tolist(),
+                "w_percentiles": pct_w.tolist(),
+                "topk_idx": top_idx.tolist(),
+                "topk_ll": top_ll.tolist(),
+                "topk_weights": top_w.tolist(),
+                "topk_mass": top_mass,
+                "ll_range": ll_range,
+                "finite": n_finite,
+            },
+            weights,
+        )
+
+    def _residual_stats(ra_pred: np.ndarray, dec_pred: np.ndarray, ob: Observation) -> dict[str, object]:
+        ra_arr = np.asarray(ra_pred, dtype=float)
+        dec_arr = np.asarray(dec_pred, dtype=float)
+        delta_ra = ((ob.ra_deg - ra_arr + 180.0) % 360.0) - 180.0
+        dra_arcsec = delta_ra * np.cos(np.radians(dec_arr)) * 3600.0
+        ddec_arcsec = (ob.dec_deg - dec_arr) * 3600.0
+        ang_err = np.sqrt(dra_arcsec * dra_arcsec + ddec_arcsec * ddec_arcsec)
+        ang_pct = _percentiles(ang_err)
+        return {
+            "ang_arcsec_min": float(np.nanmin(ang_err)),
+            "ang_arcsec_med": float(np.nanmedian(ang_err)),
+            "ang_arcsec_mean": float(np.nanmean(ang_err)),
+            "ang_arcsec_max": float(np.nanmax(ang_err)),
+            "ang_percentiles": ang_pct.tolist(),
+        }
+
+    def _load_checkpoint() -> tuple[np.ndarray, np.ndarray, int, str, dict[str, object] | None]:
+        if not checkpoint_path:
+            raise RuntimeError("checkpoint_path is required for resume.")
+        ckpt_path = Path(checkpoint_path).expanduser().resolve()
+        data = np.load(ckpt_path, allow_pickle=True)
+        states = np.array(data["states"], dtype=float)
+        try:
+            global _CKPT_STATES
+            _CKPT_STATES = np.asarray(states, dtype=float).copy()
+        except Exception:
+            _CKPT_STATES = np.array(states, copy=True)
+        weights = np.array(data["weights"], dtype=float)
+        next_obs_index = int(data["next_obs_index"])
+        stage = str(data["stage"])
+        epoch_isot = str(data["epoch_isot"])
+        rng_state = data["rng_state"].item()
+        rng.bit_generator.state = rng_state
+        meta_raw = str(data.get("metadata", "{}"))
+        meta = json.loads(meta_raw) if meta_raw else {}
+        return states, weights, next_obs_index, stage, meta, epoch_isot
+
+    obs = sorted(observations, key=lambda ob: ob.time)
+    obs3 = obs[:3]
+    epoch = obs3[1].time
+    rng = make_rng(seed)
+    assert hasattr(rng, "integers"), "rng must be a Generator from np.random.default_rng"
+    ladder = _q1_only_ladder(default_propagation_ladder(max_step=max_step))
+    if not use_kepler:
+        ladder = [cfg for cfg in ladder if cfg.model != "kepler"]
+    worker_count = max(1, int(workers or 1))
+    chunk_size = max(1, int(chunk_size))
+    log_every_obs = max(1, int(log_every_obs))
+    target_chunks = max(1, int(target_chunks))
+    smc_iter_every_obs = max(1, int(smc_iter_every_obs))
+    debug_proposals = os.environ.get("NEOTUBE_SMC_DEBUG_PROPOSALS") == "1"
+    debug_likelihood = os.environ.get("NEOTUBE_SMC_DEBUG_LIKELIHOOD") == "1"
+    use_nullspace_rejuv = os.environ.get("NEOTUBE_SMC_NULLSPACE_REJUV") == "1"
+
+    _log(
+        "start n_particles={} obs={} use_kepler={} full_physics_final={} auto_grow={} "
+        "workers={} chunk_size={}".format(
+            n_particles,
+            len(obs),
+            bool(use_kepler),
+            bool(full_physics_final),
+            bool(auto_grow),
+            worker_count,
+            chunk_size,
+        )
+    )
+
+    executor: Executor | None = None
+    if worker_count > 1:
+        try:
+            _set_native_thread_env()
+            mp_ctx = None
+            if mp_start_method:
+                mp_ctx = mp.get_context(mp_start_method)
+                _log(f"creating ProcessPoolExecutor mp_start_method={mp_start_method}")
+            else:
+                _log("creating ProcessPoolExecutor (using default mp start method)")
+
+            if mp_ctx is not None:
+                executor = ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    mp_context=mp_ctx,
+                    initializer=_smc_worker_init,
+                    initargs=(worker_faulthandler,),
+                )
+            else:
+                executor = ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    initializer=_smc_worker_init,
+                    initargs=(worker_faulthandler,),
+                )
+        except Exception as exc:
+            _log(
+                "ProcessPoolExecutor creation failed ({}); falling back to ThreadPoolExecutor".format(
+                    exc
+                )
+            )
+            executor = ThreadPoolExecutor(max_workers=worker_count)
+
+    def _shutdown_executor() -> None:
+        if executor is not None:
+            executor.shutdown(wait=True)
+
+    checkpoint_every_obs = max(1, int(checkpoint_every_obs))
+
+    def _choose_chunk_size(n: int, base_chunk: int, target_chunks: int) -> int:
+        if n <= 0:
+            return max(1, base_chunk)
+        desired = int(math.ceil(n / max(1, target_chunks)))
+        desired = max(1, desired)
+        if base_chunk <= 0:
+            return desired
+        # Keep chunks at least as large as the user-provided base to avoid tiny tasks.
+        return max(base_chunk, desired)
+
+    def _score_chunks(
+        pool_states: np.ndarray,
+        obs_chunk: Sequence[Observation],
+        eps_arcsec: float,
+        executor: Executor | None,
+    ) -> np.ndarray:
+        ctx = {
+            "epoch": epoch,
+            "obs_chunk": obs_chunk,
+            "eps_arcsec": eps_arcsec,
+            "allow_unknown_site": allow_unknown_site,
+            "ladder": ladder,
+            "site_kappas": site_kappas,
+        }
+        if executor is None or len(pool_states) <= chunk_size:
+            return _score_states_contract_chunk_args((pool_states, ctx))
+        use_chunk = _choose_chunk_size(len(pool_states), chunk_size, target_chunks)
+        tasks = []
+        for start in range(0, len(pool_states), use_chunk):
+            tasks.append((pool_states[start : start + use_chunk], ctx))
+        out = np.empty(len(pool_states), dtype=float)
+        for offset, result in zip(
+            range(0, len(pool_states), use_chunk),
+            executor.map(_score_states_contract_chunk_args, tasks),
+        ):
+            out[offset : offset + len(result)] = result
+        return out
+
+    def _score_parallel(
+        pool_states: np.ndarray,
+        obs_chunk: Sequence[Observation],
+        eps_arcsec: float,
+        executor: Executor | None,
+    ) -> np.ndarray:
+        return _score_chunks(pool_states, obs_chunk, eps_arcsec, executor)
+
+    def _score_full_parallel(
+        pool_states: np.ndarray,
+        obs_cache_all: ObsCache,
+        executor: Executor | None,
+    ) -> np.ndarray:
+        ctx = {
+            "epoch": epoch,
+            "obs": obs,
+            "perturbers": perturbers,
+            "max_step": max_step,
+            "use_kepler": use_kepler,
+            "allow_unknown_site": allow_unknown_site,
+            "light_time_iters": light_time_iters,
+            "site_kappas": site_kappas,
+            "obs_cache": obs_cache_all,
+        }
+        if executor is None or len(pool_states) <= chunk_size:
+            return _score_states_full_chunk_args((pool_states, ctx))
+        use_chunk = _choose_chunk_size(len(pool_states), chunk_size, target_chunks)
+        tasks = []
+        for start in range(0, len(pool_states), use_chunk):
+            tasks.append((pool_states[start : start + use_chunk], ctx))
+        out = np.empty(len(pool_states), dtype=float)
+        for offset, result in zip(
+            range(0, len(pool_states), use_chunk),
+            executor.map(_score_states_full_chunk_args, tasks),
+        ):
+            out[offset : offset + len(result)] = result
+        return out
+
+    def _predict_contract_parallel(
+        pool_states: np.ndarray,
+        obs_chunk: Sequence[Observation],
+        eps_arcsec: float,
+        executor: Executor | None,
+        *,
+        log_progress: bool = False,
+        log_every: int = 10,
+        log_label: str = "predict",
+        obs_cache: ObsCache | None = None,
+        obs_times_jd: np.ndarray | None = None,
+        sun_bary_km: np.ndarray | None = None,
+        use_cached_ephem: bool = False,
+        seed_configs: Sequence[PropagationConfig] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ctx = {
+            "epoch": epoch,
+            "obs_chunk": obs_chunk,
+            "eps_arcsec": eps_arcsec,
+            "allow_unknown_site": allow_unknown_site,
+            "ladder": seed_configs if seed_configs is not None else ladder,
+            "obs_cache": obs_cache,
+            "obs_times_jd": obs_times_jd,
+            "sun_bary_km": sun_bary_km,
+            "use_cached_ephem": use_cached_ephem,
+        }
+        if executor is None or len(pool_states) <= chunk_size:
+            return _predict_contract_chunk_args((pool_states, ctx))
+        use_chunk = _choose_chunk_size(len(pool_states), chunk_size, target_chunks)
+        tasks = []
+        for start in range(0, len(pool_states), use_chunk):
+            tasks.append((pool_states[start : start + use_chunk], ctx))
+        ra_parts = []
+        dec_parts = []
+        lvl_parts = []
+        delta_parts = []
+        total = len(tasks)
+        for idx, result in enumerate(executor.map(_predict_contract_chunk_args, tasks), start=1):
+            ra, dec, levels, deltas = result
+            ra_parts.append(ra)
+            dec_parts.append(dec)
+            lvl_parts.append(levels)
+            delta_parts.append(deltas)
+            if log_progress and (idx % max(1, log_every) == 0 or idx == total):
+                _log(f"{log_label} chunks {idx}/{total}")
+        return (
+            np.vstack(ra_parts),
+            np.vstack(dec_parts),
+            np.concatenate(lvl_parts),
+            np.concatenate(delta_parts),
+        )
+
+    def _score_seed(states: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        score_states = states
+        if seed_score_limit is not None and seed_score_limit > 0:
+            score_states = states[: seed_score_limit]
+        eps_seed = min(
+            _epsilon_arcsec_for_obs(
+                ob,
+                epsilon_ast_arcsec=epsilon_ast_arcsec,
+                epsilon_ast_scale=epsilon_ast_scale,
+                epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
+                epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+            )
+            for ob in obs3
+        )
+        try:
+            ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+                score_states,
+                obs3,
+                eps_seed,
+                executor,
+                log_progress=True,
+                log_every=seed_score_log_every,
+                log_label="seed score",
+                obs_cache=seed_obs_cache,
+                obs_times_jd=seed_obs_times_jd,
+                sun_bary_km=sun_bary_seed,
+                use_cached_ephem=seed_use_cached,
+                seed_configs=seed_configs,
+            )
+        except Exception as exc:
+            _log(f"seed scoring failed: {exc}")
+            _log(traceback.format_exc())
+            _save_checkpoint(
+                states=score_states,
+                weights=np.ones(len(score_states), dtype=float) / max(1, len(score_states)),
+                next_obs_index=3,
+                stage="seed_score_error",
+                error=str(exc),
+            )
+            raise
+        loglikes = np.zeros(len(score_states), dtype=float)
+        for idx, ob in enumerate(obs3):
+            sigma = _sigma_arcsec(ob, site_kappas)
+            for i in range(len(score_states)):
+                loglikes[i] += _gaussian_loglike(
+                    float(ra_pred[i, idx]), float(dec_pred[i, idx]), ob, sigma
+                )
+        loglikes = _sanitize_loglikes(loglikes, label="seed", log_fn=_log)
+        loglikes -= float(np.max(loglikes))
+        weights = np.exp(loglikes)
+        weights = weights / np.sum(weights)
+        ess = 1.0 / np.sum(weights**2)
+        _log(
+            "seed scoring done ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f} (n={})".format(
+                ess,
+                int(np.max(used_level)) if len(used_level) else 0,
+                float(np.max(max_delta)) if len(max_delta) else 0.0,
+                len(score_states),
+            )
+        )
+        if len(score_states) < len(states):
+            raise SystemExit(
+                "Seed scoring sample complete (n={}); set --fit-smc-seed-score-limit=0 to score full set.".format(
+                    len(score_states)
+                )
+            )
+        _save_checkpoint(
+            states=states,
+            weights=weights,
+            next_obs_index=3,
+            stage="seeded",
+        )
+        return weights, used_level, max_delta
+
+    if resume:
+        states, weights, next_obs_index, stage, ckpt_meta, epoch_isot = _load_checkpoint()
+        epoch = Time(epoch_isot)
+        weights = weights / np.sum(weights)
+        try:
+            if _CKPT_STATES is not None:
+                ckpt_arr = np.asarray(_CKPT_STATES, dtype=float)
+                cur_arr = np.asarray(states, dtype=float)
+                if ckpt_arr.shape == cur_arr.shape:
+                    if not np.allclose(cur_arr, ckpt_arr, rtol=1e-8, atol=1e-6):
+                        _log(
+                            "[fit_smc] WARNING: in-memory states differ from checkpoint states; restoring checkpoint states."
+                        )
+                        try:
+                            diffs = np.linalg.norm(
+                                cur_arr[:, :3] - ckpt_arr[:, :3], axis=1
+                            )
+                            idxs = np.argsort(diffs)[-10:][::-1]
+                            _log(
+                                "[fit_smc] state diffs (top 10 indices, km): {}".format(
+                                    [(int(i), float(diffs[i])) for i in idxs]
+                                )
+                            )
+                            diag_dir = (
+                                Path(checkpoint_path).expanduser().resolve().parent
+                                / "smc_debug"
+                            )
+                            diag_dir.mkdir(parents=True, exist_ok=True)
+                            diag_path = diag_dir / "resume_state_mismatch.npz"
+                            np.savez_compressed(
+                                diag_path,
+                                ckpt_states=ckpt_arr,
+                                current_states=cur_arr,
+                                mismatch_idx=idxs,
+                            )
+                            _log(
+                                "[fit_smc] resume-state mismatch diagnostics written to {}".format(
+                                    diag_path
+                                )
+                            )
+                        except Exception as exc:
+                            _log(
+                                "[fit_smc] failed to write resume-state diagnostics: {}".format(
+                                    exc
+                                )
+                            )
+                        states = ckpt_arr.copy()
+                else:
+                    _log(
+                        "[fit_smc] WARNING: checkpoint states shape differs from in-memory states; restoring checkpoint states."
+                    )
+                    states = ckpt_arr.copy()
+        except Exception as exc:
+            _log("[fit_smc] resume-state check failed: {}".format(exc))
+        _log(
+            "resumed from checkpoint stage={} next_obs_index={} n={}".format(
+                stage, next_obs_index, len(states)
+            )
+        )
+        if stage == "final":
+            metadata = ckpt_meta if ckpt_meta is not None else {}
+            metadata["resumed_from_checkpoint"] = str(checkpoint_path)
+            metadata["checkpoint_stage"] = stage
+            _shutdown_executor()
+            return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)
+        if stage == "pre_seed_score":
+            _log("resuming seed scoring from checkpoint")
+            weights, used_level, max_delta = _score_seed(states)
+            next_obs_index = 3
+            _log(
+                "seed scoring complete; starting assimilation from obs index {}".format(
+                    next_obs_index
+                )
+            )
+    else:
+        next_obs_index = 3
+
+    seed_obs_cache = _prepare_obs_cache(obs3, allow_unknown_site=allow_unknown_site)
+    seed_obs_times_jd = np.asarray(seed_obs_cache.times_tdb.jd, dtype=float)
+    sun_bary_seed, _ = _body_posvel_km("sun", seed_obs_cache.times_tdb)
+    seed_use_cached = worker_count > 1
+    seed_configs = ladder
+    if seed_use_cached:
+        seed_configs = [cfg for cfg in ladder if cfg.model == "kepler"]
+        if not seed_configs:
+            seed_use_cached = False
+            seed_configs = ladder
+        elif not use_kepler:
+            _log("seed scoring uses cached Kepler config for stability (override --no-kepler).")
+
+    # Use the legacy vector fit to keep geometry consistent with the original pipeline.
+    attrib, attrib_cov, s_seed, sdot_seed = build_attributable_vector_fit(
+        obs3,
+        epoch,
+        robust=False,
+        return_cov=True,
+        return_s_sdot=True,
+        site_kappas=site_kappas,
+    )
+    sigma_arcsec = float(np.median([o.sigma_arcsec for o in obs3]))
+    sigma_deg = sigma_arcsec / 3600.0
+    dt_days = max(1e-6, float((obs3[-1].time - obs3[0].time).to_value("day")))
+    sigma_rate_deg_per_day = sigma_deg / dt_days
+    attrib_mean = np.array(
+        [attrib.ra_deg, attrib.dec_deg, attrib.ra_dot_deg_per_day, attrib.dec_dot_deg_per_day],
+        dtype=float,
+    )
+    if attrib_cov is None or not np.all(np.isfinite(attrib_cov)) or not np.any(attrib_cov):
+        attrib_cov = np.diag(
+            [
+                sigma_deg**2,
+                sigma_deg**2,
+                sigma_rate_deg_per_day**2,
+                sigma_rate_deg_per_day**2,
+            ]
+        )
+    obs_ref = _ranging_reference_observation(obs3, epoch)
+
+    used_level = np.array([], dtype=int)
+    max_delta = np.array([], dtype=float)
+
+    if not resume:
+        seed_states: list[np.ndarray] = []
+        if not seed_conditioned_only:
+            grid_hits = coarse_systematic_grid_scan(
+                obs_ref,
+                obs3,
+                attrib,
+                epoch,
+                rho_min_km=rho_min_au * AU_KM,
+                rho_max_km=rho_max_au * AU_KM,
+                rhodot_min=-float(rhodot_max_km_s),
+                rhodot_max=float(rhodot_max_km_s),
+                nx=40,
+                ny=40,
+                site_kappas=site_kappas,
+                s_seed=s_seed,
+                sdot_seed=sdot_seed,
+            )
+            if grid_hits:
+                grid_local = 10
+                max_grid = max(0, n_particles // 2)
+                if len(grid_hits) * grid_local > max_grid:
+                    grid_hits = grid_hits[: max(1, max_grid // grid_local)]
+                for rho_km, rhodot_km_s, _ in grid_hits:
+                    for _ in range(grid_local):
+                        a = rng.multivariate_normal(attrib_mean, attrib_cov)
+                        attrib_i = Attributable(
+                            ra_deg=float(a[0]),
+                            dec_deg=float(a[1]),
+                            ra_dot_deg_per_day=float(a[2]),
+                            dec_dot_deg_per_day=float(a[3]),
+                        )
+                        s_i, sdot_i = s_and_sdot(attrib_i)
+                        rho_local = float(rho_km) * (1.0 + rng.normal(scale=0.01))
+                        rhodot_local = float(rhodot_km_s) + rng.normal(
+                            scale=max(0.1, 0.05 * abs(rhodot_km_s))
+                        )
+                        try:
+                            state = build_state_from_ranging_s_sdot(
+                                obs_ref, epoch, s_i, sdot_i, rho_local, rhodot_local
+                            )
+                            seed_states.append(state)
+                        except Exception:
+                            continue
+
+        states_list: list[np.ndarray] = []
+        valid_mask: list[bool] = []
+
+        def _append_state(state: np.ndarray) -> None:
+            states_list.append(state)
+            is_valid = True
+            try:
+                if np.linalg.norm(state[3:]) > v_max_km_s:
+                    is_valid = False
+                if not _admissible_ok(
+                    state,
+                    q_min_au=admissible_q_min_au,
+                    q_max_au=admissible_q_max_au,
+                    bound_only=admissible_bound,
+                ):
+                    is_valid = False
+            except Exception:
+                is_valid = False
+            valid_mask.append(is_valid)
+
+        for state in seed_states:
+            _append_state(state)
+
+        n_remaining = max(0, n_particles - len(states_list))
+        if seed_conditioned_only:
+            cond_frac = 1.0
+        else:
+            cond_frac = max(0.0, min(1.0, float(conditioned_frac)))
+        n_cond = int(round(n_remaining * cond_frac))
+        conditioned_states = _propose_conditioned_on_obs(
+            obs_ref,
+            epoch,
+            s_seed,
+            sdot_seed,
+            n_cond,
+            rho_min_au * AU_KM,
+            rho_max_au * AU_KM,
+            float(rhodot_max_km_s),
+            rng,
+        )
+        if n_cond > 0:
+            _log(
+                "conditioned proposals requested={} accepted={}".format(
+                    n_cond, int(len(conditioned_states))
+                )
+            )
+        if len(conditioned_states) > 0:
+            for state in conditioned_states:
+                _append_state(state)
+
+        if seed_conditioned_only:
+            parent_states = conditioned_states
+            if parent_states is None or len(parent_states) == 0:
+                _log("seed_conditioned_only requested but no conditioned proposals available")
+            else:
+                parents = list(range(len(parent_states)))
+                refine_obs = obs if len(obs) > len(obs3) else obs3
+                refine_results = _parallel_refine_parents(
+                    parents,
+                    parent_states,
+                    refine_obs,
+                    obs_ref,
+                    epoch,
+                    s_seed,
+                    sdot_seed,
+                    (rho_min_au * AU_KM, rho_max_au * AU_KM),
+                    (-float(rhodot_max_km_s), float(rhodot_max_km_s)),
+                    perturbers,
+                    max_step,
+                    light_time_iters,
+                    laplace_max_nfev,
+                    max_workers=min(len(parents), max(1, (os.cpu_count() or 1))),
+                    timeout_s=60.0,
+                )
+
+                refined_states: list[np.ndarray] = []
+                diag_ok = []
+                diag_rho = []
+                diag_rhodot = []
+                diag_parent_rho = []
+                for st in parent_states:
+                    try:
+                        _, rho_km, _ = _attrib_rho_from_state(st, obs_ref, epoch)
+                        diag_parent_rho.append(float(rho_km))
+                    except Exception:
+                        diag_parent_rho.append(float("nan"))
+                for p in parents:
+                    res = refine_results.get(p, {})
+                    if res.get("ok"):
+                        rho_hat = float(res.get("rho_hat", 0.0) or 0.0)
+                        rhodot_hat = float(res.get("rhodot_hat", 0.0) or 0.0)
+                        diag_ok.append(True)
+                        diag_rho.append(rho_hat)
+                        diag_rhodot.append(rhodot_hat)
+                        try:
+                            st = build_state_from_ranging_s_sdot(
+                                obs_ref, epoch, s_seed, sdot_seed, rho_hat, rhodot_hat
+                            )
+                            refined_states.append(st)
+                        except Exception:
+                            refined_states.append(parent_states[p])
+                    else:
+                        diag_ok.append(False)
+                        diag_rho.append(float("nan"))
+                        diag_rhodot.append(float("nan"))
+                        refined_states.append(parent_states[p])
+
+                try:
+                    diag_dir = Path("runs/ceres-ground-test/smc_debug")
+                    diag_dir.mkdir(parents=True, exist_ok=True)
+                    diag_path = diag_dir / "seed_conditioned_only_diag.npz"
+                    np.savez_compressed(
+                        diag_path,
+                        ok=np.array(diag_ok, dtype=bool),
+                        rho_hat=np.array(diag_rho, dtype=float),
+                        rhodot_hat=np.array(diag_rhodot, dtype=float),
+                        parent_rho_km=np.array(diag_parent_rho, dtype=float),
+                        rho_min_km=float(rho_min_au * AU_KM),
+                        rho_max_km=float(rho_max_au * AU_KM),
+                    )
+                    ok_arr = np.array(diag_ok, dtype=bool)
+                    rho_arr = np.array(diag_rho, dtype=float)
+                    rho_min_km = float(rho_min_au * AU_KM)
+                    rho_max_km = float(rho_max_au * AU_KM)
+                    n_ok = int(np.sum(ok_arr))
+                    n_bound = int(np.sum(np.isfinite(rho_arr) & ((np.abs(rho_arr - rho_min_km) < 1e-6) | (np.abs(rho_arr - rho_max_km) < 1e-6))))
+                    _log(
+                        "seed_conditioned_only refine ok={}/{} rho_hat[min/med/max]={:.3e}/{:.3e}/{:.3e} bound_hits={}".format(
+                            n_ok,
+                            len(ok_arr),
+                            float(np.nanmin(rho_arr)) if np.any(np.isfinite(rho_arr)) else float("nan"),
+                            float(np.nanmedian(rho_arr)) if np.any(np.isfinite(rho_arr)) else float("nan"),
+                            float(np.nanmax(rho_arr)) if np.any(np.isfinite(rho_arr)) else float("nan"),
+                            n_bound,
+                        )
+                    )
+                    _log(f"seed_conditioned_only refine diag saved to {diag_path}")
+                except Exception as exc:
+                    _log(f"seed_conditioned_only refine diag failed: {exc}")
+
+                states_list = []
+                valid_mask = []
+                for state in refined_states:
+                    _append_state(state)
+
+                n_remaining = max(0, n_particles - len(states_list))
+                if n_remaining > 0 and len(states_list) > 0:
+                    idx = rng.choice(len(states_list), size=n_remaining, replace=True)
+                    for i in idx:
+                        base = np.array(states_list[i], dtype=float)
+                        factor = 10.0 ** rng.normal(scale=0.005)
+                        new = base.copy()
+                        new[:3] = new[:3] * factor
+                        new[3:] = new[3:] + rng.normal(scale=0.01, size=3) * (
+                            np.linalg.norm(base[3:]) + 1e-6
+                        )
+                        states_list.append(new)
+                        valid_mask.append(True)
+
+        if not seed_conditioned_only:
+            n_remaining = max(0, n_particles - len(states_list))
+            rho_sobol, rhodot_sobol = sobol_logrho_rhodot(
+                n_remaining,
+                rho_min_au * AU_KM,
+                rho_max_au * AU_KM,
+                -float(rhodot_max_km_s),
+                float(rhodot_max_km_s),
+                rng,
+            )
+            for i in range(n_remaining):
+                a = rng.multivariate_normal(attrib_mean, attrib_cov)
+                attrib_i = Attributable(
+                    ra_deg=float(a[0]),
+                    dec_deg=float(a[1]),
+                    ra_dot_deg_per_day=float(a[2]),
+                    dec_dot_deg_per_day=float(a[3]),
+                )
+                s_i, sdot_i = s_and_sdot(attrib_i)
+                state = build_state_from_ranging_s_sdot(
+                    obs_ref, epoch, s_i, sdot_i, rho_sobol[i], rhodot_sobol[i]
+                )
+                _append_state(state)
+
+        try:
+            states = np.array(states_list, dtype=float)
+            valid = np.array(valid_mask, dtype=bool)
+            states = states[valid]
+            if states.size == 0:
+                raise RuntimeError("No valid initial particles; widen rho/rhodot bounds.")
+            if len(states) < n_particles:
+                idx = rng.choice(len(states), size=n_particles, replace=True)
+                states = states[idx]
+            energy_mask = _finite_energy_mask(states)
+            if not np.all(energy_mask):
+                _log(
+                    "dropping {} states with non-finite energy before seed scoring".format(
+                        int(np.sum(~energy_mask))
+                    )
+                )
+                states = states[energy_mask]
+            if states.size == 0:
+                raise RuntimeError("No valid initial particles after energy filter.")
+            _log("seeded {} states (valid={})".format(len(states), int(np.sum(valid))))
+            if debug_proposals:
+                _debug_proposal_stats(states, "seed-proposals")
+                sig, median_norm, max_abs, arr = _state_signature(states)
+                _log(
+                    "[sig] init_states sig={} median_norm_km={:.3f} max_abs={:.3g}".format(
+                        sig, median_norm, max_abs
+                    )
+                )
+                Path("runs/ceres-ground-test/smc_debug").mkdir(
+                    parents=True, exist_ok=True
+                )
+                np.savez_compressed(
+                    "runs/ceres-ground-test/smc_debug/init_states.npz", states=arr
+                )
+        except Exception as exc:
+            _log("seed generation failed: {}".format(exc))
+            _log(traceback.format_exc())
+            _save_checkpoint(
+                states=np.array(states_list, dtype=float) if states_list else np.empty((0, 6)),
+                weights=np.ones(max(1, len(states_list)), dtype=float)
+                / max(1, len(states_list)),
+                next_obs_index=0,
+                stage="seed_gen_error",
+                error=str(exc),
+            )
+            raise
+        if halt_before_seed_score:
+            weights = np.full(len(states), 1.0 / len(states), dtype=float)
+            _save_checkpoint(
+                states=states,
+                weights=weights,
+                next_obs_index=0,
+                stage="pre_seed_score",
+                metadata={"halted_before_seed_score": True},
+            )
+            _shutdown_executor()
+            raise SystemExit(
+                "Halted before seed scoring; checkpoint saved to {}".format(checkpoint_path)
+            )
+
+        _log("seed scoring start (n={})".format(len(states)))
+        try:
+            weights, used_level, max_delta = _score_seed(states)
+        except Exception as exc:
+            _log("seed scoring failed: {}".format(exc))
+            _log(traceback.format_exc())
+            _save_checkpoint(
+                states=states,
+                weights=np.full(len(states), 1.0 / len(states), dtype=float),
+                next_obs_index=0,
+                stage="seed_score_error",
+                error=str(exc),
+            )
+            raise
+        _log(
+            "seed scoring complete; starting assimilation from obs index {}".format(
+                next_obs_index
+            )
+        )
+        _log("entering obs loop at index {}".format(next_obs_index))
+
+    diag_used_levels = []
+    diag_max_delta = []
+    diag_step_labels: list[str] = []
+    if shadow_diagnostics:
+        diag_used_levels.append(used_level.copy())
+        diag_max_delta.append(max_delta.copy())
+        diag_step_labels.append("seed")
+
+    for ob_idx, ob in enumerate(obs[next_obs_index:], start=next_obs_index):
+        try:
+            if ob_idx == next_obs_index or ob_idx % log_every_obs == 0:
+                _log("obs {} start (n={})".format(ob_idx, len(states)))
+            energy_mask = _finite_energy_mask(states)
+            if not np.all(energy_mask):
+                _log(
+                    "obs {} dropping {} states with non-finite energy".format(
+                        ob_idx, int(np.sum(~energy_mask))
+                    )
+                )
+                states = states[energy_mask]
+                weights = weights[energy_mask]
+                if len(states) == 0:
+                    raise RuntimeError("All states invalid after energy filter.")
+                weights = weights / np.sum(weights)
+            loglikes = np.empty(len(states), dtype=float)
+            sigma = _sigma_arcsec(ob, site_kappas)
+            eps_ob = _epsilon_arcsec_for_obs(
+                ob,
+                epsilon_ast_arcsec=epsilon_ast_arcsec,
+                epsilon_ast_scale=epsilon_ast_scale,
+                epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
+                epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+            )
+            obs_cache_single = _prepare_obs_cache([ob], allow_unknown_site=allow_unknown_site)
+            obs_times_single = np.asarray(obs_cache_single.times_tdb.jd, dtype=float)
+            sun_bary_single, _ = _body_posvel_km("sun", obs_cache_single.times_tdb)
+            use_cached_single = worker_count > 1
+            ob_configs = ladder
+            if use_cached_single:
+                ob_configs = [
+                    cfg
+                    for cfg in default_propagation_ladder(max_step=max_step)
+                    if cfg.model == "kepler"
+                ]
+                if not ob_configs:
+                    use_cached_single = False
+                elif not use_kepler:
+                    _log(
+                        "obs {} uses cached Kepler config for stability (override --no-kepler).".format(
+                            ob_idx
+                        )
+                    )
+            if debug_proposals and ob_idx == 3:
+                sig, median_norm, max_abs, _ = _state_signature(states)
+                _log(
+                    "[sig] pre-score(obs3) sig={} median_norm_km={:.3f} max_abs={:.3g}".format(
+                        sig, median_norm, max_abs
+                    )
+                )
+            if debug_proposals and ob_idx == 3:
+                _log("[epoch-dbg] === epoch debug start ===")
+                sample_idx = list(range(min(5, len(states))))
+                for k in sample_idx:
+                    s = states[k]
+                    state_epoch = None
+                    try:
+                        state_epoch = getattr(s, "epoch", None)
+                    except Exception:
+                        state_epoch = None
+                    if state_epoch is None:
+                        state_epoch = epoch
+                    s_obj = _as_state_obj(s, state_epoch)
+                    _log(
+                        "[epoch-dbg] particle={} state_epoch={} type={}".format(
+                            k, state_epoch, type(s)
+                        )
+                    )
+                    try:
+                        pos = np.asarray(s_obj.pos, dtype=float)
+                        vel = np.asarray(s_obj.vel, dtype=float)
+                        _log(
+                            "[epoch-dbg] particle={} pos_head={} vel_head={}".format(
+                                k, pos.tolist(), vel.tolist()
+                            )
+                        )
+                    except Exception:
+                        _log(
+                            "[epoch-dbg] particle={} pos/vel not accessible (type {})".format(
+                                k, type(s)
+                            )
+                        )
+                    try:
+                        ra_smc, dec_smc = predict_radec_from_epoch(
+                            s_obj,
+                            ob.time,
+                            [ob],
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            allow_unknown_site=allow_unknown_site,
+                            light_time_iters=light_time_iters,
+                            full_physics=True,
+                            include_refraction=False,
+                        )
+                        _log(
+                            "[epoch-dbg] particle={} smc_pred (ra,dec)=({}, {})".format(
+                                k, float(ra_smc[0]), float(dec_smc[0])
+                            )
+                        )
+                    except Exception as exc:
+                        _log(
+                            "[epoch-dbg] particle={} smc_pred failed: {}".format(
+                                k, exc
+                            )
+                        )
+                    try:
+                        t0 = state_epoch
+                        t1 = ob.time
+                        st_prop = propagate_state(
+                            s_obj,
+                            t0,
+                            t1,
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            method="nbody",
+                        )
+                        ra_prop, dec_prop = predict_radec_from_epoch(
+                            st_prop,
+                            t1,
+                            [ob],
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            allow_unknown_site=allow_unknown_site,
+                            light_time_iters=light_time_iters,
+                            full_physics=True,
+                            include_refraction=False,
+                        )
+                        _log(
+                            "[epoch-dbg] particle={} propagated_pred (ra,dec)=({}, {})".format(
+                                k, float(ra_prop[0]), float(dec_prop[0])
+                            )
+                        )
+                    except Exception as exc:
+                        _log(
+                            "[epoch-dbg] particle={} manual propagate/predict failed: {}".format(
+                                k, exc
+                            )
+                        )
+                _log("[epoch-dbg] === epoch debug end ===")
+            ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+                states,
+                [ob],
+                eps_ob,
+                executor,
+                obs_cache=obs_cache_single,
+                obs_times_jd=obs_times_single,
+                sun_bary_km=sun_bary_single,
+                use_cached_ephem=use_cached_single,
+                seed_configs=ob_configs,
+            )
+            if os.environ.get("NEOTUBE_SMC_DEBUG_LIKELIHOOD") == "1" and ob_idx in (2, 3):
+                import numpy as _np
+
+                try:
+                    from .propagate import propagate_state, propagate_state_kepler
+                except Exception:
+                    from neotube.propagate import propagate_state, propagate_state_kepler
+
+                _log("[ll-debug] starting detailed obs3 diagnostics")
+                n_states = len(states)
+                ang_res_arcsec = _np.full(n_states, _np.nan)
+                ang_res_kepler = _np.full(n_states, _np.nan)
+                ang_res_nbody = _np.full(n_states, _np.nan)
+                kepler_minus_nbody_arcsec = _np.full(n_states, _np.nan)
+                finite_pred = _np.zeros(n_states, dtype=bool)
+                energies = _np.full((n_states, 3), _np.nan)
+
+                def _energy_stats(state_obj):
+                    try:
+                        r = _np.asarray(state_obj.pos, dtype=float)
+                        v = _np.asarray(state_obj.vel, dtype=float)
+                        rnorm = _np.linalg.norm(r)
+                        vnorm = _np.linalg.norm(v)
+                        mu = GM_SUN
+                        eps = 0.5 * (vnorm**2) - mu / rnorm
+                        a = _np.inf
+                        if eps < 0:
+                            a = -mu / (2.0 * eps)
+                        h = _np.cross(r, v)
+                        evec = (_np.cross(v, h) / mu) - (r / rnorm)
+                        e = _np.linalg.norm(evec)
+                        return float(eps), float(a), float(e)
+                    except Exception:
+                        return _np.nan, _np.nan, _np.nan
+
+                obs_obj = ob
+                for i in range(n_states):
+                    s_raw = states[i]
+                    s_epoch = None
+                    try:
+                        s_epoch = getattr(s_raw, "epoch", None)
+                    except Exception:
+                        s_epoch = None
+                    if s_epoch is None:
+                        s_epoch = epoch
+                    s_obj = _as_state_obj(s_raw, s_epoch)
+
+                    try:
+                        ra_tmp, dec_tmp = predict_radec_from_epoch(
+                            s_obj,
+                            obs_obj.time,
+                            [obs_obj],
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            allow_unknown_site=allow_unknown_site,
+                            light_time_iters=light_time_iters,
+                            full_physics=True,
+                            include_refraction=False,
+                        )
+                        dra_tmp, ddec_tmp = _tangent_residuals(
+                            float(ra_tmp[0]), float(dec_tmp[0]), obs_obj
+                        )
+                        ang_res_arcsec[i] = float(
+                            math.hypot(dra_tmp, ddec_tmp)
+                        )
+                        finite_pred[i] = _np.isfinite(ang_res_arcsec[i])
+                    except Exception:
+                        finite_pred[i] = False
+
+                    try:
+                        st_kep = propagate_state_kepler(
+                            _np.asarray(s_obj, dtype=float),
+                            s_epoch,
+                            [obs_obj.time],
+                        )[0]
+                        ra_k, dec_k = predict_radec_from_epoch(
+                            st_kep,
+                            obs_obj.time,
+                            [obs_obj],
+                            perturbers=(),
+                            max_step=max_step,
+                            use_kepler=True,
+                            allow_unknown_site=allow_unknown_site,
+                            light_time_iters=light_time_iters,
+                            full_physics=True,
+                            include_refraction=False,
+                        )
+                        dra_k, ddec_k = _tangent_residuals(
+                            float(ra_k[0]), float(dec_k[0]), obs_obj
+                        )
+                        ang_res_kepler[i] = float(math.hypot(dra_k, ddec_k))
+
+                        st_nb = propagate_state(
+                            _np.asarray(s_obj, dtype=float),
+                            s_epoch,
+                            [obs_obj.time],
+                            perturbers=perturbers,
+                            max_step=max_step,
+                        )[0]
+                        ra_n, dec_n = predict_radec_from_epoch(
+                            st_nb,
+                            obs_obj.time,
+                            [obs_obj],
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            allow_unknown_site=allow_unknown_site,
+                            light_time_iters=light_time_iters,
+                            full_physics=True,
+                            include_refraction=False,
+                        )
+                        dra_n, ddec_n = _tangent_residuals(
+                            float(ra_n[0]), float(dec_n[0]), obs_obj
+                        )
+                        ang_res_nbody[i] = float(math.hypot(dra_n, ddec_n))
+                        if _np.isfinite(ang_res_kepler[i]) and _np.isfinite(
+                            ang_res_nbody[i]
+                        ):
+                            kepler_minus_nbody_arcsec[i] = float(
+                                ang_res_nbody[i] - ang_res_kepler[i]
+                            )
+                    except Exception:
+                        pass
+
+                    energies[i, :] = _energy_stats(s_obj)
+
+                n_finite = int(_np.sum(finite_pred))
+                med_res = float(_np.nanmedian(ang_res_arcsec))
+                mean_res = float(_np.nanmean(ang_res_arcsec))
+                max_res = float(_np.nanmax(ang_res_arcsec))
+                med_kdiff = float(_np.nanmedian(kepler_minus_nbody_arcsec))
+                mean_kdiff = float(_np.nanmean(kepler_minus_nbody_arcsec))
+                max_kdiff = float(_np.nanmax(kepler_minus_nbody_arcsec))
+
+                _log(
+                    "[ll-debug] obs{} preds: finite={}/{} med/mean/max_res(arcsec)={:.3f}/{:.3f}/{:.3f}".format(
+                        ob_idx, n_finite, n_states, med_res, mean_res, max_res
+                    )
+                )
+                _log(
+                    "[ll-debug] obs{} kepler->nbody delta med/mean/max(arcsec)={:.3f}/{:.3f}/{:.3f}".format(
+                        ob_idx, med_kdiff, mean_kdiff, max_kdiff
+                    )
+                )
+                try:
+                    sigma_dbg = _sigma_arcsec(obs_obj, site_kappas)
+                    _log(
+                        "[ll-debug] obs{} sigma_arcsec={}".format(
+                            ob_idx, sigma_dbg
+                        )
+                    )
+                except Exception:
+                    _log("[ll-debug] obs{} sigma lookup failed".format(ob_idx))
+
+                topk = 10
+                order = _np.argsort(ang_res_arcsec)
+                best = order[:topk]
+                worst = order[-topk:][::-1]
+                _log(
+                    "[ll-debug] obs{} best_idx={} best_res(arcsec)={}".format(
+                        ob_idx,
+                        best.tolist(),
+                        [float(ang_res_arcsec[i]) for i in best],
+                    )
+                )
+                _log(
+                    "[ll-debug] obs{} worst_idx={} worst_res(arcsec)={}".format(
+                        ob_idx,
+                        worst.tolist(),
+                        [float(ang_res_arcsec[i]) for i in worst],
+                    )
+                )
+
+                dump_dir = Path("runs/ceres-ground-test/smc_debug")
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                dump_file = dump_dir / f"obs{ob_idx}_ll_debug.npz"
+                _np.savez_compressed(
+                    dump_file,
+                    ang_res=ang_res_arcsec,
+                    ang_res_kepler=ang_res_kepler,
+                    ang_res_nbody=ang_res_nbody,
+                    kepler_minus_nbody=kepler_minus_nbody_arcsec,
+                    finite_pred=finite_pred,
+                    energies=energies,
+                )
+                _log(
+                    "[ll-debug] saved detailed obs{} diagnostics to {}".format(
+                        ob_idx, dump_file
+                    )
+                )
+            for i in range(len(states)):
+                loglikes[i] = _gaussian_loglike(
+                    float(ra_pred[i, 0]), float(dec_pred[i, 0]), ob, sigma
+                )
+            finite_mask = np.isfinite(loglikes)
+            if not np.all(finite_mask):
+                _log(
+                    "obs {} loglikes non-finite count={}".format(
+                        ob_idx, int(np.sum(~finite_mask))
+                    )
+                )
+                loglikes = np.where(finite_mask, loglikes, -1e30)
+            if debug_likelihood:
+                _summarize_loglikes_and_weights(loglikes, label=f"obs{ob_idx}")
+                res_stats = _residual_stats(ra_pred[:, 0], dec_pred[:, 0], ob)
+                _log(
+                    "[resid diag obs{}] ang_arcsec min/med/mean/max: {:.3f}/{:.3f}/{:.3f}/{:.3f}".format(
+                        ob_idx,
+                        res_stats["ang_arcsec_min"],
+                        res_stats["ang_arcsec_med"],
+                        res_stats["ang_arcsec_mean"],
+                        res_stats["ang_arcsec_max"],
+                    )
+                )
+            if debug_proposals and ob_idx == 3:
+                import pathlib
+                import time as _time
+
+                dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                tnow = int(_time.time())
+                try:
+                    resids = []
+                    for k in range(len(states)):
+                        s = states[k]
+                        s_obj = _as_state_obj(s, epoch)
+                        ra_tmp, dec_tmp = predict_radec_from_epoch(
+                            s_obj,
+                            ob.time,
+                            [ob],
+                            perturbers=("earth", "mars", "jupiter"),
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            allow_unknown_site=allow_unknown_site,
+                            light_time_iters=light_time_iters,
+                            full_physics=True,
+                            include_refraction=False,
+                        )
+                        dra = (float(ra_tmp[0]) - float(ob.ra_deg))
+                        dra = (dra + 180.0) % 360.0 - 180.0
+                        ddec = float(dec_tmp[0]) - float(ob.dec_deg)
+                        ang = ((dra * 3600.0) ** 2 + (ddec * 3600.0) ** 2) ** 0.5
+                        resids.append(ang)
+                    resids = np.asarray(resids, dtype=float)
+                    np.savez(
+                        dump_dir / f"obs{ob_idx}_resids_before_norm_{tnow}.npz",
+                        resids=resids,
+                        med=float(np.nanmedian(resids)),
+                        mean=float(np.nanmean(resids)),
+                        max=float(np.nanmax(resids)),
+                    )
+                    _log(
+                        "[smc debug] obs{} resid med/mean/max: {:.3f}/{:.3f}/{:.3f}".format(
+                            ob_idx,
+                            float(np.nanmedian(resids)),
+                            float(np.nanmean(resids)),
+                            float(np.nanmax(resids)),
+                        )
+                    )
+                except Exception:
+                    _log(f"[smc debug] obs{ob_idx} resid dump failed")
+            logw = np.log(weights + 1e-300) + loglikes
+            logw -= float(np.max(logw))
+            weights = np.exp(logw)
+            weights = weights / np.sum(weights)
+
+            if debug_proposals and ob_idx == 3:
+                import numpy as _np
+                import astropy.units as u
+                from astropy.coordinates import SkyCoord
+
+                _log("[topk-dbg] starting top-K compare for obs3")
+                dump_dir = Path("runs/ceres-ground-test/smc_debug")
+                dump_dir.mkdir(parents=True, exist_ok=True)
+
+                k = 10
+                order = _np.argsort(-weights)
+                top_idx = order[:k].tolist()
+
+                try:
+                    from .propagate import (
+                        propagate_state as _propagate_state,
+                        propagate_state_kepler as _propagate_state_kepler,
+                    )
+                except Exception:
+                    from neotube.propagate import (
+                        propagate_state as _propagate_state,
+                        propagate_state_kepler as _propagate_state_kepler,
+                    )
+
+                try:
+                    from .fit import _initial_state_from_horizons
+                except Exception:
+                    try:
+                        from neotube.fit import _initial_state_from_horizons
+                    except Exception:
+                        _initial_state_from_horizons = None
+
+                target_name = _PREDICT_CONTEXT.get("target_name", "Ceres")
+
+                jpl_ra = None
+                jpl_dec = None
+                if _initial_state_from_horizons is not None:
+                    try:
+                        st_jpl = _initial_state_from_horizons(target_name, epoch=ob.time)
+                        ra_jpl_arr, dec_jpl_arr = predict_radec_from_epoch(
+                            st_jpl,
+                            ob.time,
+                            [ob],
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            full_physics=True,
+                            allow_unknown_site=True,
+                            light_time_iters=light_time_iters,
+                            include_refraction=False,
+                        )
+                        jpl_ra = float(ra_jpl_arr[0])
+                        jpl_dec = float(dec_jpl_arr[0])
+                    except Exception as exc:
+                        _log("[topk-dbg] JPL fetch/predict failed: {}".format(exc))
+
+                rows = []
+                for idx in top_idx:
+                    s_raw = states[idx]
+                    try:
+                        s_epoch = getattr(s_raw, "epoch", None)
+                    except Exception:
+                        s_epoch = None
+                    if s_epoch is None:
+                        s_epoch = _PREDICT_CONTEXT.get("epoch", epoch)
+                    try:
+                        try:
+                            s_obj = _as_state_obj(s_raw, s_epoch)
+                        except NameError:
+                            if isinstance(s_raw, _np.ndarray):
+                                from types import SimpleNamespace
+
+                                arr = _np.asarray(s_raw, dtype=float).ravel()
+                                s_obj = SimpleNamespace(
+                                    pos=arr[:3].copy(),
+                                    vel=arr[3:6].copy(),
+                                    epoch=s_epoch,
+                                )
+                            else:
+                                s_obj = s_raw
+
+                        if use_kepler:
+                            st_at_obs = _propagate_state_kepler(
+                                s_obj, s_epoch, (ob.time,)
+                            )[0]
+                        else:
+                            st_at_obs = _propagate_state(
+                                s_obj,
+                                s_epoch,
+                                (ob.time,),
+                                perturbers=perturbers,
+                                max_step=max_step,
+                            )[0]
+                        if hasattr(st_at_obs, "pos"):
+                            rnorm = float(_np.linalg.norm(st_at_obs.pos))
+                        else:
+                            arr = _np.asarray(st_at_obs, dtype=float).ravel()
+                            rnorm = float(_np.linalg.norm(arr[:3]))
+                        ra_p_arr, dec_p_arr = predict_radec_from_epoch(
+                            st_at_obs,
+                            ob.time,
+                            [ob],
+                            perturbers=perturbers,
+                            max_step=max_step,
+                            use_kepler=use_kepler,
+                            full_physics=True,
+                            allow_unknown_site=True,
+                            light_time_iters=light_time_iters,
+                            include_refraction=False,
+                        )
+                        ra_p = float(ra_p_arr[0])
+                        dec_p = float(dec_p_arr[0])
+                        coord_pred = SkyCoord(
+                            ra=ra_p * u.deg, dec=dec_p * u.deg, frame="icrs"
+                        )
+                        coord_obs = SkyCoord(
+                            ra=float(ob.ra_deg) * u.deg,
+                            dec=float(ob.dec_deg) * u.deg,
+                            frame="icrs",
+                        )
+                        sep_obs = float(coord_pred.separation(coord_obs).arcsec)
+                        sep_jpl = None
+                        if jpl_ra is not None:
+                            coord_jpl = SkyCoord(
+                                ra=jpl_ra * u.deg, dec=jpl_dec * u.deg, frame="icrs"
+                            )
+                            sep_jpl = float(coord_pred.separation(coord_jpl).arcsec)
+                        rows.append(
+                            {
+                                "idx": int(idx),
+                                "weight": float(weights[idx]),
+                                "r_km": rnorm,
+                                "ra_pred": ra_p,
+                                "dec_pred": dec_p,
+                                "sep_obs_arcsec": sep_obs,
+                                "sep_jpl_arcsec": sep_jpl,
+                                "loglike": float(loglikes[idx]),
+                            }
+                        )
+                    except Exception as exc:
+                        _log("[topk-dbg] failed for idx={}: {}".format(idx, exc))
+                        rows.append({"idx": int(idx), "error": str(exc)})
+
+                _log(
+                    "[topk-dbg] idx | weight | r_km | sep_obs(arcsec) | sep_jpl(arcsec) | loglike"
+                )
+                for row in rows:
+                    if "error" in row:
+                        _log("[topk-dbg] {:4d} ERROR {}".format(row["idx"], row["error"]))
+                    else:
+                        _log(
+                            "[topk-dbg] {:4d} {:.6f} {:.3e} {:.3f} {} {:.6e}".format(
+                                row["idx"],
+                                row["weight"],
+                                row["r_km"],
+                                row["sep_obs_arcsec"],
+                                str(row["sep_jpl_arcsec"]),
+                                row["loglike"],
+                            )
+                        )
+
+                dump_file = dump_dir / "obs3_topk_comparison.npz"
+                _np.savez_compressed(
+                    dump_file, rows=rows, jpl_ra=jpl_ra, jpl_dec=jpl_dec
+                )
+                _log("[topk-dbg] wrote top-k comparison to {}".format(dump_file))
+
+            if shadow_diagnostics:
+                diag_used_levels.append(used_level.copy())
+                diag_max_delta.append(max_delta.copy())
+                diag_step_labels.append(f"obs_{ob_idx}")
+
+            ess = 1.0 / np.sum(weights**2)
+            if ob_idx % log_every_obs == 0 or ob_idx == len(obs) - 1:
+                finite_ll = loglikes[np.isfinite(loglikes)]
+                if finite_ll.size:
+                    ll_min, ll_med, ll_max = np.percentile(finite_ll, [0.0, 50.0, 100.0])
+                else:
+                    ll_min = ll_med = ll_max = float("nan")
+                w_min = float(np.min(weights)) if weights.size else float("nan")
+                w_med = float(np.median(weights)) if weights.size else float("nan")
+                w_max = float(np.max(weights)) if weights.size else float("nan")
+                _log(
+                    "obs {} ess={:.1f} used_level_max={} shadow_max_arcsec={:.4f}".format(
+                        ob_idx,
+                        ess,
+                        int(np.max(used_level)) if len(used_level) else 0,
+                        float(np.max(max_delta)) if len(max_delta) else 0.0,
+                    )
+                )
+                _log(
+                    "obs {} loglike[min/med/max]=[{:.3f}/{:.3f}/{:.3f}] weight[min/med/max]=[{:.3e}/{:.3e}/{:.3e}]".format(
+                        ob_idx,
+                        float(ll_min),
+                        float(ll_med),
+                        float(ll_max),
+                        w_min,
+                        w_med,
+                        w_max,
+                    )
+                )
+            if ess < ess_threshold * len(weights):
+                if debug_proposals:
+                    import numpy as _np
+                    from scipy.special import logsumexp
+
+                    obs_label = f"obs{ob_idx}"
+                    dump_dir = Path("runs/ceres-ground-test/smc_debug")
+                    dump_dir.mkdir(parents=True, exist_ok=True)
+
+                    try:
+                        r_norm = _np.linalg.norm(states[:, :3], axis=1)
+                    except Exception:
+                        r_norm = _np.array(
+                            [
+                                _np.linalg.norm(getattr(s, "pos", s[:3]))
+                                for s in states
+                            ],
+                            dtype=float,
+                        )
+
+                    ll = _np.asarray(loglikes, dtype=float)
+                    ll_max = _np.nanmax(ll)
+                    denom = ll_max + logsumexp(ll - ll_max)
+                    weights_dbg = _np.exp(ll - denom)
+
+                    def _weighted_percentile(values, weights, pctiles):
+                        w = weights / _np.sum(weights)
+                        sorter = _np.argsort(values)
+                        vals = values[sorter]
+                        w_cum = _np.cumsum(w[sorter])
+                        out = []
+                        for p in pctiles:
+                            idx = _np.searchsorted(w_cum, p / 100.0)
+                            idx = min(max(idx, 0), len(vals) - 1)
+                            out.append(float(vals[idx]))
+                        return out
+
+                    pctiles = [0, 1, 5, 25, 50, 75, 95, 99, 100]
+                    r_pct = _np.percentile(r_norm, pctiles).tolist()
+                    r_w_pct = _weighted_percentile(r_norm, weights_dbg, pctiles)
+
+                    topk = 20
+                    order = _np.argsort(-weights_dbg)
+                    top_idx = order[:topk]
+                    top_info = []
+                    for i in top_idx:
+                        top_info.append(
+                            (int(i), float(r_norm[i]), float(weights_dbg[i]), float(ll[i]))
+                        )
+                    _log(
+                        "[weight-dbg {}] r pctiles {} unweighted={}".format(
+                            obs_label, pctiles, r_pct
+                        )
+                    )
+                    _log(
+                        "[weight-dbg {}] r pctiles weighted={}".format(
+                            obs_label, r_w_pct
+                        )
+                    )
+                    _log(
+                        "[weight-dbg {}] top{} by weight (idx, r_km, weight, loglike) = {}".format(
+                            obs_label, topk, top_info
+                        )
+                    )
+
+                    try:
+                        mask = _np.isfinite(ll) & _np.isfinite(r_norm)
+                        if _np.sum(mask) > 2:
+                            corr = _np.corrcoef(ll[mask], r_norm[mask])[0, 1]
+                        else:
+                            corr = float("nan")
+                    except Exception:
+                        corr = float("nan")
+                    _log(
+                        "[weight-dbg {}] pearson_corr(loglike, r_km) = {:.6g}".format(
+                            obs_label, corr
+                        )
+                    )
+
+                    n_bins = 5
+                    bins = _np.percentile(r_norm, _np.linspace(0, 100, n_bins + 1))
+                    bin_means = []
+                    for lo, hi in zip(bins[:-1], bins[1:]):
+                        mask_bin = (r_norm >= lo) & (r_norm <= hi)
+                        if _np.sum(mask_bin) > 0:
+                            bin_means.append(
+                                (
+                                    float(_np.median([lo, hi])),
+                                    float(_np.nanmean(ll[mask_bin])),
+                                    int(_np.sum(mask_bin)),
+                                )
+                            )
+                        else:
+                            bin_means.append((float(_np.median([lo, hi])), float("nan"), 0))
+                    _log(
+                        "[weight-dbg {}] binned median_r_km, mean_loglike, count per bin = {}".format(
+                            obs_label, bin_means
+                        )
+                    )
+
+                    unweighted_median = r_pct[4]
+                    weighted_median = r_w_pct[4]
+                    ratio = weighted_median / (unweighted_median + 1e-30)
+                    if ratio > 1.2:
+                        _log(
+                            "[weight-dbg {}] WARNING: weighted_median_r / unweighted_median_r = {:.3f} (favoring larger radii)".format(
+                                obs_label, ratio
+                            )
+                        )
+
+                    dump_file = dump_dir / f"{obs_label}_weight_dbg.npz"
+                    _np.savez_compressed(
+                        dump_file,
+                        r_norm=r_norm,
+                        weights=weights_dbg,
+                        loglikes=ll,
+                        top_idx=top_idx,
+                        r_pct=r_pct,
+                        r_w_pct=r_w_pct,
+                        corr=float(corr),
+                        bin_means=bin_means,
+                    )
+                    _log(
+                        "[weight-dbg {}] saved weight diagnostics to {}".format(
+                            obs_label, dump_file
+                        )
+                    )
+                if debug_proposals:
+                    sig, median_norm, max_abs, _ = _state_signature(states)
+                    _log(
+                        "[sig] pre-resample sig={} median_norm_km={:.3f} max_abs={:.3g}".format(
+                            sig, median_norm, max_abs
+                        )
+                    )
+                    _debug_proposal_stats(states, "pre-resample")
+                if debug_proposals and ob_idx == 3:
+                    import pathlib
+                    import time as _time
+
+                    dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                    dump_dir.mkdir(parents=True, exist_ok=True)
+                    tnow = int(_time.time())
+
+                    def _state_summary(state_arr: np.ndarray) -> dict[str, object]:
+                        try:
+                            pos = state_arr[:, :3]
+                            rho = np.linalg.norm(pos, axis=1)
+                        except Exception:
+                            pos = None
+                            rho = None
+                        return dict(
+                            n=len(state_arr),
+                            pos_head=(pos[:3].tolist() if pos is not None else None),
+                            rho_stats=(
+                                None
+                                if rho is None
+                                else (
+                                    float(np.nanmin(rho)),
+                                    float(np.nanmedian(rho)),
+                                    float(np.nanmax(rho)),
+                                )
+                            ),
+                        )
+
+                    pre_summary = _state_summary(states)
+                    _log(
+                        "[smc debug] obs{} pre-resample summary: {}".format(
+                            ob_idx, pre_summary
+                        )
+                    )
+                    np.savez(
+                        dump_dir / f"obs{ob_idx}_pre_resample_{tnow}.npz",
+                        states=states,
+                    )
+                states, resample_idx = _systematic_resample(states, weights, rng)
+                weights = np.full(len(states), 1.0 / len(states), dtype=float)
+                if laplace_rejuvenation and len(states) > 1:
+                    try:
+                        dup_count = int(len(resample_idx) - len(np.unique(resample_idx)))
+                        _log(
+                            "laplace rejuvenation start obs{} duplicates={}".format(
+                                ob_idx, dup_count
+                            )
+                        )
+                        start_idx = max(0, ob_idx - max(1, laplace_obs_window) + 1)
+                        obs_chunk = obs[start_idx : ob_idx + 1]
+                        rho_bounds = (rho_min_au * AU_KM, rho_max_au * AU_KM)
+                        rhodot_bounds = (
+                            -float(rhodot_max_km_s),
+                            float(rhodot_max_km_s),
+                        )
+                        states = _rejuvenate_duplicates_laplace_mh(
+                            states,
+                            resample_idx,
+                            obs_chunk,
+                            obs_ref,
+                            epoch,
+                            s_seed,
+                            sdot_seed,
+                            rho_bounds,
+                            rhodot_bounds,
+                            perturbers,
+                            max_step,
+                            light_time_iters,
+                            rng,
+                            n_candidates=laplace_n_candidates,
+                            mh_steps=laplace_mh_steps,
+                            max_nfev=laplace_max_nfev,
+                            mh_logrho_scale=laplace_mh_logrho_scale,
+                            mh_rhodot_scale=laplace_mh_rhodot_scale,
+                        )
+                        _log("laplace rejuvenation done obs{}".format(ob_idx))
+                    except Exception as exc:
+                        _log("laplace rejuvenation failed obs{}: {}".format(ob_idx, exc))
+                if debug_proposals:
+                    _debug_proposal_stats(states, "post-resample")
+                    sig, median_norm, max_abs, arr = _state_signature(states)
+                    _log(
+                        "[sig] post-resample sig={} median_norm_km={:.3f} max_abs={:.3g}".format(
+                            sig, median_norm, max_abs
+                        )
+                    )
+                    np.savez_compressed(
+                        "runs/ceres-ground-test/smc_debug/post_resample_states.npz",
+                        states=arr,
+                        resample_idx=resample_idx,
+                    )
+                    unique_idx, counts = np.unique(resample_idx, return_counts=True)
+                    top = sorted(
+                        zip(unique_idx, counts), key=lambda x: -x[1]
+                    )[:10]
+                    _log(
+                        "[proposal debug] resample counts (top 10): {}".format(top)
+                    )
+                if debug_proposals and ob_idx == 3:
+                    import pathlib
+                    import time as _time
+
+                    dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                    tnow = int(_time.time())
+                    _log(
+                        "[smc debug] obs{} post-resample: unique_idx_top={}".format(
+                            ob_idx, top if "top" in locals() else "NA"
+                        )
+                    )
+                    np.savez(
+                        dump_dir / f"obs{ob_idx}_post_resample_{tnow}.npz",
+                        states=states,
+                        resample_idx=resample_idx,
+                    )
+                if rejuvenation_scale > 0.0 and len(states) > 1:
+                    # TODO: Replace floor jitter with MH rejuvenation to avoid bias.
+                    pos_floor_km = 1_000.0
+                    vel_floor_km_s = 0.05
+                    cov = np.cov(states.T)
+                    cov = cov * rejuvenation_scale
+                    cov[:3, :3] += np.eye(3) * (pos_floor_km**2)
+                    cov[3:, 3:] += np.eye(3) * (vel_floor_km_s**2)
+                    if use_nullspace_rejuv:
+                        states, ns_stats = _nullspace_rejuvenate_states(
+                            states,
+                            rng,
+                            attrib_mean,
+                            attrib_cov,
+                            obs_ref,
+                            epoch,
+                        )
+                        if debug_proposals:
+                            _log(
+                                "[smc debug] obs{} nullspace rejuv attempted={} accepted={} failed={} backtracked={}".format(
+                                    ob_idx,
+                                    ns_stats.get("attempted"),
+                                    ns_stats.get("accepted"),
+                                    ns_stats.get("failed"),
+                                    ns_stats.get("backtracked"),
+                                )
+                            )
+                    else:
+                        jitter = rng.multivariate_normal(np.zeros(6), cov, size=len(states))
+                    if debug_proposals:
+                        sig_before, median_norm, max_abs, arr_before = _state_signature(
+                            states
+                        )
+                        _log(
+                            "[sig] pre-mutate sig={} median_norm_km={:.3f} max_abs={:.3g}".format(
+                                sig_before, median_norm, max_abs
+                            )
+                        )
+                    if debug_proposals and ob_idx == 3:
+                        import pathlib
+                        import time as _time
+
+                        dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                        dump_dir.mkdir(parents=True, exist_ok=True)
+                        tnow = int(_time.time())
+                        try:
+                            cov_diag = np.diag(cov)
+                        except Exception:
+                            try:
+                                cov_diag = np.var(states, axis=0)
+                            except Exception:
+                                cov_diag = None
+                        _log(
+                            "[smc debug] obs{} mutation cov diag (first 10): {}".format(
+                                ob_idx,
+                                cov_diag[:10].tolist() if cov_diag is not None else None,
+                            )
+                        )
+                        try:
+                            _log(
+                                "[smc debug] obs{} jitter mean/std (first 10 dims): {} {}".format(
+                                    ob_idx,
+                                    np.mean(jitter, axis=0)[:10].tolist(),
+                                    np.std(jitter, axis=0)[:10].tolist(),
+                                )
+                            )
+                        except Exception:
+                            _log(f"[smc debug] obs{ob_idx} jitter: not present")
+                        np.savez(
+                            dump_dir / f"obs{ob_idx}_pre_mutation_{tnow}.npz",
+                            states=states,
+                            cov_diag=cov_diag,
+                        )
+                    if not use_nullspace_rejuv:
+                        states = states + jitter
+                if debug_proposals:
+                    _debug_proposal_stats(states, "post-mutate")
+                    sig_after, median_norm2, max_abs2, arr_after = _state_signature(
+                        states
+                    )
+                    _log(
+                        "[sig] post-mutate sig={} median_norm_km={:.3f} max_abs={:.3g}".format(
+                            sig_after, median_norm2, max_abs2
+                        )
+                    )
+                    try:
+                        if "sig_before" in locals() and sig_before != sig_after:
+                            _log("[sig] NOTE: signature changed across mutation step")
+                            np.savez_compressed(
+                                "runs/ceres-ground-test/smc_debug/mutation_mismatch.npz",
+                                before=arr_before,
+                                after=arr_after,
+                            )
+                    except Exception:
+                        pass
+                if debug_proposals and ob_idx == 3:
+                    import pathlib
+                    import time as _time
+
+                    dump_dir = pathlib.Path("runs/ceres-ground-test/smc_debug")
+                    tnow = int(_time.time())
+                    try:
+                        np.savez(
+                            dump_dir / f"obs{ob_idx}_post_mutation_{tnow}.npz",
+                            states=states,
+                            jitter=jitter if "jitter" in locals() else None,
+                        )
+                    except Exception:
+                        np.savez(
+                            dump_dir / f"obs{ob_idx}_post_mutation_{tnow}.npz",
+                            states=states,
+                        )
+                    try:
+                        sample_idx = list(range(min(5, len(states))))
+                        preds = []
+                        for k in sample_idx:
+                            s = states[k]
+                            s_obj = _as_state_obj(s, epoch)
+                            ra_tmp, dec_tmp = predict_radec_from_epoch(
+                                s_obj,
+                                ob.time,
+                                [ob],
+                                perturbers=("earth", "mars", "jupiter"),
+                                max_step=max_step,
+                                use_kepler=use_kepler,
+                                allow_unknown_site=allow_unknown_site,
+                                light_time_iters=light_time_iters,
+                                full_physics=True,
+                                include_refraction=False,
+                            )
+                            preds.append((float(ra_tmp[0]), float(dec_tmp[0])))
+                        _log(
+                            "[smc debug] obs{} post-mutate sample preds: {}".format(
+                                ob_idx, preds
+                            )
+                        )
+                    except Exception:
+                        _log(f"[smc debug] obs{ob_idx} post-mutate prediction failed")
+                _log("resampled ess={:.1f} -> uniform weights".format(ess))
+
+            if smc_iter_dir and (
+                ob_idx % smc_iter_every_obs == 0 or ob_idx == len(obs) - 1
+            ):
+                _dump_smc_iter(ob_idx, states, weights, loglikes, obs_cache_single)
+
+            if checkpoint_path and (
+                ob_idx % checkpoint_every_obs == 0 or ob_idx == len(obs) - 1
+            ):
+                _save_checkpoint(
+                    states=states,
+                    weights=weights,
+                    next_obs_index=ob_idx + 1,
+                    stage="assimilating",
+                )
+                if os.environ.get("NEOTUBE_CHECKPOINT_PER_OBS") == "1":
+                    ckpt_path = Path(checkpoint_path).expanduser().resolve()
+                    per_obs_path = ckpt_path.with_name(
+                        "{}_obs{:03d}{}".format(
+                            ckpt_path.stem, ob_idx, ckpt_path.suffix
+                        )
+                    )
+                    _save_checkpoint(
+                        states=states,
+                        weights=weights,
+                        next_obs_index=ob_idx + 1,
+                        stage="assimilating",
+                        checkpoint_path_override=per_obs_path,
+                    )
+        except Exception as exc:
+            _log("obs {} failed: {}".format(ob_idx, exc))
+            _log(traceback.format_exc())
+            _save_checkpoint(
+                states=states,
+                weights=weights,
+                next_obs_index=ob_idx,
+                stage="obs_error",
+                error=str(exc),
+            )
+            raise
+
+    auto_grow_done = False
+    auto_grow_diag: dict | None = None
+    if auto_grow:
+        energy_mask = _finite_energy_mask(states)
+        if not np.all(energy_mask):
+            _log(
+                "auto-grow dropping {} states with non-finite energy".format(
+                    int(np.sum(~energy_mask))
+                )
+            )
+            states = states[energy_mask]
+            weights = weights[energy_mask]
+            if len(states) == 0:
+                raise RuntimeError("All states invalid after energy filter.")
+            weights = weights / np.sum(weights)
+        obs_ref = _ranging_reference_observation(obs, epoch)
+        attrib_mean = attrib_mean
+        attrib_cov = attrib_cov
+        _log(
+            "auto-grow start n={} n_max={} n_add={} ess_target={} psis_khat={}".format(
+                len(states), auto_n_max, auto_n_add, auto_ess_target, auto_psis_khat
+            )
+        )
+
+        def _score_contract(pool_states: np.ndarray) -> np.ndarray:
+            eps_final = min(
+                _epsilon_arcsec_for_obs(
+                    ob,
+                    epsilon_ast_arcsec=epsilon_ast_arcsec,
+                    epsilon_ast_scale=epsilon_ast_scale,
+                    epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
+                    epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+                )
+                for ob in obs
+            )
+            return _score_parallel(pool_states, obs, eps_final, executor)
+
+        obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
+
+        def _score_full(pool_states: np.ndarray) -> np.ndarray:
+            loglikes_local = _score_full_parallel(pool_states, obs_cache_all, executor)
+            sum_inv_var = np.zeros(len(pool_states), dtype=float)
+            sum_y_inv_var = np.zeros(len(pool_states), dtype=float)
+            sum_y2_inv_var = np.zeros(len(pool_states), dtype=float)
+            phot_obs = [ob for ob in obs if ob.mag is not None]
+            if phot_obs:
+                for ob in phot_obs:
+                    obs_cache = _prepare_obs_cache([ob], allow_unknown_site=allow_unknown_site)
+                    obs_bary = obs_cache.earth_bary_km[0] + obs_cache.site_pos_km[0]
+                    sun_bary, _ = _body_posvel_km_single("sun", ob.time.tdb)
+                    obs_helio = obs_bary - sun_bary
+                    _photometry_accumulate(
+                        pool_states,
+                        ob,
+                        obs_helio,
+                        mu_h,
+                        g,
+                        sum_inv_var,
+                        sum_y_inv_var,
+                        sum_y2_inv_var,
+                    )
+                logdet_v = sum(
+                    math.log(
+                        max(1e-12, float(ob.sigma_mag) if ob.sigma_mag is not None else 0.15) ** 2
+                    )
+                    for ob in phot_obs
+                )
+                loglikes_local += _photometry_loglike_marginal(
+                    sum_inv_var,
+                    sum_y_inv_var,
+                    sum_y2_inv_var,
+                    len(phot_obs),
+                    sigma_h,
+                    logdet_v,
+                )
+            return loglikes_local
+
+        cfg = AdaptiveConfig(
+            n_max=auto_n_max,
+            n_add=auto_n_add,
+            ess_target=auto_ess_target,
+            psis_khat_threshold=auto_psis_khat,
+            logrho_bins=auto_logrho_bins,
+            min_particles_per_decade=auto_min_per_decade,
+            w_min_mode=auto_w_min_mode,
+            min_particles_per_mode=auto_min_per_mode,
+            rho_prior_mode="log",
+            rho_prior_power=2.0,
+            rhodot_max_km_s=float(rhodot_max_km_s),
+            v_max_km_s=float(v_max_km_s),
+        )
+
+        def _auto_grow_checkpoint(
+            states_local: np.ndarray, weights_local: np.ndarray, diag: dict[str, object]
+        ) -> None:
+            _save_checkpoint(
+                states=states_local,
+                weights=weights_local,
+                next_obs_index=len(obs),
+                stage="auto_grow",
+                metadata={"auto_grow_diag": diag},
+            )
+
+        states, weights, auto_grow_diag = adaptively_grow_cloud(
+            states,
+            obs,
+            obs_ref=obs_ref,
+            attrib_mean=attrib_mean,
+            attrib_cov=attrib_cov,
+            rho_min_au=rho_min_au,
+            rho_max_au=rho_max_au,
+            score_fn=_score_contract,
+            final_score_fn=_score_full,
+            cfg=cfg,
+            rng=rng,
+            log_fn=_log if verbose else None,
+            checkpoint_fn=_auto_grow_checkpoint if checkpoint_path else None,
+        )
+        auto_grow_done = True
+        _log("auto-grow done n={}".format(len(states)))
+
+    if full_physics_final and not auto_grow_done:
+        _log("full-physics final scoring start n={}".format(len(states)))
+        _save_checkpoint(
+            states=states,
+            weights=weights,
+            next_obs_index=len(obs),
+            stage="pre_final",
+        )
+        energy_mask = _finite_energy_mask(states)
+        if not np.all(energy_mask):
+            _log(
+                "final scoring dropping {} states with non-finite energy".format(
+                    int(np.sum(~energy_mask))
+                )
+            )
+            states = states[energy_mask]
+            weights = weights[energy_mask]
+            if len(states) == 0:
+                raise RuntimeError("All states invalid after energy filter.")
+            weights = weights / np.sum(weights)
+        eps_final = min(
+            _epsilon_arcsec_for_obs(
+                ob,
+                epsilon_ast_arcsec=epsilon_ast_arcsec,
+                epsilon_ast_scale=epsilon_ast_scale,
+                epsilon_ast_floor_arcsec=epsilon_ast_floor_arcsec,
+                epsilon_ast_ceiling_arcsec=epsilon_ast_ceiling_arcsec,
+            )
+            for ob in obs
+        )
+        obs_cache_all = _prepare_obs_cache(obs, allow_unknown_site=allow_unknown_site)
+        final_exec = executor
+        if final_exec is None and worker_count > 1:
+            try:
+                _set_native_thread_env()
+                mp_ctx = None
+                if mp_start_method:
+                    mp_ctx = mp.get_context(mp_start_method)
+                    _log(f"creating ProcessPoolExecutor mp_start_method={mp_start_method}")
+                else:
+                    _log("creating ProcessPoolExecutor (using default mp start method)")
+                if mp_ctx is not None:
+                    final_exec = ProcessPoolExecutor(
+                        max_workers=worker_count,
+                        mp_context=mp_ctx,
+                        initializer=_smc_worker_init,
+                        initargs=(worker_faulthandler,),
+                    )
+                else:
+                    final_exec = ProcessPoolExecutor(
+                        max_workers=worker_count,
+                        initializer=_smc_worker_init,
+                        initargs=(worker_faulthandler,),
+                    )
+            except Exception as exc:
+                _log(
+                    "ProcessPoolExecutor creation failed ({}); falling back to ThreadPoolExecutor".format(
+                        exc
+                    )
+                )
+                final_exec = ThreadPoolExecutor(max_workers=worker_count)
+        _log(
+            "full-physics final scoring uses {} workers={}".format(
+                type(final_exec).__name__ if final_exec is not None else "serial",
+                worker_count,
+            )
+        )
+        if final_exec is None:
+            ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+                states,
+                obs,
+                eps_final,
+                None,
+            )
+            loglikes = _score_full_parallel(states, obs_cache_all, None)
+            loglikes = _sanitize_loglikes(loglikes, label="final", log_fn=_log)
+        else:
+            ra_pred, dec_pred, used_level, max_delta = _predict_contract_parallel(
+                states,
+                obs,
+                eps_final,
+                final_exec,
+            )
+            loglikes = _score_full_parallel(states, obs_cache_all, final_exec)
+            loglikes = _sanitize_loglikes(loglikes, label="final", log_fn=_log)
+            if final_exec is not executor:
+                final_exec.shutdown(wait=True)
+        if shadow_diagnostics:
+            diag_used_levels.append(used_level.copy())
+            diag_max_delta.append(max_delta.copy())
+            diag_step_labels.append("final")
+
+        sum_inv_var = np.zeros(len(states), dtype=float)
+        sum_y_inv_var = np.zeros(len(states), dtype=float)
+        sum_y2_inv_var = np.zeros(len(states), dtype=float)
+        phot_obs = [ob for ob in obs if ob.mag is not None]
+        if phot_obs:
+            for ob in phot_obs:
+                obs_cache = _prepare_obs_cache([ob], allow_unknown_site=allow_unknown_site)
+                obs_bary = obs_cache.earth_bary_km[0] + obs_cache.site_pos_km[0]
+                sun_bary, _ = _body_posvel_km_single("sun", ob.time.tdb)
+                obs_helio = obs_bary - sun_bary
+                _photometry_accumulate(
+                    states, ob, obs_helio, mu_h, g, sum_inv_var, sum_y_inv_var, sum_y2_inv_var
+                )
+            logdet_v = sum(
+                math.log(
+                    max(1e-12, float(ob.sigma_mag) if ob.sigma_mag is not None else 0.15) ** 2
+                )
+                for ob in phot_obs
+            )
+            loglikes += _photometry_loglike_marginal(
+                sum_inv_var, sum_y_inv_var, sum_y2_inv_var, len(phot_obs), sigma_h, logdet_v
+            )
+
+        loglikes -= float(np.max(loglikes))
+        weights = np.exp(loglikes)
+        weights = weights / np.sum(weights)
+        _log("full-physics final scoring done")
+        _save_checkpoint(
+            states=states,
+            weights=weights,
+            next_obs_index=len(obs),
+            stage="final",
+        )
+
+    diagnostics: dict[str, float] = {}
+    if shadow_diagnostics and diag_max_delta and any(arr.size > 0 for arr in diag_max_delta):
+        deltas = np.concatenate([arr for arr in diag_max_delta if arr.size > 0])
+        diagnostics = {
+            "shadow_max_arcsec": float(np.max(deltas)),
+            "shadow_p95_arcsec": float(np.percentile(deltas, 95.0)),
+            "shadow_mean_arcsec": float(np.mean(deltas)),
+        }
+        if diagnostics_path:
+            level_lengths = [arr.shape[0] for arr in diag_used_levels]
+            delta_lengths = [arr.shape[0] for arr in diag_max_delta]
+            max_len = max(level_lengths + delta_lengths)
+            if len(set(level_lengths)) > 1 or len(set(delta_lengths)) > 1:
+                _log(
+                    "shadow diagnostics length mismatch; padding to {}".format(max_len)
+                )
+                padded_levels = []
+                padded_deltas = []
+                for arr in diag_used_levels:
+                    pad = max_len - arr.shape[0]
+                    if pad > 0:
+                        padded = np.pad(arr, (0, pad), mode="constant", constant_values=-1)
+                    else:
+                        padded = arr
+                    padded_levels.append(padded)
+                for arr in diag_max_delta:
+                    pad = max_len - arr.shape[0]
+                    if pad > 0:
+                        padded = np.pad(arr, (0, pad), mode="constant", constant_values=np.nan)
+                    else:
+                        padded = arr
+                    padded_deltas.append(padded)
+                levels = np.stack(padded_levels, axis=0)
+                deltas_steps = np.stack(padded_deltas, axis=0)
+            else:
+                levels = np.stack(diag_used_levels, axis=0)
+                deltas_steps = np.stack(diag_max_delta, axis=0)
+            step_labels = np.array(diag_step_labels, dtype=str)
+            np.savez_compressed(
+                diagnostics_path,
+                used_levels=levels,
+                max_delta_arcsec=deltas_steps,
+                step_labels=step_labels,
+            )
+    elif shadow_diagnostics:
+        _log("shadow diagnostics empty; skipping save")
+
+    metadata = {
+        "n_particles": int(len(states)),
+        "rho_min_au": float(rho_min_au),
+        "rho_max_au": float(rho_max_au),
+        "rhodot_max_km_s": float(rhodot_max_km_s),
+        "v_max_km_s": float(v_max_km_s),
+        "conditioned_frac": float(conditioned_frac),
+        "laplace_rejuvenation": bool(laplace_rejuvenation),
+        "laplace_obs_window": int(laplace_obs_window),
+        "laplace_n_candidates": int(laplace_n_candidates),
+        "laplace_mh_steps": int(laplace_mh_steps),
+        "laplace_max_nfev": int(laplace_max_nfev),
+        "laplace_mh_logrho_scale": float(laplace_mh_logrho_scale),
+        "laplace_mh_rhodot_scale": float(laplace_mh_rhodot_scale),
+        "ess_threshold": float(ess_threshold),
+        "rejuvenation_scale": float(rejuvenation_scale),
+        "full_physics_final": bool(full_physics_final),
+        "mu_h": float(mu_h),
+        "sigma_h": float(sigma_h),
+        "g": float(g),
+        "epsilon_ast_arcsec": float(epsilon_ast_arcsec),
+        "epsilon_ast_scale": float(epsilon_ast_scale),
+        "epsilon_ast_floor_arcsec": float(epsilon_ast_floor_arcsec),
+        "epsilon_ast_ceiling_arcsec": (
+            float(epsilon_ast_ceiling_arcsec) if epsilon_ast_ceiling_arcsec is not None else None
+        ),
+        "auto_grow": bool(auto_grow),
+        "auto_grow_diag": auto_grow_diag,
+    }
+    metadata.update(diagnostics)
+    _log("done n={} ess={:.1f}".format(len(states), float(1.0 / np.sum(weights**2))))
+    _shutdown_executor()
+    return ReplicaCloud(states=states, weights=weights, epoch=epoch, metadata=metadata)

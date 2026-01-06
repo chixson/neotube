@@ -1,2 +1,0 @@
-[fit_smc 2025-12-30 21:35:37 +     0.0s] start n_particles=2000 obs=10 use_kepler=False full_physics_final=True auto_grow=True workers=50 chunk_size=64
-[fit_smc 2025-12-30 21:36:07 +    30.5s] seeded 2000 states (valid=1461)

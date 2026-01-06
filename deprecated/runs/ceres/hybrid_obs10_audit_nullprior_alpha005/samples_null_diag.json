@@ -1,0 +1,11 @@
+{
+  "n": 500,
+  "ess": 1.0000039528608597,
+  "elliptic_mass": 0.9999999999999999,
+  "hyperbolic_mass": 0.0,
+  "attempted": 505,
+  "project_fail": 5,
+  "sanity_reject": 0,
+  "jacobian_fail": 0,
+  "success": 500
+}

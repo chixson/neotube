@@ -1,0 +1,16 @@
+{
+  "n_obs": 10,
+  "rms_arcsec": 0.6791114690103207,
+  "seed_rms_arcsec": 7.345658112873709,
+  "chi2": 36.89539098730847,
+  "converged": false,
+  "perturbers": [
+    "earth",
+    "mars",
+    "jupiter"
+  ],
+  "error": null,
+  "site_kappas": {
+    "C51": 1.1250398981116816
+  }
+}

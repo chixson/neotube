@@ -1,0 +1,9 @@
+{
+  "n": 200,
+  "ess": 1.0,
+  "elliptic_mass": 1.0,
+  "hyperbolic_mass": 0.0,
+  "attempted": 200,
+  "prop_fail": 0,
+  "sanity_reject": 163
+}
