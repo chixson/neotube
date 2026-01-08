@@ -69,7 +69,7 @@ def _state_physicality(
         a = float("inf")
         if eps < 0.0:
             a = -mu / (2.0 * eps)
-        h = np.cross(v, r)
+        h = np.cross(r, v)
         evec = (np.cross(v, h) / mu) - (r / (rnorm + 1e-300))
         e = float(np.linalg.norm(evec))
         ok = (
