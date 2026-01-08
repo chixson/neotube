@@ -491,7 +491,7 @@ def seed_and_test_cloud(
 if __name__ == "__main__":
     from pathlib import Path
     from astropy.utils import iers
-    from astropy.time import TimeDelta
+    import json
 
     import numpy as np
 
@@ -501,14 +501,85 @@ if __name__ == "__main__":
     obs_path = Path("runs/ceres/obs.csv")
     observations = load_observations(obs_path, sigma=None, skip_special_sites=False)
 
-    res_debug = solve_three_point_exact(
-        observations[:3], nmc=0, n_grid=80, rho_min_au=1e-6, rho_max_au=200.0, debug=True
+    nmc = 20
+    n_grid = 40
+    rho_min_au = 1e-6
+    rho_max_au = 200.0
+
+    triplet = observations[:3]
+    res = solve_three_point_exact(
+        triplet,
+        nmc=nmc,
+        n_grid=n_grid,
+        rho_min_au=rho_min_au,
+        rho_max_au=rho_max_au,
+        debug=False,
     )
-    print("s:", res_debug["s"])
-    print("sdot:", res_debug["sdot"])
-    print("sddot:", res_debug["sddot"])
-    print("n_roots:", len(res_debug["roots"]))
-    for idx, root in enumerate(res_debug["roots"]):
-        print(
-            f"root[{idx}] rho_km={root.rho_km:.6f} rhodot_km_s={root.rhodot_km_s:.6f} ok={root.ok}"
-        )
+
+    obs_ref = triplet[1]
+    ceres_state = fetch_horizons_state("1", res["epoch"], location="@sun", refplane="earth")
+    _, ceres_rho_km, ceres_rhodot_km_s = attrib_from_state_with_observer_time(
+        ceres_state, obs_ref, res["epoch"]
+    )
+
+    print("triplet[0] epoch:", res["epoch"].utc.iso)
+    print("s:", res["s"])
+    print("sdot:", res["sdot"])
+    print("sddot:", res["sddot"])
+    print("ceres rho_km:", float(ceres_rho_km))
+    print("ceres rhodot_km_s:", float(ceres_rhodot_km_s))
+    print("n_roots:", len(res["roots"]))
+
+    roots_out = []
+    for idx, root in enumerate(res["roots"]):
+        root_payload = {
+            "rho_km": float(root.rho_km),
+            "rhodot_km_s": float(root.rhodot_km_s),
+            "s_em": np.asarray(root.s_em, dtype=float).tolist(),
+            "sdot_em": np.asarray(root.sdot_em, dtype=float).tolist(),
+            "sddot_em": np.asarray(root.sddot_em, dtype=float).tolist(),
+            "ok": bool(root.ok),
+            "error": root.error,
+            "mc": root.mc,
+        }
+        roots_out.append(root_payload)
+
+        print(f"root[{idx}] rho_km={root_payload['rho_km']:.6f} rhodot_km_s={root_payload['rhodot_km_s']:.6f} ok={root_payload['ok']}")
+        if root.mc and root.mc.get("n_samples", 0) > 0:
+            rho_mean = root.mc["rho_mean"]
+            rho_std = root.mc["rho_std"]
+            rhodot_mean = root.mc["rhodot_mean"]
+            rhodot_std = root.mc["rhodot_std"]
+            z_rho = (float(ceres_rho_km) - rho_mean) / rho_std if rho_std > 0 else float("nan")
+            z_rhodot = (float(ceres_rhodot_km_s) - rhodot_mean) / rhodot_std if rhodot_std > 0 else float("nan")
+            print(
+                "  mc rho_mean/std:",
+                f"{rho_mean:.6f}",
+                f"{rho_std:.6f}",
+                "z:",
+                f"{z_rho:.3f}",
+            )
+            print(
+                "  mc rhodot_mean/std:",
+                f"{rhodot_mean:.6f}",
+                f"{rhodot_std:.6f}",
+                "z:",
+                f"{z_rhodot:.3f}",
+            )
+
+    out_path = obs_path.parent / "three_point_mc.json"
+    payload = {
+        "obs_times": [str(ob.time.utc.iso) for ob in triplet],
+        "epoch": str(res["epoch"].utc.iso),
+        "s": np.asarray(res["s"], dtype=float).tolist(),
+        "sdot": np.asarray(res["sdot"], dtype=float).tolist(),
+        "sddot": np.asarray(res["sddot"], dtype=float).tolist(),
+        "ceres": {
+            "rho_km": float(ceres_rho_km),
+            "rhodot_km_s": float(ceres_rhodot_km_s),
+            "state": np.asarray(ceres_state, dtype=float).tolist(),
+        },
+        "roots": roots_out,
+    }
+    out_path.write_text(json.dumps(payload, indent=2))
+    print(f"Wrote {out_path}")
