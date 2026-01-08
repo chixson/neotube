@@ -53,6 +53,10 @@ def _attrib_vector_from_state(
     )
 
 
+def _wrap_deg(delta_deg: float) -> float:
+    return (delta_deg + 180.0) % 360.0 - 180.0
+
+
 def _state_physicality(
     state: np.ndarray, mu: float = GM_SUN
 ) -> tuple[bool, float, float, float, float]:
@@ -338,6 +342,8 @@ def seed_and_test_cloud(
     t_next = obs_next[0].time
     attrib_next, cov_next = build_attributable_vector_fit(obs_next, t_next, return_cov=True)
     inv_cov_next = np.linalg.inv(cov_next)
+    dec0_rad = math.radians(float(np.mean([ob.dec_deg for ob in obs_next])))
+    cosd0 = math.cos(dec0_rad)
 
     obs_next_ref = _ranging_reference_observation(obs_next, t_next)
     propagated = np.empty_like(states)
@@ -357,12 +363,12 @@ def seed_and_test_cloud(
     for i, st in enumerate(propagated):
         attrib_vec = _attrib_vector_from_state(st, obs_next_ref, t_next)
         attribs[i] = attrib_vec
-        d = attrib_vec - np.array(
+        d = np.array(
             [
-                attrib_next.ra_deg,
-                attrib_next.dec_deg,
-                attrib_next.ra_dot_deg_per_day,
-                attrib_next.dec_dot_deg_per_day,
+                _wrap_deg(attrib_vec[0] - attrib_next.ra_deg) * cosd0,
+                attrib_vec[1] - attrib_next.dec_deg,
+                (attrib_vec[2] - attrib_next.ra_dot_deg_per_day) * cosd0,
+                attrib_vec[3] - attrib_next.dec_dot_deg_per_day,
             ],
             dtype=float,
         )
