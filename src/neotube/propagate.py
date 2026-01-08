@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from dataclasses import dataclass
+from typing import Iterable, Sequence
 
 import numpy as np
 from astropy import units as u
-from astropy.coordinates import ICRS, CartesianDifferential, CartesianRepresentation, SkyCoord, get_body_barycentric_posvel, solar_system_ephemeris
+from astropy.coordinates import (
+    ICRS,
+    CartesianDifferential,
+    CartesianRepresentation,
+    SkyCoord,
+    get_body_barycentric_posvel,
+    solar_system_ephemeris,
+)
 from astropy.time import Time
 
 from .constants import GM_SUN
+from .horizons import fetch_horizons_states
 from .sites import get_site_location
 
 
@@ -29,6 +38,16 @@ def _body_posvel_km(body: str, times: Time, ephemeris: str = "de432s") -> tuple[
 def _body_posvel_km_single(body: str, time: Time, ephemeris: str = "de432s") -> tuple[np.ndarray, np.ndarray]:
     pos_km, vel_km_s = _body_posvel_km(body, time, ephemeris=ephemeris)
     return pos_km[0], vel_km_s[0]
+
+
+def _body_posvel_helio_km(
+    body: str,
+    times: Time,
+    ephemeris: str = "de432s",
+) -> tuple[np.ndarray, np.ndarray]:
+    pos_km, vel_km_s = _body_posvel_km(body, times, ephemeris=ephemeris)
+    sun_pos, sun_vel = _body_posvel_km("sun", times, ephemeris=ephemeris)
+    return pos_km - sun_pos, vel_km_s - sun_vel
 
 
 def _stumpff_C2(z: float) -> float:
@@ -162,6 +181,149 @@ def propagate_state(
     mu_km3_s2: float = GM_SUN,
 ) -> np.ndarray:
     return propagate_state_kepler(state, epoch, target, mu_km3_s2=mu_km3_s2)
+
+
+@dataclass(frozen=True)
+class Perturber:
+    name: str
+    gm_km3_s2: float
+    position_km: np.ndarray
+    times_sec: np.ndarray
+
+
+# Approximate GM values in km^3/s^2.
+PLANET_GM = {
+    "mercury": 22032.080,
+    "venus": 324858.592,
+    "earth": 398600.435436,
+    "mars": 42828.375214,
+    "jupiter": 126686534.0,
+    "saturn": 37940626.0,
+    "uranus": 5794548.0,
+    "neptune": 6836527.0,
+}
+
+# GM for Ceres (km^3/s^2). Reference: Dawn mission value ~62.628.
+CERES_GM = 62.628
+
+
+def build_perturbers(
+    epoch: Time,
+    target: Time,
+    *,
+    step_sec: float,
+    ephemeris: str = "de432s",
+    include_planets: Iterable[str] | None = None,
+    include_asteroids: Iterable[str] | None = None,
+) -> list[Perturber]:
+    dt = float((target.tdb - epoch.tdb).to_value("s"))
+    if dt == 0.0:
+        raise ValueError("Zero propagation interval for perturber table.")
+    step = abs(float(step_sec))
+    n_steps = int(math.ceil(abs(dt) / step))
+    times_sec = np.linspace(0.0, dt, n_steps + 1)
+    times = epoch.tdb + times_sec * u.s
+
+    perturbers: list[Perturber] = []
+    planets = include_planets or PLANET_GM.keys()
+    for name in planets:
+        pos_helio, _ = _body_posvel_helio_km(name, times, ephemeris=ephemeris)
+        perturbers.append(
+            Perturber(
+                name=name,
+                gm_km3_s2=PLANET_GM[name],
+                position_km=pos_helio,
+                times_sec=times_sec,
+            )
+        )
+
+    asteroids = include_asteroids or ["ceres"]
+    for name in asteroids:
+        if name.lower() == "ceres":
+            pos, _ = fetch_horizons_states("1", times, location="@sun", refplane="earth")
+            perturbers.append(
+                Perturber(
+                    name="ceres",
+                    gm_km3_s2=CERES_GM,
+                    position_km=pos,
+                    times_sec=times_sec,
+                )
+            )
+    return perturbers
+
+
+def _interp_pos(times_sec: np.ndarray, pos: np.ndarray, t: float) -> np.ndarray:
+    if t <= times_sec[0]:
+        return pos[0]
+    if t >= times_sec[-1]:
+        return pos[-1]
+    idx = int(np.searchsorted(times_sec, t))
+    t0 = times_sec[idx - 1]
+    t1 = times_sec[idx]
+    w = (t - t0) / max(1e-12, t1 - t0)
+    return (1.0 - w) * pos[idx - 1] + w * pos[idx]
+
+
+def _accel_nbody(
+    r: np.ndarray,
+    t: float,
+    perturbers: Sequence[Perturber],
+) -> np.ndarray:
+    rnorm = float(np.linalg.norm(r))
+    if rnorm <= 0.0:
+        raise RuntimeError("Non-positive radius in n-body acceleration.")
+    acc = -GM_SUN * r / (rnorm**3)
+    for p in perturbers:
+        r_p = _interp_pos(p.times_sec, p.position_km, t)
+        dr = r_p - r
+        dr_norm = float(np.linalg.norm(dr))
+        if dr_norm <= 0.0:
+            continue
+        acc += p.gm_km3_s2 * (dr / (dr_norm**3) - r_p / (np.linalg.norm(r_p) ** 3))
+    return acc
+
+
+def propagate_state_nbody(
+    state: np.ndarray,
+    epoch: Time,
+    target: Time,
+    *,
+    step_sec: float = 3600.0,
+    perturbers: Sequence[Perturber] | None = None,
+) -> np.ndarray:
+    dt = float((target.tdb - epoch.tdb).to_value("s"))
+    if dt == 0.0:
+        return np.asarray(state, dtype=float).copy()
+    if perturbers is None:
+        perturbers = build_perturbers(epoch, target, step_sec=step_sec)
+    n_steps = int(math.ceil(abs(dt) / abs(step_sec)))
+    h = dt / n_steps
+    y = np.asarray(state, dtype=float).copy()
+    t = 0.0
+    for _ in range(n_steps):
+        r = y[:3]
+        v = y[3:6]
+        a1 = _accel_nbody(r, t, perturbers)
+        k1 = np.hstack([v, a1])
+
+        r2 = r + 0.5 * h * k1[:3]
+        v2 = v + 0.5 * h * k1[3:]
+        a2 = _accel_nbody(r2, t + 0.5 * h, perturbers)
+        k2 = np.hstack([v2, a2])
+
+        r3 = r + 0.5 * h * k2[:3]
+        v3 = v + 0.5 * h * k2[3:]
+        a3 = _accel_nbody(r3, t + 0.5 * h, perturbers)
+        k3 = np.hstack([v3, a3])
+
+        r4 = r + h * k3[:3]
+        v4 = v + h * k3[3:]
+        a4 = _accel_nbody(r4, t + h, perturbers)
+        k4 = np.hstack([v4, a4])
+
+        y = y + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        t += h
+    return y
 
 
 def _site_states(

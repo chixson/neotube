@@ -39,3 +39,19 @@ def fetch_horizons_state(
         ],
         dtype=float,
     )
+
+
+def fetch_horizons_states(
+    target: str,
+    epochs: Time,
+    *,
+    location: str = "@sun",
+    refplane: str = "earth",
+) -> tuple[np.ndarray, np.ndarray]:
+    obj = Horizons(id=normalize_horizons_id(target), location=location, epochs=epochs.jd)
+    vec = obj.vectors(refplane=refplane)
+    au_km = AU_KM
+    au_per_day_to_km_s = AU_KM / DAY_S
+    pos = np.column_stack([vec["x"], vec["y"], vec["z"]]).astype(float) * au_km
+    vel = np.column_stack([vec["vx"], vec["vy"], vec["vz"]]).astype(float) * au_per_day_to_km_s
+    return pos, vel

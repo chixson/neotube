@@ -8,6 +8,8 @@ from astropy.time import Time, TimeDelta
 from scipy import stats
 from scipy.stats import qmc
 
+from .admissible_seed import SeedConfig, seed_cloud_from_observations
+from .fit_cli import load_observations
 from .horizons import fetch_horizons_state
 from .constants import AU_KM, C_KM_S, GM_SUN
 from .models import Attributable, Observation, ReplicaCloud
@@ -20,6 +22,11 @@ from .propagate import propagate_state_kepler
 from .rng import make_rng
 from .sbdb import fetch_sbdb_covariance
 from .site_checks import filter_special_sites
+from .three_pt_exact import (
+    solve_three_point_coupled,
+    solve_three_point_exact,
+    solve_three_point_gauss,
+)
 
 
 def _midpoint_time(observations: Sequence[Observation]) -> Time:
@@ -258,6 +265,7 @@ def seed_and_test_cloud(
     chi2_obs_df: int | None = None,
     accept_mode: str = "obs_chi2",
     skip_special_sites: bool = False,
+    use_admissible_seed: bool = True,
 ) -> dict[str, object]:
     observations = filter_special_sites(
         observations,
@@ -272,61 +280,105 @@ def seed_and_test_cloud(
     attrib_init, cov_init = build_attributable_vector_fit(obs_init, t0, return_cov=True)
     obs_ref = _ranging_reference_observation(obs_init, t0)
 
-    jpl_states: list[tuple[np.ndarray, Time]] = []
     rng = make_rng(seed)
-    if jpl_state is None and jpl_target is not None:
-        jpl_state = fetch_horizons_state(jpl_target, t0, location=jpl_location, refplane=jpl_refplane)
-    if jpl_state is not None:
-        jpl_state = np.asarray(jpl_state, dtype=float).reshape(1, 6)
-        jpl_t_em, jpl_state_em = _emission_epoch_for_state(
-            jpl_state[0], t0, obs_ref, t0, debug_label="jpl_seed"
+    if use_admissible_seed:
+        base_jpl = 1 if (jpl_state is not None or jpl_target is not None) else 0
+        planned = max(0, n_beads - base_jpl - int(jpl_n_jitter))
+        n_jitter = min(SeedConfig().n_jitter, planned)
+        n_sobol_local = max(0, planned - n_jitter)
+        cfg = SeedConfig(
+            n_jitter=n_jitter,
+            n_sobol_local=n_sobol_local,
+            rho_min_km=rho_min_km,
+            rho_max_au=rho_max_au,
+            rhodot_df=rhodot_df,
+            rhodot_scale_kms=rhodot_scale_kms,
+            v_max_km_s=v_max_km_s,
+            rate_max_deg_day=rate_max_deg_day,
+            seed=seed,
+            seed_obs_max_keep=n_beads,
         )
-        jpl_states.append((jpl_state_em, jpl_t_em))
-        if jpl_cov is None and jpl_n_jitter > 0:
-            if not jpl_cov_source:
-                raise ValueError("Missing JPL covariance; provide jpl_cov or jpl_cov_source.")
-            if jpl_cov_source.lower() == "sbdb":
-                if not jpl_target:
-                    raise ValueError("SBDB covariance requires jpl_target.")
-                jpl_cov = fetch_sbdb_covariance(jpl_target)
-            else:
-                raise ValueError("Unknown jpl_cov_source; provide jpl_cov explicitly.")
-        if jpl_cov is not None and jpl_n_jitter > 0:
-            cov = np.asarray(jpl_cov, dtype=float).reshape(6, 6) * float(jpl_cov_scale)
-            jitter = rng.multivariate_normal(np.zeros(6), cov, size=int(jpl_n_jitter))
-            for delta in jitter:
-                jpl_states.append((jpl_state_em + delta, jpl_t_em))
-
-    if jpl_states:
-        jpl_states = [item for item in jpl_states if _state_physicality(item[0])[0]]
-
-    if len(jpl_states) > n_beads:
-        raise ValueError("Requested n_beads smaller than JPL seed count.")
-
-    seed_states = _seed_states_from_sobol(
-        obs_ref,
-        t0,
-        attrib_init,
-        cov_init,
-        n_beads - len(jpl_states),
-        rho_min_km=rho_min_km,
-        rho_max_au=rho_max_au,
-        rhodot_df=rhodot_df,
-        rhodot_scale_kms=rhodot_scale_kms,
-        v_max_km_s=v_max_km_s,
-        rate_max_deg_day=rate_max_deg_day,
-        seed=seed,
-    )
-    if jpl_states:
-        jpl_states_arr = np.asarray([item[0] for item in jpl_states], dtype=float).reshape(-1, 6)
-        states = np.vstack([jpl_states_arr, seed_states]) if len(seed_states) else jpl_states_arr
-        state_epochs = np.array([item[1] for item in jpl_states], dtype=object)
-        if len(seed_states):
-            seed_epochs = np.full(len(seed_states), t0, dtype=object)
-            state_epochs = np.concatenate([state_epochs, seed_epochs])
+        seed_result = seed_cloud_from_observations(
+            observations,
+            n_init=n_init,
+            cfg=cfg,
+            jpl_target=jpl_target,
+            jpl_state=jpl_state,
+            jpl_location=jpl_location,
+            jpl_refplane=jpl_refplane,
+            jpl_cov=jpl_cov,
+            jpl_cov_source=jpl_cov_source,
+            jpl_cov_scale=jpl_cov_scale,
+            jpl_n_jitter=jpl_n_jitter,
+            skip_special_sites=skip_special_sites,
+        )
+        states = seed_result.states
+        state_epochs = seed_result.epochs
+        attrib_init = seed_result.attributable
+        cov_init = seed_result.cov
+        obs_ref = seed_result.obs_ref
+        t0 = seed_result.epoch
+        if len(states) > n_beads:
+            pick = rng.choice(len(states), size=int(n_beads), replace=False)
+            states = states[pick]
+            state_epochs = state_epochs[pick]
     else:
-        states = seed_states
-        state_epochs = np.full(len(states), t0, dtype=object)
+        jpl_states: list[tuple[np.ndarray, Time]] = []
+        if jpl_state is None and jpl_target is not None:
+            jpl_state = fetch_horizons_state(
+                jpl_target, t0, location=jpl_location, refplane=jpl_refplane
+            )
+        if jpl_state is not None:
+            jpl_state = np.asarray(jpl_state, dtype=float).reshape(1, 6)
+            jpl_t_em, jpl_state_em = _emission_epoch_for_state(
+                jpl_state[0], t0, obs_ref, t0, debug_label="jpl_seed"
+            )
+            jpl_states.append((jpl_state_em, jpl_t_em))
+            if jpl_cov is None and jpl_n_jitter > 0:
+                if not jpl_cov_source:
+                    raise ValueError("Missing JPL covariance; provide jpl_cov or jpl_cov_source.")
+                if jpl_cov_source.lower() == "sbdb":
+                    if not jpl_target:
+                        raise ValueError("SBDB covariance requires jpl_target.")
+                    jpl_cov = fetch_sbdb_covariance(jpl_target)
+                else:
+                    raise ValueError("Unknown jpl_cov_source; provide jpl_cov explicitly.")
+            if jpl_cov is not None and jpl_n_jitter > 0:
+                cov = np.asarray(jpl_cov, dtype=float).reshape(6, 6) * float(jpl_cov_scale)
+                jitter = rng.multivariate_normal(np.zeros(6), cov, size=int(jpl_n_jitter))
+                for delta in jitter:
+                    jpl_states.append((jpl_state_em + delta, jpl_t_em))
+
+        if jpl_states:
+            jpl_states = [item for item in jpl_states if _state_physicality(item[0])[0]]
+
+        if len(jpl_states) > n_beads:
+            raise ValueError("Requested n_beads smaller than JPL seed count.")
+
+        seed_states = _seed_states_from_sobol(
+            obs_ref,
+            t0,
+            attrib_init,
+            cov_init,
+            n_beads - len(jpl_states),
+            rho_min_km=rho_min_km,
+            rho_max_au=rho_max_au,
+            rhodot_df=rhodot_df,
+            rhodot_scale_kms=rhodot_scale_kms,
+            v_max_km_s=v_max_km_s,
+            rate_max_deg_day=rate_max_deg_day,
+            seed=seed,
+        )
+        if jpl_states:
+            jpl_states_arr = np.asarray([item[0] for item in jpl_states], dtype=float).reshape(-1, 6)
+            states = np.vstack([jpl_states_arr, seed_states]) if len(seed_states) else jpl_states_arr
+            state_epochs = np.array([item[1] for item in jpl_states], dtype=object)
+            if len(seed_states):
+                seed_epochs = np.full(len(seed_states), t0, dtype=object)
+                state_epochs = np.concatenate([state_epochs, seed_epochs])
+        else:
+            states = seed_states
+            state_epochs = np.full(len(states), t0, dtype=object)
 
     if len(states) == 0:
         raise RuntimeError("No valid seed states generated.")
@@ -434,3 +486,29 @@ def seed_and_test_cloud(
         "attrib_next": attrib_next,
         "cov_next": cov_next,
     }
+
+
+if __name__ == "__main__":
+    from pathlib import Path
+    from astropy.utils import iers
+    from astropy.time import TimeDelta
+
+    import numpy as np
+
+    iers.conf.auto_download = False
+    iers.conf.iers_degraded_accuracy = "warn"
+
+    obs_path = Path("runs/ceres/obs.csv")
+    observations = load_observations(obs_path, sigma=None, skip_special_sites=False)
+
+    res_debug = solve_three_point_exact(
+        observations[:3], nmc=0, n_grid=80, rho_min_au=1e-6, rho_max_au=200.0, debug=True
+    )
+    print("s:", res_debug["s"])
+    print("sdot:", res_debug["sdot"])
+    print("sddot:", res_debug["sddot"])
+    print("n_roots:", len(res_debug["roots"]))
+    for idx, root in enumerate(res_debug["roots"]):
+        print(
+            f"root[{idx}] rho_km={root.rho_km:.6f} rhodot_km_s={root.rhodot_km_s:.6f} ok={root.ok}"
+        )
