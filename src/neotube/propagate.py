@@ -86,11 +86,13 @@ def _propagate_state_kepler_single(
                 1.0 - r0_norm * alpha
             )
             if term != 0.0:
-                chi = math.copysign(1.0, dt) * sqrt_neg_alpha * math.log(
-                    (-2.0 * mu_km3_s2 * alpha * dt) / term
-                )
+                arg = (-2.0 * mu_km3_s2 * alpha * dt) / term
+                if arg > 0.0:
+                    chi = math.copysign(1.0, dt) * sqrt_neg_alpha * math.log(arg)
+                else:
+                    chi = math.copysign(1.0, dt) * sqrt_mu * abs(dt) / max(r0_norm, 1e-6)
             else:
-                chi = math.copysign(1.0, dt) * sqrt_mu * abs(dt) * 1e-3
+                chi = math.copysign(1.0, dt) * sqrt_mu * abs(dt) / max(r0_norm, 1e-6)
         else:
             chi = math.copysign(1.0, dt) * sqrt_mu * abs(dt) / max(r0_norm, 1e-6)
 
