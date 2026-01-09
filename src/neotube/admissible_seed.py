@@ -68,9 +68,9 @@ class SeedConfig:
     rho_grid_inner_frac: float = 0.6
     rho_grid_inner_max_km: float = 1.0e9
     # Optional clipping of admissible rhodot intervals.
-    rhodot_max_km_s: float | None = None
+    rhodot_max_km_s: float | None = 100.0
     # Admissible interval definition: "bound" or "speedcap".
-    admissible_cap_mode: str = "bound"
+    admissible_cap_mode: str = "speedcap"
     admissible_speed_cap_km_s: float = C_KM_S
     admissible_write_diagnostics: bool = True
     admissible_diagnostics_dir: str | None = None
