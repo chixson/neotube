@@ -1213,6 +1213,87 @@ def _coarse_chunk_worker_intervals(
     return (accepted, attempted, None)
 
 
+def _coarse_chunk_worker_atlas(
+    rho_indices: np.ndarray,
+    atlas: dict,
+    gamma_samples: list[np.ndarray],
+    observations: Sequence[Observation],
+    epoch: Time,
+    obs_ref: Observation,
+    cfg: SeedConfig,
+    coarse_k_sigma: float,
+    seed_offset: int,
+) -> tuple[list[tuple[np.ndarray, np.ndarray, float, float, Attributable]], int, str | None]:
+    try:
+        local_rng = np.random.default_rng(int(cfg.seed or 0) + seed_offset)
+        obs_cache = [_observer_helio_state(ob, ob.time) for ob in observations]
+        accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
+        attempted = 0
+    except Exception as exc:
+        return ([], 0, f"worker_init_error: {exc!r}")
+
+    rho_grid = atlas["rho_grid"]
+    unions = atlas["unions"]
+    dotmin_all = atlas.get("dotmin_all")
+    dotmax_all = atlas.get("dotmax_all")
+    n_gamma = len(gamma_samples)
+
+    for ir in rho_indices:
+        unions_ir = unions[ir]
+        if not unions_ir:
+            continue
+        rho_val = float(rho_grid[ir])
+        for lo, hi in unions_ir:
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                continue
+            nper = int(cfg.admissible_n_per_gamma)
+            for _ in range(nper):
+                rhodot_val = lo + local_rng.random() * (hi - lo)
+                if dotmin_all is not None and dotmax_all is not None and dotmin_all.size:
+                    idxs = np.where(
+                        (dotmin_all[:, ir] <= rhodot_val)
+                        & (dotmax_all[:, ir] >= rhodot_val)
+                    )[0]
+                    if idxs.size > 0:
+                        ig = int(local_rng.choice(idxs))
+                    else:
+                        ig = int(local_rng.integers(n_gamma))
+                else:
+                    ig = int(local_rng.integers(n_gamma))
+                gamma_vec = gamma_samples[ig]
+                attempted += 1
+                st = _build_state_from_sample(
+                    obs_ref,
+                    epoch,
+                    gamma_vec,
+                    float(rho_val),
+                    float(rhodot_val),
+                    v_max_km_s=cfg.v_max_km_s,
+                    rate_max_deg_day=cfg.rate_max_deg_day,
+                )
+                if st is None:
+                    continue
+                lin_chi2 = _linearized_chi2(st, observations, obs_cache)
+                if np.any(lin_chi2 > (16.0 * (coarse_k_sigma**2))):
+                    continue
+                if _state_passes_hard_tube(
+                    st, epoch, observations, obs_cache, k_sigma=coarse_k_sigma
+                ):
+                    r0 = st[:3].astype(float)
+                    v0 = st[3:].astype(float)
+                    attrib = Attributable(
+                        ra_deg=float(gamma_vec[0]),
+                        dec_deg=float(gamma_vec[1]),
+                        ra_dot_deg_per_day=float(gamma_vec[2]),
+                        dec_dot_deg_per_day=float(gamma_vec[3]),
+                    )
+                    accepted.append((r0, v0, float(rho_val), float(rhodot_val), attrib))
+
+        if len(accepted) >= max(200, cfg.admissible_n_per_gamma * 50):
+            break
+    return (accepted, attempted, None)
+
+
 def _coarse_chunk_worker(
     gamma_chunk: list[np.ndarray],
     observations: Sequence[Observation],
@@ -1456,29 +1537,31 @@ def adaptive_sample_admissible_beads(
     rho_grid = _rho_grid_from_cfg(cfg)
     print(f"[admissible] gamma_samples={len(gamma_samples)} rho_grid={len(rho_grid)}")
 
-    if cfg.admissible_write_diagnostics:
-        admissible_rho_rhodot_envelope(obs_ref, epoch, gamma_samples, cfg)
+    rho_grid, _env_min, _env_max, _n_ok, atlas = admissible_rho_rhodot_envelope(
+        obs_ref, epoch, gamma_samples, cfg
+    )
 
     accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
     attempted = 0
 
     if n_workers is None:
         n_workers = 1
-    if n_workers > 1 and len(gamma_samples) > 1:
-        chunks = np.array_split(np.array(gamma_samples, dtype=object), n_workers)
+    rho_indices = np.arange(len(rho_grid))
+    if n_workers > 1 and len(rho_indices) > 1:
+        chunks = np.array_split(rho_indices, n_workers)
         with mp.Pool(processes=n_workers) as pool:
             results = pool.starmap(
-                _coarse_chunk_worker_intervals,
+                _coarse_chunk_worker_atlas,
                 [
                     (
-                        list(chunk),
+                        chunk,
+                        atlas,
+                        gamma_samples,
                         observations,
                         epoch,
                         obs_ref,
-                        rho_grid,
                         cfg,
                         coarse_k_sigma,
-                        N_coarse,
                         i * 1000,
                     )
                     for i, chunk in enumerate(chunks)
@@ -1491,15 +1574,15 @@ def adaptive_sample_admissible_beads(
             accepted.extend(acc_chunk)
             attempted += att_chunk
     else:
-        acc_chunk, att_chunk, err = _coarse_chunk_worker_intervals(
+        acc_chunk, att_chunk, err = _coarse_chunk_worker_atlas(
+            rho_indices,
+            atlas,
             gamma_samples,
             observations,
             epoch,
             obs_ref,
-            rho_grid,
             cfg,
             coarse_k_sigma,
-            N_coarse,
             0,
         )
         if err:
