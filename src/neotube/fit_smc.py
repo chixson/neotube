@@ -77,21 +77,30 @@ def _mc_worker_init(ctx: dict[str, object], jd_round_digits: int = 9) -> None:
     # Install per-process caches and store context.
     global _MC_CTX
     _MC_CTX = ctx
+    from . import ranging as _ranging_mod
+    _orig_body = _ranging_mod._body_posvel_km_single
+    _orig_site = _ranging_mod._site_states
 
     @lru_cache(maxsize=10000)
     def _body_cache(body: str, jd_rounded: float):
         t = Time(jd_rounded, format="jd", scale="tdb")
-        return _body_posvel_km_single(body, t)
+        return _orig_body(body, t)
 
     def _body_wrapper(body: str, t: Time):
         jd_key = round(float(t.tdb.jd), jd_round_digits)
         return _body_cache(body, jd_key)
 
     @lru_cache(maxsize=10000)
-    def _site_cache(jd_rounded: float, site_code: str, obs_pos_tuple):
+    def _site_cache(jd_rounded: float, site_code: str, obs_pos_tuple, allow_unknown_site: bool):
         t = Time(jd_rounded, format="jd", scale="tdb")
         obs_pos = None if obs_pos_tuple is None else np.asarray(obs_pos_tuple)
-        return _site_states([t], [site_code], observer_positions_km=[obs_pos])
+        return _orig_site(
+            [t],
+            [site_code],
+            observer_positions_km=[obs_pos],
+            observer_velocities_km_s=None,
+            allow_unknown_site=allow_unknown_site,
+        )
 
     def _site_wrapper(
         times,
@@ -108,8 +117,8 @@ def _mc_worker_init(ctx: dict[str, object], jd_round_digits: int = 9) -> None:
                 pos0 = observer_positions_km[0]
                 obs_pos_tuple = None if pos0 is None else tuple(np.asarray(pos0).tolist())
             jd_key = round(float(t.tdb.jd), jd_round_digits)
-            return _site_cache(jd_key, site, obs_pos_tuple)
-        return _site_states(
+            return _site_cache(jd_key, site, obs_pos_tuple, bool(allow_unknown_site))
+        return _orig_site(
             times,
             site_codes,
             observer_positions_km=observer_positions_km,
@@ -121,6 +130,8 @@ def _mc_worker_init(ctx: dict[str, object], jd_round_digits: int = 9) -> None:
     global _body_posvel_km_single, _site_states
     _body_posvel_km_single = _body_wrapper
     _site_states = _site_wrapper
+    _ranging_mod._body_posvel_km_single = _body_wrapper
+    _ranging_mod._site_states = _site_wrapper
 
 
 def _mc_worker(draw_vec: np.ndarray) -> dict[str, object]:
@@ -149,15 +160,22 @@ def _mc_worker(draw_vec: np.ndarray) -> dict[str, object]:
                 continue
             chi2 = 0.0
             for ob in obs_window:
-                attrib_pred, _, _ = attrib_from_state_with_observer_time(
-                    state, ob, ob.time
+                _, st_em = _emission_epoch_for_state(
+                    state,
+                    epoch,
+                    ob,
+                    ob.time,
+                    max_iter=None,
+                    tol_sec=1e-6,
+                    debug_label="mc_grid",
                 )
-                dra = _wrap_deg(ob.ra_deg - attrib_pred.ra_deg)
-                dra *= math.cos(math.radians(ob.dec_deg))
-                ddec = ob.dec_deg - attrib_pred.dec_deg
+                attrib_pred, _, _ = attrib_from_state_with_observer_time(st_em, ob, ob.time)
+                dra = _wrap_deg(attrib_pred.ra_deg - ob.ra_deg)
+                dra *= math.cos(math.radians(attrib_pred.dec_deg))
+                ddec = attrib_pred.dec_deg - ob.dec_deg
                 dra_arcsec = dra * 3600.0
                 ddec_arcsec = ddec * 3600.0
-                sigma = float(ob.sigma_arcsec)
+                sigma = max(1e-6, float(ob.sigma_arcsec))
                 chi2 += (dra_arcsec / sigma) ** 2 + (ddec_arcsec / sigma) ** 2
             chi2_grid[i, j] = chi2
     chi2_min = float(np.nanmin(chi2_grid))
@@ -327,14 +345,15 @@ def _emission_epoch_for_state(
     obs_ref: Observation,
     t_obs: Time,
     *,
-    max_iter: int = 10,
+    max_iter: int | None = None,
     tol_sec: float = 1e-3,
     debug_label: str | None = None,
 ) -> tuple[Time, np.ndarray]:
     t_em = t_obs
     state_em = np.asarray(state, dtype=float)
     last_dt = None
-    for _ in range(max_iter):
+    iter_count = 0
+    while True:
         _, rho, _ = attrib_from_state_with_observer_time(state_em, obs_ref, t_obs)
         dt = float(rho) / C_KM_S
         t_em = t_obs - TimeDelta(dt, format="sec")
@@ -353,6 +372,17 @@ def _emission_epoch_for_state(
             ) from exc
         if last_dt is not None and abs(dt - last_dt) <= tol_sec:
             break
+        if max_iter is not None:
+            iter_count += 1
+            if iter_count >= max_iter:
+                break
+        else:
+            iter_count += 1
+            if iter_count >= 10000:
+                label = f" label={debug_label}" if debug_label else ""
+                raise RuntimeError(
+                    f"Emission-time iteration did not converge{label} dt={dt:.6f}s"
+                )
         last_dt = dt
     return t_em, state_em
 
