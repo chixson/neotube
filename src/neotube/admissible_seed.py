@@ -304,19 +304,65 @@ def _admissible_intervals(
     return dotmin, dotmax
 
 
-def admissible_rho_rhodot_envelope(
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping/adjacent intervals."""
+    if not intervals:
+        return []
+    arr = np.array(intervals, dtype=float)
+    arr = arr[np.isfinite(arr).all(axis=1)]
+    if arr.size == 0:
+        return []
+    idx = np.argsort(arr[:, 0])
+    arr = arr[idx]
+    merged = []
+    cur_l, cur_r = float(arr[0, 0]), float(arr[0, 1])
+    for a, b in arr[1:]:
+        a = float(a)
+        b = float(b)
+        if a <= cur_r * (1.0 + 1e-12) + 1e-12:
+            cur_r = max(cur_r, b)
+        else:
+            merged.append((cur_l, cur_r))
+            cur_l, cur_r = a, b
+    merged.append((cur_l, cur_r))
+    return merged
+
+
+def _quantile_bands(
+    dotmin_all: np.ndarray, dotmax_all: np.ndarray, q: Sequence[float]
+) -> dict[str, np.ndarray]:
+    """Compute per-rho quantiles for dotmin and dotmax."""
+    if dotmin_all.size == 0:
+        n_rho = dotmin_all.shape[1] if dotmin_all.ndim == 2 else 0
+        return {
+            "dotmin_q": np.full((len(q), n_rho), np.nan),
+            "dotmax_q": np.full((len(q), n_rho), np.nan),
+        }
+    dotmin_q = np.nanpercentile(dotmin_all, q, axis=0)
+    dotmax_q = np.nanpercentile(dotmax_all, q, axis=0)
+    return {"dotmin_q": dotmin_q, "dotmax_q": dotmax_q}
+
+
+def admissible_rho_rhodot_atlas(
     obs_ref: Observation,
     epoch: Time,
-    gamma_samples: list[np.ndarray],
+    gamma_samples: Sequence[Attributable] | Sequence[np.ndarray],
     cfg: SeedConfig,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    def _compute_envelope_for_grid(rho_grid: np.ndarray):
-        env_min = np.full(rho_grid.shape, np.inf, dtype=float)
-        env_max = np.full(rho_grid.shape, -np.inf, dtype=float)
-        n_ok = np.zeros(rho_grid.shape, dtype=int)
+    quantiles: Sequence[float] = (5.0, 25.0, 50.0, 75.0, 95.0),
+    max_intervals_per_rho: int = 8,
+) -> dict:
+    """Build an atlas of admissible rhodot intervals per rho."""
+    rho_grid = _rho_grid_from_cfg(cfg)
+    n_rho = len(rho_grid)
+    n_gamma = len(gamma_samples)
 
-        for attrib in gamma_samples:
-            dotmin, dotmax = _admissible_intervals(
+    dotmin_all = np.full((n_gamma, n_rho), np.nan, dtype=float)
+    dotmax_all = np.full((n_gamma, n_rho), np.nan, dtype=float)
+    n_ok = np.zeros(n_rho, dtype=int)
+
+    for ig, attrib in enumerate(gamma_samples):
+        try:
+            dm, dM = _admissible_intervals(
                 attrib,
                 obs_ref,
                 epoch,
@@ -326,52 +372,98 @@ def admissible_rho_rhodot_envelope(
                 speed_cap_km_s=cfg.admissible_speed_cap_km_s,
                 rhodot_clip_km_s=cfg.rhodot_max_km_s,
             )
-            valid = np.isfinite(dotmin) & np.isfinite(dotmax)
-            if not np.any(valid):
-                continue
-            env_min[valid] = np.minimum(env_min[valid], dotmin[valid])
-            env_max[valid] = np.maximum(env_max[valid], dotmax[valid])
-            n_ok[valid] += 1
+        except Exception:
+            continue
+        dotmin_all[ig, :] = dm
+        dotmax_all[ig, :] = dM
+        ok_mask = np.isfinite(dm) & np.isfinite(dM)
+        n_ok += ok_mask.astype(int)
 
-        env_min[~np.isfinite(env_min)] = np.nan
-        env_max[~np.isfinite(env_max)] = np.nan
-        return env_min, env_max, n_ok
+    unions: list[list[tuple[float, float]]] = []
+    for ir in range(n_rho):
+        ivals = []
+        for ig in range(n_gamma):
+            a = dotmin_all[ig, ir]
+            b = dotmax_all[ig, ir]
+            if np.isfinite(a) and np.isfinite(b) and b >= a:
+                ivals.append((float(a), float(b)))
+        merged = _merge_intervals(ivals)
+        if len(merged) > max_intervals_per_rho:
+            widths = [r - l for (l, r) in merged]
+            idx = np.argsort(widths)[::-1][:max_intervals_per_rho]
+            merged = [merged[i] for i in sorted(idx)]
+        unions.append(merged)
 
+    qbands = _quantile_bands(dotmin_all, dotmax_all, quantiles)
+
+    atlas = {
+        "rho_grid": rho_grid,
+        "unions": unions,
+        "quantiles": qbands,
+        "n_ok": n_ok,
+        "dotmin_all": dotmin_all,
+        "dotmax_all": dotmax_all,
+        "quantile_levels": tuple(quantiles),
+    }
+    return atlas
+
+
+def admissible_rho_rhodot_envelope(
+    obs_ref: Observation,
+    epoch: Time,
+    gamma_samples: list[np.ndarray],
+    cfg: SeedConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     rho_grid = _rho_grid_from_cfg(cfg)
-    env_min, env_max, n_ok = _compute_envelope_for_grid(rho_grid)
+    atlas = admissible_rho_rhodot_atlas(
+        obs_ref, epoch, gamma_samples, cfg, quantiles=(5, 25, 50, 75, 95)
+    )
+
+    env_min = np.full_like(rho_grid, np.inf, dtype=float)
+    env_max = np.full_like(rho_grid, -np.inf, dtype=float)
+    n_ok = atlas["n_ok"].copy()
+
+    for ir, unions in enumerate(atlas["unions"]):
+        if not unions:
+            continue
+        lefts = [u[0] for u in unions]
+        rights = [u[1] for u in unions]
+        env_min[ir] = np.min(lefts)
+        env_max[ir] = np.max(rights)
+
+    env_min[~np.isfinite(env_min)] = np.nan
+    env_max[~np.isfinite(env_max)] = np.nan
 
     if getattr(cfg, "refine_levels", 0) and len(rho_grid) < int(cfg.rho_grid_max_points):
         for _level in range(int(cfg.refine_levels)):
-            valid = np.isfinite(env_min) & np.isfinite(env_max)
-            widths = np.where(valid, (env_max - env_min), 0.0)
+            qdotmin = atlas["quantiles"]["dotmin_q"]
+            qdotmax = atlas["quantiles"]["dotmax_q"]
+            q_valid = np.isfinite(qdotmin) & np.isfinite(qdotmax)
+            trans_mask = np.zeros(len(rho_grid) - 1, dtype=bool)
+            for qidx in range(q_valid.shape[0]):
+                left = q_valid[qidx, :-1]
+                right = q_valid[qidx, 1:]
+                trans = left != right
+                trans_mask = trans_mask | trans
+                lw = (qdotmax[qidx, :-1] - qdotmin[qidx, :-1])
+                rw = (qdotmax[qidx, 1:] - qdotmin[qidx, 1:])
+                denom = np.maximum(1e-12, np.maximum(np.abs(lw), np.abs(rw)))
+                rel = np.abs(rw - lw) / denom
+                trans_mask = trans_mask | (rel > float(cfg.refine_width_frac))
 
-            left_valid = valid[:-1]
-            right_valid = valid[1:]
-            trans_mask = left_valid != right_valid
-
-            both_valid = left_valid & right_valid
-            if np.any(both_valid):
-                lw = widths[:-1][both_valid]
-                rw = widths[1:][both_valid]
-                denom = np.maximum(1e-12, np.maximum(lw, rw))
-                rel_change = np.abs(rw - lw) / denom
-                idxs_both = np.where(both_valid)[0]
-                large_change = rel_change > float(cfg.refine_width_frac)
-                trans_mask[idxs_both[large_change]] = True
-
-            refine_indices = np.where(trans_mask)[0]
+            refine_idx = np.where(trans_mask)[0]
+            if refine_idx.size == 0:
+                break
             new_rhos = []
-            for i in refine_indices:
+            for i in refine_idx:
                 r0 = float(rho_grid[i])
                 r1 = float(rho_grid[i + 1])
-                if r1 <= 0.0 or r0 <= 0.0:
-                    continue
-                subs = int(max(1, int(cfg.refine_fold)))
+                subs = int(max(1, cfg.refine_fold))
                 pts = np.logspace(math.log10(r0), math.log10(r1), subs + 2)[1:-1]
                 new_rhos.append(pts)
 
             if getattr(cfg, "refine_expand_on_edge", False):
-                if np.isfinite(env_min[-1]) and np.isfinite(env_max[-1]):
+                if np.any(q_valid[:, -1]):
                     rho_max_curr = float(rho_grid[-1])
                     rho_max_new = rho_max_curr * float(cfg.refine_expand_factor)
                     outer_pts = np.logspace(math.log10(rho_max_curr), math.log10(rho_max_new), 4)[
@@ -386,15 +478,50 @@ def admissible_rho_rhodot_envelope(
                 np.concatenate([np.asarray(x).ravel() for x in new_rhos])
             )
             combined = np.unique(np.concatenate([rho_grid, new_rhos_arr]))
-            if combined.size == rho_grid.size:
-                break
             if combined.size > int(cfg.rho_grid_max_points):
                 break
-
             rho_grid = np.sort(combined)
-            env_min, env_max, n_ok = _compute_envelope_for_grid(rho_grid)
+            atlas = admissible_rho_rhodot_atlas(
+                obs_ref, epoch, gamma_samples, cfg, quantiles=atlas["quantile_levels"]
+            )
+            env_min = np.full_like(rho_grid, np.inf, dtype=float)
+            env_max = np.full_like(rho_grid, -np.inf, dtype=float)
+            n_ok = atlas["n_ok"].copy()
+            for ir, unions in enumerate(atlas["unions"]):
+                if not unions:
+                    continue
+                lefts = [u[0] for u in unions]
+                rights = [u[1] for u in unions]
+                env_min[ir] = np.min(lefts)
+                env_max[ir] = np.max(rights)
+            env_min[~np.isfinite(env_min)] = np.nan
+            env_max[~np.isfinite(env_max)] = np.nan
 
-    return rho_grid, env_min, env_max, n_ok
+    return rho_grid, env_min, env_max, n_ok, atlas
+
+
+def log_rejected_samples(path: str, records: list[dict]) -> None:
+    """Append rejected samples to a compressed npz file."""
+    import os
+
+    arrs: dict[str, list] = {}
+    if os.path.exists(path):
+        try:
+            prev = dict(np.load(path))
+            for k, v in prev.items():
+                arrs[k] = list(v) if hasattr(v, "tolist") else list(v)
+        except Exception:
+            arrs = {}
+    for rec in records:
+        for k, v in rec.items():
+            arrs.setdefault(k, []).append(np.asarray(v))
+    save_dict = {}
+    for k, lst in arrs.items():
+        try:
+            save_dict[k] = np.asarray(lst)
+        except Exception:
+            save_dict[k] = np.array(lst, dtype=object)
+    np.savez_compressed(path, **save_dict)
 
 
 def _obs_chi2_for_state(
