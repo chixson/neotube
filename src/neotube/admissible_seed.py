@@ -368,6 +368,17 @@ def admissible_rho_rhodot_atlas(
     n_ok = np.zeros(n_rho, dtype=int)
 
     for ig, attrib in enumerate(gamma_samples):
+        # Accept either Attributable objects or 4-vectors.
+        if not isinstance(attrib, Attributable):
+            try:
+                attrib = Attributable(
+                    ra_deg=float(attrib[0]),
+                    dec_deg=float(attrib[1]),
+                    ra_dot_deg_per_day=float(attrib[2]),
+                    dec_dot_deg_per_day=float(attrib[3]),
+                )
+            except Exception:
+                continue
         try:
             dm, dM = _admissible_intervals(
                 attrib,
