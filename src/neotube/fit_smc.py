@@ -75,6 +75,114 @@ def _wrap_deg(delta_deg: float) -> float:
     return (delta_deg + 180.0) % 360.0 - 180.0
 
 
+def _weighted_percentiles(values: np.ndarray, weights: np.ndarray, perc: Sequence[float]) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    if values.size == 0:
+        return np.full(len(perc), np.nan, dtype=float)
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+    wsum = float(np.sum(weights))
+    if wsum <= 0:
+        return np.full(len(perc), np.nan, dtype=float)
+    cw = np.cumsum(weights) / wsum
+    return np.interp(np.asarray(perc, dtype=float) / 100.0, cw, values)
+
+
+def _report_cloud_stats(
+    states: np.ndarray,
+    weights: np.ndarray,
+    *,
+    label: str = "fit_smc",
+    logrho_bins: int = 8,
+) -> dict[str, object]:
+    states = np.asarray(states, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    wsum = float(np.sum(weights))
+    if wsum <= 0:
+        weights = np.ones(len(states), dtype=float) / max(1, len(states))
+    else:
+        weights = weights / wsum
+
+    n = int(len(states))
+    ess = float(1.0 / np.sum(weights**2)) if n else 0.0
+    w_stats = (float(np.min(weights)), float(np.median(weights)), float(np.max(weights))) if n else (0.0, 0.0, 0.0)
+
+    rnorm = np.linalg.norm(states[:, :3], axis=1) if n else np.array([])
+    logrho = np.log10(rnorm / AU_KM) if n else np.array([])
+    rho_pct = _weighted_percentiles(rnorm, weights, [0.5, 5, 16, 50, 84, 95, 99.5])
+
+    # Physicality summary
+    ok_flags = []
+    eps_vals = []
+    e_vals = []
+    a_vals = []
+    i_vals = []
+    for st in states:
+        ok, eps, a, e, r = _state_physicality(st)
+        ok_flags.append(ok)
+        eps_vals.append(eps)
+        e_vals.append(e)
+        a_vals.append(a)
+        # inclination from angular momentum
+        rvec = st[:3]
+        vvec = st[3:6]
+        hvec = np.cross(rvec, vvec)
+        hnorm = float(np.linalg.norm(hvec))
+        if hnorm > 0:
+            i_vals.append(float(np.degrees(np.arccos(hvec[2] / hnorm))))
+        else:
+            i_vals.append(float("nan"))
+    ok_flags = np.array(ok_flags, dtype=bool) if n else np.array([], dtype=bool)
+    eps_vals = np.array(eps_vals, dtype=float) if n else np.array([])
+    e_vals = np.array(e_vals, dtype=float) if n else np.array([])
+    a_vals = np.array(a_vals, dtype=float) if n else np.array([])
+    i_vals = np.array(i_vals, dtype=float) if n else np.array([])
+    frac_ok = float(np.mean(ok_flags)) if n else 0.0
+    frac_hyper = float(np.mean(np.isfinite(eps_vals) & (eps_vals >= 0.0))) if n else 0.0
+    e_pct = _weighted_percentiles(e_vals, weights, [16, 50, 84])
+    a_pct = _weighted_percentiles(a_vals, weights, [16, 50, 84])
+    i_pct = _weighted_percentiles(i_vals, weights, [16, 50, 84])
+
+    # log-rho bin coverage (counts and mass per bin)
+    if n:
+        edges = np.linspace(float(np.min(logrho)), float(np.max(logrho)), logrho_bins + 1)
+        idx = np.clip(np.digitize(logrho, edges) - 1, 0, logrho_bins - 1)
+        counts = np.bincount(idx, minlength=logrho_bins)
+        mass = np.zeros(logrho_bins, dtype=float)
+        for i in range(logrho_bins):
+            mass[i] = float(np.sum(weights[idx == i]))
+    else:
+        edges = np.array([])
+        counts = np.array([])
+        mass = np.array([])
+
+    stats = {
+        "n": n,
+        "ess": ess,
+        "weight_min_med_max": w_stats,
+        "rho_pct_km": rho_pct.tolist(),
+        "logrho_bins": logrho_bins,
+        "logrho_edges": edges.tolist(),
+        "logrho_counts": counts.tolist(),
+        "logrho_mass": mass.tolist(),
+        "frac_ok": frac_ok,
+        "frac_hyperbolic": frac_hyper,
+        "e_pct": e_pct.tolist(),
+        "a_pct_km": a_pct.tolist(),
+        "i_pct_deg": i_pct.tolist(),
+    }
+
+    print(f"[{label}] n={n} ess={ess:.2f} weight[min/med/max]={w_stats}")
+    print(f"[{label}] rho_km pct[0.5/5/16/50/84/95/99.5]={rho_pct}")
+    print(f"[{label}] logrho bins={logrho_bins} counts={counts.tolist()} mass={mass.tolist()}")
+    print(f"[{label}] frac_ok={frac_ok:.3f} frac_hyperbolic={frac_hyper:.3f} e_pct16/50/84={e_pct}")
+    print(f"[{label}] a_pct_km16/50/84={a_pct} i_pct_deg16/50/84={i_pct}")
+
+    return stats
+
+
 _MC_CTX: dict[str, object] = {}
 
 
@@ -697,6 +805,7 @@ def seed_and_test_cloud(
         "cov_init": cov_init,
         "attrib_next": attrib_next,
         "cov_next": cov_next,
+        "stats": _report_cloud_stats(states, weights, label="fit_smc"),
     }
 
 

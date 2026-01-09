@@ -43,6 +43,7 @@ class SeedConfig:
     admissible_n_rho: int = 400
     admissible_n_per_gamma: int = 8
     admissible_bound_only: bool = True
+    rho_prior_mode: str = "log"
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,20 @@ def _basic_state_ok(state: np.ndarray) -> bool:
         return bool(np.isfinite(rnorm) and 1e5 < rnorm < 1e11)
     except Exception:
         return False
+
+
+def _rho_grid_from_cfg(cfg: SeedConfig) -> np.ndarray:
+    rho_min = max(1e-12, float(cfg.rho_min_km))
+    rho_max = max(rho_min / AU_KM, float(cfg.rho_max_au)) * AU_KM
+    n = int(cfg.admissible_n_rho)
+    mode = str(cfg.rho_prior_mode or "log").lower()
+    if mode == "log":
+        return np.logspace(math.log10(rho_min), math.log10(rho_max), n)
+    if mode == "volume":
+        # Uniform in volume => CDF proportional to rho^3
+        r3 = np.linspace(rho_min**3, rho_max**3, n)
+        return np.cbrt(r3)
+    raise ValueError(f"Unknown rho_prior_mode: {cfg.rho_prior_mode}")
 
 
 def _sobol_samples(
@@ -331,11 +346,7 @@ def seed_local_from_attrib(
         )
         gamma_samples.extend(list(_sample_attributables(mean_vec, attrib_cov, u)))
 
-    rho_min = max(1e-12, float(cfg.rho_min_km))
-    rho_max = max(rho_min / AU_KM, float(cfg.rho_max_au)) * AU_KM
-    rho_grid = np.logspace(
-        math.log10(rho_min), math.log10(rho_max), int(cfg.admissible_n_rho)
-    )
+    rho_grid = _rho_grid_from_cfg(cfg)
 
     for gamma_vec in gamma_samples:
         attrib = Attributable(
@@ -679,6 +690,78 @@ def rhodot_intervals_for_rho(
     return merged
 
 
+def _coarse_chunk_worker_intervals(
+    gamma_chunk: list[np.ndarray],
+    observations: Sequence[Observation],
+    epoch: Time,
+    obs_ref: Observation,
+    rho_grid: np.ndarray,
+    cfg: SeedConfig,
+    coarse_k_sigma: float,
+    N_coarse: int,
+    seed_offset: int,
+) -> tuple[list[tuple[np.ndarray, np.ndarray, float, float, Attributable]], int]:
+    try:
+        local_rng = np.random.default_rng(int(cfg.seed or 0) + seed_offset)
+        obs_cache = [_observer_helio_state(ob, ob.time) for ob in observations]
+        accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
+        attempted = 0
+    except Exception as exc:
+        return ([], 0, f"worker_init_error: {exc!r}")
+    for gamma_vec in gamma_chunk:
+        attrib = Attributable(
+            ra_deg=float(gamma_vec[0]),
+            dec_deg=float(gamma_vec[1]),
+            ra_dot_deg_per_day=float(gamma_vec[2]),
+            dec_dot_deg_per_day=float(gamma_vec[3]),
+        )
+        for rho_val in rho_grid:
+            intervals = rhodot_intervals_for_rho(
+                attrib,
+                obs_ref,
+                epoch,
+                float(rho_val),
+                observations,
+                obs_cache,
+                k_sigma=coarse_k_sigma,
+                N_coarse=N_coarse,
+            )
+            if not intervals:
+                continue
+            for lo, hi in intervals:
+                if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                    continue
+                nper = int(cfg.admissible_n_per_gamma)
+                for _ in range(nper):
+                    attempted += 1
+                    rhodot_val = lo + local_rng.random() * (hi - lo)
+                    st = _build_state_from_sample(
+                        obs_ref,
+                        epoch,
+                        gamma_vec,
+                        float(rho_val),
+                        float(rhodot_val),
+                        v_max_km_s=cfg.v_max_km_s,
+                        rate_max_deg_day=cfg.rate_max_deg_day,
+                    )
+                    if st is None:
+                        continue
+                    lin_chi2 = _linearized_chi2(st, observations, obs_cache)
+                    if np.any(lin_chi2 > (16.0 * (coarse_k_sigma**2))):
+                        continue
+                    if _state_passes_hard_tube(
+                        st, epoch, observations, obs_cache, k_sigma=coarse_k_sigma
+                    ):
+                        r0 = st[:3].astype(float)
+                        v0 = st[3:].astype(float)
+                        accepted.append(
+                            (r0, v0, float(rho_val), float(rhodot_val), attrib)
+                        )
+        if len(accepted) >= max(200, cfg.admissible_n_per_gamma * 50):
+            break
+    return (accepted, attempted, None)
+
+
 def _coarse_chunk_worker(
     gamma_chunk: list[np.ndarray],
     observations: Sequence[Observation],
@@ -782,11 +865,7 @@ def sample_admissible_beads(
         )
         gamma_samples.extend(list(_sample_attributables(mean_vec, attrib_cov, u)))
 
-    rho_min = max(1e-12, float(cfg.rho_min_km))
-    rho_max = max(rho_min / AU_KM, float(cfg.rho_max_au)) * AU_KM
-    rho_grid = np.logspace(
-        math.log10(rho_min), math.log10(rho_max), int(cfg.admissible_n_rho)
-    )
+    rho_grid = _rho_grid_from_cfg(cfg)
 
     obs_ref = _ranging_reference_observation(observations, epoch)
     obs_ref_pos, obs_ref_vel = _observer_helio_state(obs_ref, epoch)
@@ -897,6 +976,7 @@ def adaptive_sample_admissible_beads(
     adaptive_rounds: int = 3,
     adaptive_samples_per_cell: int = 200,
     N_coarse: int = 41,
+    n_workers: int | None = None,
 ) -> dict[str, object]:
     rng = np.random.default_rng(cfg.seed)
     obs_ref = _ranging_reference_observation(observations, epoch)
@@ -922,66 +1002,59 @@ def adaptive_sample_admissible_beads(
         )
         gamma_samples.extend(list(_sample_attributables(mean_vec, attrib_cov, u)))
 
-    rho_min = max(1e-12, float(cfg.rho_min_km))
-    rho_max = max(rho_min / AU_KM, float(cfg.rho_max_au)) * AU_KM
-    rho_grid = np.logspace(
-        math.log10(rho_min), math.log10(rho_max), int(cfg.admissible_n_rho)
-    )
+    rho_grid = _rho_grid_from_cfg(cfg)
 
     accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
     attempted = 0
 
-    for gamma_vec in gamma_samples:
-        attrib = Attributable(
-            ra_deg=float(gamma_vec[0]),
-            dec_deg=float(gamma_vec[1]),
-            ra_dot_deg_per_day=float(gamma_vec[2]),
-            dec_dot_deg_per_day=float(gamma_vec[3]),
-        )
-        for rho_val in rho_grid:
-            intervals = rhodot_intervals_for_rho(
-                attrib,
-                obs_ref,
-                epoch,
-                float(rho_val),
-                observations,
-                obs_cache,
-                k_sigma=coarse_k_sigma,
-                N_coarse=N_coarse,
-            )
-            if not intervals:
-                continue
-            for (lo, hi) in intervals:
-                if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-                    continue
-                nper = int(cfg.admissible_n_per_gamma)
-                for _ in range(nper):
-                    attempted += 1
-                    rhodot_val = lo + rng.random() * (hi - lo)
-                    st = _build_state_from_sample(
-                        obs_ref,
+    if n_workers is None:
+        n_workers = 1
+    if n_workers > 1 and len(gamma_samples) > 1:
+        chunks = np.array_split(np.array(gamma_samples, dtype=object), n_workers)
+        with mp.Pool(processes=n_workers) as pool:
+            results = pool.starmap(
+                _coarse_chunk_worker_intervals,
+                [
+                    (
+                        list(chunk),
+                        observations,
                         epoch,
-                        gamma_vec,
-                        float(rho_val),
-                        float(rhodot_val),
-                        v_max_km_s=cfg.v_max_km_s,
-                        rate_max_deg_day=cfg.rate_max_deg_day,
+                        obs_ref,
+                        rho_grid,
+                        cfg,
+                        coarse_k_sigma,
+                        N_coarse,
+                        i * 1000,
                     )
-                    if st is None:
-                        continue
-                    lin_chi2 = _linearized_chi2(st, observations, obs_cache)
-                    if np.any(lin_chi2 > (16.0 * (coarse_k_sigma**2))):
-                        continue
-                    if _state_passes_hard_tube(
-                        st, epoch, observations, obs_cache, k_sigma=coarse_k_sigma
-                    ):
-                        r0 = st[:3].astype(float)
-                        v0 = st[3:].astype(float)
-                        accepted.append(
-                            (r0, v0, float(rho_val), float(rhodot_val), attrib)
-                        )
-        if len(accepted) >= max(200, target // 4):
-            break
+                    for i, chunk in enumerate(chunks)
+                ],
+            )
+        for acc_chunk, att_chunk, err in results:
+            if err:
+                print(f"[admissible] worker error: {err}")
+                continue
+            accepted.extend(acc_chunk)
+            attempted += att_chunk
+    else:
+        acc_chunk, att_chunk, err = _coarse_chunk_worker_intervals(
+            gamma_samples,
+            observations,
+            epoch,
+            obs_ref,
+            rho_grid,
+            cfg,
+            coarse_k_sigma,
+            N_coarse,
+            0,
+        )
+        if err:
+            print(f"[admissible] worker error: {err}")
+        else:
+            accepted.extend(acc_chunk)
+            attempted += att_chunk
+
+    if len(accepted) >= max(200, target // 4):
+        accepted = accepted[: max(200, target // 4)]
 
     if len(accepted) == 0:
         return {"accepted_count": 0, "attempted": attempted}
