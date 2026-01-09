@@ -1509,6 +1509,9 @@ def adaptive_sample_admissible_beads(
     adaptive_samples_per_cell: int = 200,
     N_coarse: int = 41,
     n_workers: int | None = None,
+    backfill_n: int | None = None,
+    backfill_per_gamma_cap: int = 500,
+    backfill_rho_jitter_dex: float = 0.01,
 ) -> dict[str, object]:
     rng = np.random.default_rng(cfg.seed)
     obs_ref = _ranging_reference_observation(observations, epoch)
@@ -1593,6 +1596,71 @@ def adaptive_sample_admissible_beads(
 
     if len(accepted) >= max(200, target // 4):
         accepted = accepted[: max(200, target // 4)]
+
+    if len(accepted) == 0 and target <= 0:
+        return {"accepted_count": 0, "attempted": attempted}
+
+    # Backfill interior using atlas unions (Sobol/QMC), then filter with final gate.
+    if backfill_n is None:
+        backfill_n = max(0, int(target))
+    if backfill_n > 0:
+        backfill_out = backfill_atlas(
+            atlas,
+            gamma_samples,
+            n_backfill=int(backfill_n),
+            per_gamma_cap=int(backfill_per_gamma_cap),
+            rho_jitter_dex=float(backfill_rho_jitter_dex),
+            use_sobol=True,
+            seed=cfg.seed,
+        )
+        samples = backfill_out.get("samples", [])
+        if cfg.admissible_write_diagnostics:
+            out_dir = cfg.admissible_diagnostics_dir
+            if out_dir is None:
+                out_dir = os.getenv("RUN_DIR") or os.path.join("runs", "admissible")
+            write_backfill_diagnostics(backfill_out, out_dir)
+
+        for s in samples:
+            if len(accepted) >= target:
+                break
+            ig = int(s["gamma_idx"])
+            if ig < 0 or ig >= len(gamma_samples):
+                continue
+            gamma_vec = gamma_samples[ig]
+            rho_val = float(s["rho_km"])
+            rhodot_val = float(s["rhodot_km_s"])
+            attempted += 1
+            st = _build_state_from_sample(
+                obs_ref,
+                epoch,
+                gamma_vec,
+                rho_val,
+                rhodot_val,
+                v_max_km_s=cfg.v_max_km_s,
+                rate_max_deg_day=cfg.rate_max_deg_day,
+            )
+            if st is None:
+                continue
+            if not _state_passes_hard_tube(
+                st, epoch, observations, obs_cache, k_sigma=final_k_sigma
+            ):
+                continue
+            r0 = st[:3].astype(float)
+            v0 = st[3:].astype(float)
+            accepted.append(
+                (
+                    r0,
+                    v0,
+                    rho_val,
+                    rhodot_val,
+                    Attributable(
+                        ra_deg=float(gamma_vec[0]),
+                        dec_deg=float(gamma_vec[1]),
+                        ra_dot_deg_per_day=float(gamma_vec[2]),
+                        dec_dot_deg_per_day=float(gamma_vec[3]),
+                    ),
+                )
+            )
 
     if len(accepted) == 0:
         return {"accepted_count": 0, "attempted": attempted}
