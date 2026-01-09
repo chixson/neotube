@@ -497,8 +497,6 @@ if __name__ == "__main__":
     from astropy.utils import iers
     import json
     import os
-    from multiprocessing import Pool
-
     import numpy as np
 
     iers.conf.auto_download = False
@@ -507,193 +505,107 @@ if __name__ == "__main__":
     obs_path = Path("runs/ceres/obs.csv")
     observations = load_observations(obs_path, sigma=None, skip_special_sites=False)
 
-    nmc = int(os.getenv("NMC", "1000"))
-    n_grid = int(os.getenv("NGRID", "40"))
+    n_draws = int(os.getenv("N_DRAWS", "50"))
+    n_rho = int(os.getenv("N_RHO", "40"))
+    n_rhodot = int(os.getenv("N_RHODOT", "40"))
     rho_min_au = float(os.getenv("RHO_MIN_AU", "1e-6"))
     rho_max_au = float(os.getenv("RHO_MAX_AU", "200.0"))
-    workers = int(os.getenv("WORKERS", "1"))
-    chunk = int(os.getenv("CHUNK", "200"))
+    rhodot_max_km_s = float(os.getenv("RHODOT_MAX", "100.0"))
+    conf = float(os.getenv("CONF", "0.99"))
 
-    triplet = observations[:3]
-    nominal = solve_three_point_exact(
-        triplet,
-        nmc=0,
-        n_grid=n_grid,
-        rho_min_au=rho_min_au,
-        rho_max_au=rho_max_au,
-        debug=False,
+    obs_window = observations[:3]
+    epoch = _midpoint_time(obs_window)
+    obs_ref = _ranging_reference_observation(obs_window, epoch)
+    attrib_fit, cov = build_attributable_vector_fit(obs_window, epoch, return_cov=True)
+
+    mean_vec = np.array(
+        [
+            attrib_fit.ra_deg,
+            attrib_fit.dec_deg,
+            attrib_fit.ra_dot_deg_per_day,
+            attrib_fit.dec_dot_deg_per_day,
+        ],
+        dtype=float,
     )
-    nominal_roots = [
-        float(root.rho_km)
-        for root in nominal["roots"]
-        if root.ok and np.isfinite(root.rho_km)
-    ]
-    nominal_roots.sort()
+    jitter = 1e-12 * np.eye(4)
+    L = np.linalg.cholesky(cov + jitter)
+    rng = np.random.default_rng(12345)
 
-    obs_ref = triplet[1]
-    ceres_state = fetch_horizons_state("1", nominal["epoch"], location="@sun", refplane="earth")
-    _, ceres_rho_km, ceres_rhodot_km_s = attrib_from_state_with_observer_time(
-        ceres_state, obs_ref, nominal["epoch"]
-    )
-    fit = _fit_tangent_plane_quadratic_coeffs(triplet, nominal["epoch"])
-    rho_probe_km = AU_KM
-    debug_data = _compute_accels_for_rho(
-        rho_probe_km, fit, nominal["epoch"], obs_ref, _default_nbody_accel
-    )
-    t1, t2 = _tangent_basis(debug_data["s_em"], debug_data["sdot_em"])
-    t2_sddot = float(np.dot(t2, debug_data["sddot_em"]))
-    rhs = float(np.dot(t2, (-debug_data["a_total"] - debug_data["ddot_earth"])))
-    approx_rho = rhs / t2_sddot if abs(t2_sddot) > 0 else float("nan")
+    rho_grid = np.logspace(math.log10(rho_min_au), math.log10(rho_max_au), n_rho) * AU_KM
+    rhodot_grid = np.linspace(-rhodot_max_km_s, rhodot_max_km_s, n_rhodot)
+    union_mask = np.zeros((n_rho, n_rhodot), dtype=bool)
 
-    def _perturb_triplet(rng: np.random.Generator) -> list[Observation]:
-        perturbed = []
-        for ob in triplet:
-            sigma_arc = max(1e-6, float(ob.sigma_arcsec))
-            sigma_dec_deg = sigma_arc / 3600.0
-            sigma_ra_deg = sigma_arc / 3600.0 / max(1e-8, math.cos(math.radians(ob.dec_deg)))
-            ra_i = float(ob.ra_deg + rng.normal(0.0, sigma_ra_deg))
-            dec_i = float(ob.dec_deg + rng.normal(0.0, sigma_dec_deg))
-            perturbed.append(
-                Observation(
-                    time=ob.time,
-                    ra_deg=ra_i,
-                    dec_deg=dec_i,
-                    sigma_arcsec=ob.sigma_arcsec,
-                    site=ob.site,
-                    observer_pos_km=ob.observer_pos_km,
-                    mag=ob.mag,
-                    sigma_mag=ob.sigma_mag,
-                )
-            )
-        return perturbed
+    def _wrap_ra_deg(delta_deg: float) -> float:
+        return (delta_deg + 180.0) % 360.0 - 180.0
 
-    def _worker_mc(args: tuple[int, int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[list[tuple[float, float]]]]:
-        draws, seed, grid = args
-        rng = np.random.default_rng(seed)
-        s_list = []
-        sdot_list = []
-        sddot_list = []
-        roots_list: list[list[tuple[float, float]]] = []
-        for _ in range(draws):
-            perturbed = _perturb_triplet(rng)
-            res = solve_three_point_exact(
-                perturbed,
-                nmc=0,
-                n_grid=grid,
-                rho_min_au=rho_min_au,
-                rho_max_au=rho_max_au,
-                debug=False,
-            )
-            s_list.append(np.asarray(res["s"], dtype=float))
-            sdot_list.append(np.asarray(res["sdot"], dtype=float))
-            sddot_list.append(np.asarray(res["sddot"], dtype=float))
-            roots = []
-            for root in res["roots"]:
-                if root.ok and np.isfinite(root.rho_km) and np.isfinite(root.rhodot_km_s):
-                    roots.append((float(root.rho_km), float(root.rhodot_km_s)))
-            roots_list.append(roots)
-        return np.vstack(s_list), np.vstack(sdot_list), np.vstack(sddot_list), roots_list
+    chi2_delta = float(stats.chi2.ppf(conf, df=2))
 
-    draws_per_task = max(1, chunk)
-    n_full = nmc // draws_per_task
-    remainder = nmc % draws_per_task
-    tasks: list[tuple[int, int, int]] = []
-    seed_base = int(np.random.SeedSequence().entropy)
-    for i in range(n_full):
-        tasks.append((draws_per_task, seed_base + i, n_grid))
-    if remainder:
-        tasks.append((remainder, seed_base + n_full, n_grid))
-
-    s_all = []
-    sdot_all = []
-    sddot_all = []
-    roots_all: list[list[tuple[float, float]]] = []
-
-    if workers > 1:
-        with Pool(processes=workers) as pool:
-            for idx, (s_chunk, sdot_chunk, sddot_chunk, roots_chunk) in enumerate(
-                pool.imap_unordered(_worker_mc, tasks), start=1
-            ):
-                s_all.append(s_chunk)
-                sdot_all.append(sdot_chunk)
-                sddot_all.append(sddot_chunk)
-                roots_all.extend(roots_chunk)
-                print(f"chunk {idx}/{len(tasks)} done")
-    else:
-        for idx, task in enumerate(tasks, start=1):
-            s_chunk, sdot_chunk, sddot_chunk, roots_chunk = _worker_mc(task)
-            s_all.append(s_chunk)
-            sdot_all.append(sdot_chunk)
-            sddot_all.append(sddot_chunk)
-            roots_all.extend(roots_chunk)
-            print(f"chunk {idx}/{len(tasks)} done")
-
-    s_arr = np.vstack(s_all)
-    sdot_arr = np.vstack(sdot_all)
-    sddot_arr = np.vstack(sddot_all)
-
-    root_rho_samples = [[] for _ in nominal_roots]
-    root_rhodot_samples = [[] for _ in nominal_roots]
-    for roots in roots_all:
-        if len(roots) != len(nominal_roots) or not roots:
-            continue
-        roots_sorted = sorted(roots, key=lambda item: item[0])
-        for idx, (rho_val, rhodot_val) in enumerate(roots_sorted):
-            root_rho_samples[idx].append(rho_val)
-            root_rhodot_samples[idx].append(rhodot_val)
-
-    root_stats = []
-    for idx, _ in enumerate(nominal_roots):
-        rho_vals = np.array(root_rho_samples[idx], dtype=float)
-        rhodot_vals = np.array(root_rhodot_samples[idx], dtype=float)
-        if rho_vals.size == 0:
-            root_stats.append({"n_samples": 0})
-            continue
-        rho_mean = float(np.mean(rho_vals))
-        rho_std = float(np.std(rho_vals))
-        rhodot_mean = float(np.mean(rhodot_vals))
-        rhodot_std = float(np.std(rhodot_vals))
-        z_rho = (float(ceres_rho_km) - rho_mean) / rho_std if rho_std > 0 else float("nan")
-        z_rhodot = (
-            (float(ceres_rhodot_km_s) - rhodot_mean) / rhodot_std if rhodot_std > 0 else float("nan")
+    theta_draws = []
+    for draw_idx in range(n_draws):
+        z = rng.normal(size=4)
+        draw_vec = mean_vec + L @ z
+        attrib_draw = Attributable(
+            ra_deg=float(draw_vec[0]),
+            dec_deg=float(draw_vec[1]),
+            ra_dot_deg_per_day=float(draw_vec[2]),
+            dec_dot_deg_per_day=float(draw_vec[3]),
         )
-        root_stats.append(
+        chi2_grid = np.full((n_rho, n_rhodot), np.inf, dtype=float)
+        for i, rho_km in enumerate(rho_grid):
+            for j, rhodot_km_s in enumerate(rhodot_grid):
+                try:
+                    state = build_state_from_ranging(
+                        obs_ref, epoch, attrib_draw, float(rho_km), float(rhodot_km_s)
+                    )
+                except Exception:
+                    continue
+                chi2 = 0.0
+                for ob in obs_window:
+                    attrib_pred, _, _ = attrib_from_state_with_observer_time(
+                        state, ob, ob.time
+                    )
+                    dra = _wrap_ra_deg(ob.ra_deg - attrib_pred.ra_deg)
+                    dra *= math.cos(math.radians(ob.dec_deg))
+                    ddec = ob.dec_deg - attrib_pred.dec_deg
+                    dra_arcsec = dra * 3600.0
+                    ddec_arcsec = ddec * 3600.0
+                    sigma = float(ob.sigma_arcsec)
+                    chi2 += (dra_arcsec / sigma) ** 2 + (ddec_arcsec / sigma) ** 2
+                chi2_grid[i, j] = chi2
+        chi2_min = float(np.nanmin(chi2_grid))
+        min_idx = int(np.nanargmin(chi2_grid))
+        min_i, min_j = np.unravel_index(min_idx, chi2_grid.shape)
+        theta_draws.append(
             {
-                "n_samples": int(rho_vals.size),
-                "rho_mean": rho_mean,
-                "rho_std": rho_std,
-                "rhodot_mean": rhodot_mean,
-                "rhodot_std": rhodot_std,
-                "z_rho": z_rho,
-                "z_rhodot": z_rhodot,
+                "alpha_deg": float(draw_vec[0]),
+                "alpha_dot_deg_per_day": float(draw_vec[2]),
+                "delta_deg": float(draw_vec[1]),
+                "delta_dot_deg_per_day": float(draw_vec[3]),
+                "rho_km": float(rho_grid[min_i]),
+                "rhodot_km_s": float(rhodot_grid[min_j]),
+                "chi2_min": chi2_min,
             }
         )
+        threshold = chi2_min + chi2_delta
+        union_mask |= chi2_grid <= threshold
+        print(f"draw {draw_idx + 1}/{n_draws} chi2_min={chi2_min:.3f}")
 
+    accepted = int(np.sum(union_mask))
+    total = int(union_mask.size)
     payload = {
-        "obs_times": [str(ob.time.utc.iso) for ob in triplet],
-        "epoch": str(nominal["epoch"].utc.iso),
-        "s_mean": np.mean(s_arr, axis=0).tolist(),
-        "s_std": np.std(s_arr, axis=0).tolist(),
-        "sdot_mean": np.mean(sdot_arr, axis=0).tolist(),
-        "sdot_std": np.std(sdot_arr, axis=0).tolist(),
-        "sddot_mean": np.mean(sddot_arr, axis=0).tolist(),
-        "sddot_std": np.std(sddot_arr, axis=0).tolist(),
-        "ceres": {
-            "rho_km": float(ceres_rho_km),
-            "rhodot_km_s": float(ceres_rhodot_km_s),
-            "state": np.asarray(ceres_state, dtype=float).tolist(),
-        },
-        "roots": root_stats,
-        "nmc": nmc,
-        "n_grid": n_grid,
+        "obs_times": [str(ob.time.utc.iso) for ob in obs_window],
+        "epoch": str(epoch.utc.iso),
+        "rho_grid_km": rho_grid.tolist(),
+        "rhodot_grid_km_s": rhodot_grid.tolist(),
+        "union_mask": union_mask.astype(int).tolist(),
+        "theta_draws": theta_draws,
+        "accepted_cells": accepted,
+        "total_cells": total,
+        "accepted_fraction": accepted / max(1, total),
+        "n_draws": n_draws,
+        "conf": conf,
     }
-    out_path = obs_path.parent / "three_point_mc.json"
+    out_path = obs_path.parent / "admissible_mc.json"
     out_path.write_text(json.dumps(payload, indent=2))
-    print("triplet[0] epoch:", payload["epoch"])
-    print("t2·sddot:", t2_sddot)
-    print("t2·(-a_total - ddot_earth):", rhs)
-    print("approx rho from ratio:", approx_rho)
-    print("ceres rho_km:", float(ceres_rho_km))
-    print("ceres rhodot_km_s:", float(ceres_rhodot_km_s))
-    print("root_stats:", root_stats)
     print(f"Wrote {out_path}")
+    print(f"Accepted fraction: {payload['accepted_fraction']:.3f}")
