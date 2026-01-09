@@ -96,6 +96,9 @@ def _report_cloud_stats(
     *,
     label: str = "fit_smc",
     logrho_bins: int = 8,
+    obs_ref: Observation | None = None,
+    epoch: Time | None = None,
+    jpl_target: str | None = None,
 ) -> dict[str, object]:
     states = np.asarray(states, dtype=float)
     weights = np.asarray(weights, dtype=float)
@@ -179,6 +182,95 @@ def _report_cloud_stats(
     print(f"[{label}] logrho bins={logrho_bins} counts={counts.tolist()} mass={mass.tolist()}")
     print(f"[{label}] frac_ok={frac_ok:.3f} frac_hyperbolic={frac_hyper:.3f} e_pct16/50/84={e_pct}")
     print(f"[{label}] a_pct_km16/50/84={a_pct} i_pct_deg16/50/84={i_pct}")
+
+    # Sky-region diagnostic: compute circular RA/Dec coverage for the accepted beads.
+    if n and obs_ref is not None and epoch is not None:
+        try:
+            obs_pos, obs_vel = _observer_helio_state(obs_ref, obs_ref.time)
+            ra_list = []
+            dec_list = []
+            for st in states:
+                try:
+                    _, st_em = _emission_epoch_for_state(
+                        st, epoch, obs_ref, obs_ref.time,
+                        max_iter=20, tol_sec=1e-4,
+                        obs_pos=obs_pos, obs_vel=obs_vel,
+                    )
+                    attrib_pred, _, _ = _attrib_from_state_cached(st_em, obs_pos, obs_vel)
+                except Exception:
+                    continue
+                ra_list.append(float(attrib_pred.ra_deg))
+                dec_list.append(float(attrib_pred.dec_deg))
+            if ra_list:
+                ra_arr = np.array(ra_list, dtype=float)
+                dec_arr = np.array(dec_list, dtype=float)
+                # unit vectors
+                ra_rad = np.deg2rad(ra_arr)
+                dec_rad = np.deg2rad(dec_arr)
+                vecs = np.column_stack(
+                    [np.cos(dec_rad) * np.cos(ra_rad),
+                     np.cos(dec_rad) * np.sin(ra_rad),
+                     np.sin(dec_rad)]
+                )
+                # weighted mean direction
+                w_use = weights[: len(vecs)]
+                if w_use.sum() <= 0:
+                    w_use = np.ones(len(vecs), dtype=float) / max(1, len(vecs))
+                else:
+                    w_use = w_use / float(w_use.sum())
+                v_mean = np.average(vecs, axis=0, weights=w_use)
+                v_mean /= np.linalg.norm(v_mean)
+                # center RA/Dec
+                center_ra = float(np.degrees(np.arctan2(v_mean[1], v_mean[0])) % 360.0)
+                center_dec = float(np.degrees(np.arcsin(np.clip(v_mean[2], -1.0, 1.0))))
+                # angular separation to center
+                dot = np.clip(vecs @ v_mean, -1.0, 1.0)
+                ang = np.degrees(np.arccos(dot))
+                radius_deg = float(np.max(ang)) if ang.size else float("nan")
+
+                stats["ra_dec_circle"] = {
+                    "center_ra_deg": center_ra,
+                    "center_dec_deg": center_dec,
+                    "radius_deg": radius_deg,
+                }
+                print(
+                    f"[{label}] sky_circle center_ra={center_ra:.6f} center_dec={center_dec:.6f} radius_deg={radius_deg:.6f}"
+                )
+
+                # JPL target check (optional)
+                if jpl_target:
+                    try:
+                        jpl_state = fetch_horizons_state(jpl_target, epoch, location="@sun", refplane="earth")
+                        jpl_state = np.asarray(jpl_state, dtype=float).reshape(6)
+                        attrib_jpl, _, _ = attrib_from_state_with_observer_time(
+                            jpl_state, obs_ref, obs_ref.time
+                        )
+                        jpl_ra = float(attrib_jpl.ra_deg)
+                        jpl_dec = float(attrib_jpl.dec_deg)
+                        # distance from center
+                        jpl_vec = np.array(
+                            [
+                                np.cos(np.deg2rad(jpl_dec)) * np.cos(np.deg2rad(jpl_ra)),
+                                np.cos(np.deg2rad(jpl_dec)) * np.sin(np.deg2rad(jpl_ra)),
+                                np.sin(np.deg2rad(jpl_dec)),
+                            ],
+                            dtype=float,
+                        )
+                        dist_deg = float(np.degrees(np.arccos(np.clip(jpl_vec @ v_mean, -1.0, 1.0))))
+                        inside = dist_deg <= radius_deg if np.isfinite(radius_deg) else False
+                        stats["ra_dec_circle"]["jpl_ra_deg"] = jpl_ra
+                        stats["ra_dec_circle"]["jpl_dec_deg"] = jpl_dec
+                        stats["ra_dec_circle"]["jpl_dist_deg"] = dist_deg
+                        stats["ra_dec_circle"]["jpl_inside"] = bool(inside)
+                        stats["ra_dec_circle"]["jpl_edge_distance_deg"] = float(radius_deg - dist_deg)
+                        print(
+                            f"[{label}] jpl_target={jpl_target} dist_deg={dist_deg:.6f} inside={inside} edge_delta_deg={(radius_deg - dist_deg):.6f}"
+                        )
+                    except Exception as exc:
+                        stats["ra_dec_circle"] = stats.get("ra_dec_circle", {})
+                        stats["ra_dec_circle"]["jpl_error"] = str(exc)
+        except Exception as exc:
+            stats["ra_dec_circle_error"] = str(exc)
 
     return stats
 
@@ -805,7 +897,14 @@ def seed_and_test_cloud(
         "cov_init": cov_init,
         "attrib_next": attrib_next,
         "cov_next": cov_next,
-        "stats": _report_cloud_stats(states, weights, label="fit_smc"),
+        "stats": _report_cloud_stats(
+            states,
+            weights,
+            label="fit_smc",
+            obs_ref=obs_ref,
+            epoch=t0,
+            jpl_target=jpl_target,
+        ),
     }
 
 
