@@ -240,14 +240,24 @@ def _report_cloud_stats(
                 # JPL target check (optional)
                 if jpl_target:
                     try:
-                        jpl_state = fetch_horizons_state(jpl_target, epoch, location="@sun", refplane="earth")
-                        jpl_state = np.asarray(jpl_state, dtype=float).reshape(6)
-                        attrib_jpl, _, _ = attrib_from_state_with_observer_time(
-                            jpl_state, obs_ref, obs_ref.time
+                        jpl_state = fetch_horizons_state(
+                            jpl_target, epoch, location="@sun", refplane="earth"
                         )
+                        jpl_state = np.asarray(jpl_state, dtype=float).reshape(6)
+                        # Use the exact same emission-time + cached attrib path as beads.
+                        _, jpl_em = _emission_epoch_for_state(
+                            jpl_state,
+                            epoch,
+                            obs_ref,
+                            obs_ref.time,
+                            max_iter=20,
+                            tol_sec=1e-4,
+                            obs_pos=obs_pos,
+                            obs_vel=obs_vel,
+                        )
+                        attrib_jpl, _, _ = _attrib_from_state_cached(jpl_em, obs_pos, obs_vel)
                         jpl_ra = float(attrib_jpl.ra_deg)
                         jpl_dec = float(attrib_jpl.dec_deg)
-                        # distance from center
                         jpl_vec = np.array(
                             [
                                 np.cos(np.deg2rad(jpl_dec)) * np.cos(np.deg2rad(jpl_ra)),
@@ -256,13 +266,17 @@ def _report_cloud_stats(
                             ],
                             dtype=float,
                         )
-                        dist_deg = float(np.degrees(np.arccos(np.clip(jpl_vec @ v_mean, -1.0, 1.0))))
+                        dist_deg = float(
+                            np.degrees(np.arccos(np.clip(jpl_vec @ v_mean, -1.0, 1.0)))
+                        )
                         inside = dist_deg <= radius_deg if np.isfinite(radius_deg) else False
                         stats["ra_dec_circle"]["jpl_ra_deg"] = jpl_ra
                         stats["ra_dec_circle"]["jpl_dec_deg"] = jpl_dec
                         stats["ra_dec_circle"]["jpl_dist_deg"] = dist_deg
                         stats["ra_dec_circle"]["jpl_inside"] = bool(inside)
-                        stats["ra_dec_circle"]["jpl_edge_distance_deg"] = float(radius_deg - dist_deg)
+                        stats["ra_dec_circle"]["jpl_edge_distance_deg"] = float(
+                            radius_deg - dist_deg
+                        )
                         print(
                             f"[{label}] jpl_target={jpl_target} dist_deg={dist_deg:.6f} inside={inside} edge_delta_deg={(radius_deg - dist_deg):.6f}"
                         )
