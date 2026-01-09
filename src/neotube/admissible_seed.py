@@ -1778,3 +1778,184 @@ def seed_cloud_from_observations(
         obs_ref=obs_ref,
         epoch=epoch,
     )
+
+
+def sobol_2d_samples(n: int, *, scramble: bool = True, seed: int | None = None) -> np.ndarray:
+    """Return n x 2 samples in (0,1)^2 using Sobol or RNG fallback."""
+    if n <= 0:
+        return np.zeros((0, 2), dtype=float)
+    try:
+        sampler = qmc.Sobol(d=2, scramble=bool(scramble), seed=seed)
+        return sampler.random(n)
+    except Exception:
+        rng = np.random.default_rng(seed)
+        return rng.random((n, 2))
+
+
+def backfill_gamma(
+    atlas: dict,
+    gamma_idx: int,
+    n_per_gamma: int,
+    *,
+    rho_jitter_dex: float = 0.01,
+    eps_inside_frac: float = 0.02,
+    eps_min: float = 1e-9,
+    use_sobol: bool = True,
+    seed: int | None = None,
+) -> list[dict]:
+    """Backfill admissible area for a single gamma."""
+    dotmin_all = atlas.get("dotmin_all")
+    dotmax_all = atlas.get("dotmax_all")
+    rho_grid = np.asarray(atlas["rho_grid"], dtype=float)
+    if dotmin_all is None or dotmax_all is None:
+        return []
+    lefts = np.asarray(dotmin_all[gamma_idx, :], dtype=float)
+    rights = np.asarray(dotmax_all[gamma_idx, :], dtype=float)
+    valid_mask = np.isfinite(lefts) & np.isfinite(rights) & (rights > lefts)
+    irs = np.where(valid_mask)[0]
+    if irs.size == 0:
+        return []
+    lengths = rights[irs] - lefts[irs]
+    total_len = float(np.sum(lengths))
+    if total_len <= 0:
+        return []
+
+    cum = np.cumsum(lengths) / total_len
+    uv = sobol_2d_samples(n_per_gamma, scramble=True, seed=seed) if use_sobol else np.random.default_rng(seed).random((n_per_gamma, 2))
+    rng = np.random.default_rng(seed)
+    samples: list[dict] = []
+    for u, v in uv:
+        idx = int(np.searchsorted(cum, u, side="right"))
+        if idx >= len(irs):
+            idx = len(irs) - 1
+        ir = int(irs[idx])
+        left = float(lefts[ir])
+        right = float(rights[ir])
+        width = right - left
+        eps = max(eps_min, eps_inside_frac * width)
+        inner_left = left + eps
+        inner_right = right - eps
+        if inner_right <= inner_left:
+            rhodot = 0.5 * (left + right)
+        else:
+            rhodot = inner_left + v * (inner_right - inner_left)
+        if rho_jitter_dex > 0:
+            delta = rng.uniform(-rho_jitter_dex, rho_jitter_dex)
+            rho_km = float(rho_grid[ir] * (10.0 ** delta))
+            rho_jitter_factor = float(10.0 ** delta)
+        else:
+            rho_km = float(rho_grid[ir])
+            rho_jitter_factor = 1.0
+        samples.append(
+            {
+                "gamma_idx": int(gamma_idx),
+                "rho_idx": int(ir),
+                "rho_km": float(rho_km),
+                "rhodot_km_s": float(rhodot),
+                "rho_jitter_factor": float(rho_jitter_factor),
+            }
+        )
+    return samples
+
+
+def backfill_atlas(
+    atlas: dict,
+    gamma_samples: Sequence,
+    *,
+    n_backfill: int = 10000,
+    per_gamma_cap: int = 500,
+    rho_jitter_dex: float = 0.01,
+    eps_inside_frac: float = 0.02,
+    eps_min: float = 1e-9,
+    use_sobol: bool = True,
+    seed: int | None = None,
+) -> dict:
+    """Backfill atlas interiors across gamma draws and return samples + diagnostics."""
+    n_gamma = len(gamma_samples)
+    if n_gamma <= 0:
+        return {"samples": [], "diagnostics": {"n_gamma": 0, "n_samples_drawn": 0}}
+    n_per_gamma = max(1, int(np.ceil(n_backfill / max(1, n_gamma))))
+    n_per_gamma = min(n_per_gamma, per_gamma_cap)
+
+    all_samples: list[dict] = []
+    per_gamma_counts = np.zeros(n_gamma, dtype=int)
+    t0 = time.time()
+    for ig in range(n_gamma):
+        samples = backfill_gamma(
+            atlas,
+            ig,
+            n_per_gamma,
+            rho_jitter_dex=rho_jitter_dex,
+            eps_inside_frac=eps_inside_frac,
+            eps_min=eps_min,
+            use_sobol=use_sobol,
+            seed=None if seed is None else (seed + ig),
+        )
+        per_gamma_counts[ig] = len(samples)
+        all_samples.extend(samples)
+    t1 = time.time()
+
+    rho_grid = np.asarray(atlas["rho_grid"], dtype=float)
+    union_lengths = np.array(
+        [sum([(r - l) for (l, r) in atlas["unions"][ir]]) for ir in range(len(rho_grid))],
+        dtype=float,
+    )
+    samples_per_rho = np.zeros_like(union_lengths)
+    for s in all_samples:
+        samples_per_rho[int(s["rho_idx"])] += 1
+    density = np.divide(samples_per_rho, np.maximum(1e-12, union_lengths))
+
+    diag = {
+        "n_gamma": int(n_gamma),
+        "n_backfill_requested": int(n_backfill),
+        "n_per_gamma": int(n_per_gamma),
+        "n_samples_drawn": int(len(all_samples)),
+        "time_s": float(t1 - t0),
+        "per_gamma_counts": per_gamma_counts.tolist(),
+        "rho_grid_len": int(len(rho_grid)),
+        "union_lengths_stats": {
+            "median": float(np.nanmedian(union_lengths)),
+            "mean": float(np.nanmean(union_lengths)),
+        },
+        "samples_per_rho_stats": {
+            "median": float(np.nanmedian(samples_per_rho)),
+            "mean": float(np.nanmean(samples_per_rho)),
+        },
+        "density_stats": {
+            "median": float(np.nanmedian(density)),
+            "mean": float(np.nanmean(density)),
+        },
+    }
+
+    return {"samples": all_samples, "diagnostics": diag}
+
+
+def write_backfill_diagnostics(
+    backfill_out: dict, out_dir: str, *, tag: str = "admissible_backfill"
+) -> None:
+    """Write backfill summary and npz arrays."""
+    os.makedirs(out_dir, exist_ok=True)
+    summary = backfill_out["diagnostics"]
+    json_path = os.path.join(out_dir, f"{tag}_summary.json")
+    npz_path = os.path.join(out_dir, f"{tag}_debug.npz")
+    with open(json_path, "wt") as fh:
+        json.dump(summary, fh, indent=2, sort_keys=True)
+    samples = backfill_out.get("samples", [])
+    if samples:
+        gamma_idx = np.array([s["gamma_idx"] for s in samples], dtype=int)
+        rho_idx = np.array([s["rho_idx"] for s in samples], dtype=int)
+        rho_km = np.array([s["rho_km"] for s in samples], dtype=float)
+        rhodot = np.array([s["rhodot_km_s"] for s in samples], dtype=float)
+        rho_jitter = np.array(
+            [s.get("rho_jitter_factor", 1.0) for s in samples], dtype=float
+        )
+        np.savez_compressed(
+            npz_path,
+            gamma_idx=gamma_idx,
+            rho_idx=rho_idx,
+            rho_km=rho_km,
+            rhodot=rhodot,
+            rho_jitter=rho_jitter,
+        )
+    else:
+        np.savez_compressed(npz_path, diagnostics=json.dumps(summary))
