@@ -677,8 +677,13 @@ if __name__ == "__main__":
                 draw_mask = bits.reshape((n_rho, n_rhodot), order="C").astype(bool)
                 union_mask |= draw_mask
                 theta_draws.append(result["theta"])
+                theta = result["theta"]
                 print(
-                    f"draw {draw_idx + 1}/{n_draws} chi2_min={result['theta']['chi2_min']:.3f}"
+                    f"draw {draw_idx + 1}/{n_draws} "
+                    f"theta=({theta['alpha_deg']:.6f}, {theta['alpha_dot_deg_per_day']:.6f}, "
+                    f"{theta['delta_deg']:.6f}, {theta['delta_dot_deg_per_day']:.6f}, "
+                    f"{theta['rho_km']:.6f}, {theta['rhodot_km_s']:.6f}) "
+                    f"chi2_min={theta['chi2_min']:.3f}"
                 )
     else:
         _mc_worker_init(ctx)
@@ -689,8 +694,13 @@ if __name__ == "__main__":
             draw_mask = bits.reshape((n_rho, n_rhodot), order="C").astype(bool)
             union_mask |= draw_mask
             theta_draws.append(result["theta"])
+            theta = result["theta"]
             print(
-                f"draw {draw_idx + 1}/{n_draws} chi2_min={result['theta']['chi2_min']:.3f}"
+                f"draw {draw_idx + 1}/{n_draws} "
+                f"theta=({theta['alpha_deg']:.6f}, {theta['alpha_dot_deg_per_day']:.6f}, "
+                f"{theta['delta_deg']:.6f}, {theta['delta_dot_deg_per_day']:.6f}, "
+                f"{theta['rho_km']:.6f}, {theta['rhodot_km_s']:.6f}) "
+                f"chi2_min={theta['chi2_min']:.3f}"
             )
 
     accepted = int(np.sum(union_mask))

@@ -20,6 +20,8 @@ runs/ceres_archive_20251222222344/*/_full/
 
 runs/
 !runs/
+!runs/*/
+!runs/*/obs.csv
 !runs/ceres/
 !runs/ceres/**
 !runs/ceres-ground-test/
