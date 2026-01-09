@@ -177,6 +177,16 @@ def _attrib_from_state_cached(
     return attrib, rho, rhodot
 
 
+def bead_from_state_at_epoch(
+    state: np.ndarray,
+    obs_ref: Observation,
+    epoch: Time,
+) -> tuple[np.ndarray, Attributable, float, float]:
+    attrib, rho, rhodot = attrib_from_state_with_observer_time(state, obs_ref, epoch)
+    bead_state = build_state_from_ranging(obs_ref, epoch, attrib, rho, rhodot)
+    return bead_state, attrib, float(rho), float(rhodot)
+
+
 def _admissible_intervals(
     attrib: Attributable,
     obs_ref: Observation,
@@ -366,6 +376,177 @@ def seed_local_from_attrib(
     if not states:
         return np.empty((0, 6), dtype=float)
     return np.vstack(states)
+
+
+def _state_passes_hard_tube(
+    state: np.ndarray,
+    state_epoch: Time,
+    observations: Sequence[Observation],
+    obs_cache: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    k_sigma: float = 1.0,
+    emission_iter: int = 10,
+    tol_sec: float = 1e-3,
+) -> bool:
+    for idx, ob in enumerate(observations):
+        obs_pos, obs_vel = obs_cache[idx]
+        try:
+            _, st_em = _emission_epoch_for_state(
+                state,
+                state_epoch,
+                ob,
+                ob.time,
+                max_iter=emission_iter,
+                tol_sec=tol_sec,
+                obs_pos=obs_pos,
+                obs_vel=obs_vel,
+            )
+            attrib_pred, _, _ = _attrib_from_state_cached(st_em, obs_pos, obs_vel)
+        except Exception:
+            return False
+        dra_deg = _wrap_deg(attrib_pred.ra_deg - ob.ra_deg)
+        dra_deg *= math.cos(math.radians(attrib_pred.dec_deg))
+        ddec_deg = attrib_pred.dec_deg - ob.dec_deg
+        dra_arcsec = dra_deg * 3600.0
+        ddec_arcsec = ddec_deg * 3600.0
+        sigma = max(1e-6, float(ob.sigma_arcsec))
+        chi2 = (dra_arcsec / sigma) ** 2 + (ddec_arcsec / sigma) ** 2
+        if chi2 > (k_sigma ** 2):
+            return False
+    return True
+
+
+def sample_admissible_beads(
+    observations: Sequence[Observation],
+    epoch: Time,
+    attrib_mean: Attributable,
+    attrib_cov: np.ndarray,
+    *,
+    cfg: SeedConfig,
+    k_sigma: float = 1.0,
+    target: int | None = None,
+    batch_size: int = 128,
+) -> dict[str, object]:
+    rng = np.random.default_rng(cfg.seed)
+    if target is None:
+        target = int(cfg.admissible_n_rho * cfg.admissible_n_per_gamma)
+
+    mean_vec = np.array(
+        [
+            attrib_mean.ra_deg,
+            attrib_mean.dec_deg,
+            attrib_mean.ra_dot_deg_per_day,
+            attrib_mean.dec_dot_deg_per_day,
+        ],
+        dtype=float,
+    )
+
+    gamma_samples: list[np.ndarray] = []
+    if cfg.n_jitter > 0:
+        jitter = rng.normal(size=(cfg.n_jitter, 4))
+        L = _chol_cov(attrib_cov)
+        gamma_samples.extend(list(mean_vec[None, :] + jitter @ L.T))
+    if cfg.n_sobol_local > 0:
+        u = _sobol_samples(
+            cfg.n_sobol_local, 4, seed=cfg.seed, scramble=cfg.sobol_scramble
+        )
+        gamma_samples.extend(list(_sample_attributables(mean_vec, attrib_cov, u)))
+
+    rho_min = max(1e-12, float(cfg.rho_min_km))
+    rho_max = max(rho_min / AU_KM, float(cfg.rho_max_au)) * AU_KM
+    rho_grid = np.logspace(
+        math.log10(rho_min), math.log10(rho_max), int(cfg.admissible_n_rho)
+    )
+
+    obs_ref = _ranging_reference_observation(observations, epoch)
+    obs_cache = [_observer_helio_state(ob, ob.time) for ob in observations]
+
+    accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
+    attempted = 0
+
+    for gamma_vec in gamma_samples:
+        attrib = Attributable(
+            ra_deg=float(gamma_vec[0]),
+            dec_deg=float(gamma_vec[1]),
+            ra_dot_deg_per_day=float(gamma_vec[2]),
+            dec_dot_deg_per_day=float(gamma_vec[3]),
+        )
+        dotmin, dotmax = _admissible_intervals(
+            attrib,
+            obs_ref,
+            epoch,
+            rho_grid,
+            rho_min_km=float(cfg.rho_min_km),
+            bound_only=cfg.admissible_bound_only,
+        )
+        valid = np.isfinite(dotmin) & np.isfinite(dotmax) & (dotmax >= dotmin)
+        if not np.any(valid):
+            continue
+        valid_idx = np.where(valid)[0]
+
+        for idx in valid_idx:
+            rho_val = float(rho_grid[idx])
+            lo = float(dotmin[idx])
+            hi = float(dotmax[idx])
+            if hi <= lo:
+                continue
+            nper = int(cfg.admissible_n_per_gamma)
+            u_draws = rng.random(nper)
+            rhodot_samples = lo + u_draws * (hi - lo)
+
+            candidates: list[tuple[np.ndarray, float, float, Attributable]] = []
+            for rhodot_val in rhodot_samples:
+                attempted += 1
+                state = _build_state_from_sample(
+                    obs_ref,
+                    epoch,
+                    gamma_vec,
+                    rho_val,
+                    float(rhodot_val),
+                    v_max_km_s=cfg.v_max_km_s,
+                    rate_max_deg_day=cfg.rate_max_deg_day,
+                )
+                if state is None:
+                    continue
+                candidates.append((state, rho_val, float(rhodot_val), attrib))
+
+            idx0 = 0
+            while idx0 < len(candidates):
+                batch = candidates[idx0 : idx0 + batch_size]
+                idx0 += batch_size
+                for st, rho_v, rhod_v, attrib_v in batch:
+                    ok = _state_passes_hard_tube(
+                        st, epoch, observations, obs_cache, k_sigma=k_sigma
+                    )
+                    if ok:
+                        r0 = st[:3].astype(float)
+                        v0 = st[3:].astype(float)
+                        accepted.append((r0, v0, rho_v, rhod_v, attrib_v))
+                        if len(accepted) >= target:
+                            acc = np.array(accepted, dtype=object)
+                            return {
+                                "r0": np.vstack(acc[:, 0]),
+                                "v0": np.vstack(acc[:, 1]),
+                                "rho_km": np.array(list(acc[:, 2]), dtype=float),
+                                "rhodot_km_s": np.array(list(acc[:, 3]), dtype=float),
+                                "attrib": list(acc[:, 4]),
+                                "accepted_count": len(accepted),
+                                "attempted": attempted,
+                            }
+
+    if not accepted:
+        return {"accepted_count": 0, "attempted": attempted}
+
+    acc = np.array(accepted, dtype=object)
+    return {
+        "r0": np.vstack(acc[:, 0]),
+        "v0": np.vstack(acc[:, 1]),
+        "rho_km": np.array(list(acc[:, 2]), dtype=float),
+        "rhodot_km_s": np.array(list(acc[:, 3]), dtype=float),
+        "attrib": list(acc[:, 4]),
+        "accepted_count": len(accepted),
+        "attempted": attempted,
+    }
 
 
 def seed_cloud_from_observations(
