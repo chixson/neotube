@@ -369,9 +369,10 @@ def _site_states(
                 continue
             raise ValueError(f"Site code {code} not found")
         gcrs = loc.get_gcrs(obstime=time)
-        positions[idx] = gcrs.cartesian.xyz.to(u.km).value
-        if gcrs.cartesian.differentials:
-            velocities[idx] = gcrs.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
+        icrs = gcrs.transform_to(ICRS())
+        positions[idx] = icrs.cartesian.xyz.to(u.km).value
+        if icrs.cartesian.differentials:
+            velocities[idx] = icrs.cartesian.differentials["s"].d_xyz.to(u.km / u.s).value
     return positions, velocities
 
 

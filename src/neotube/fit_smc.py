@@ -23,6 +23,10 @@ from .rng import make_rng
 from .sbdb import fetch_sbdb_covariance
 from .site_checks import filter_special_sites
 from .three_pt_exact import (
+    _default_nbody_accel,
+    _compute_accels_for_rho,
+    _fit_tangent_plane_quadratic_coeffs,
+    _tangent_basis,
     solve_three_point_coupled,
     solve_three_point_exact,
     solve_three_point_gauss,
@@ -492,6 +496,8 @@ if __name__ == "__main__":
     from pathlib import Path
     from astropy.utils import iers
     import json
+    import os
+    from multiprocessing import Pool
 
     import numpy as np
 
@@ -501,85 +507,193 @@ if __name__ == "__main__":
     obs_path = Path("runs/ceres/obs.csv")
     observations = load_observations(obs_path, sigma=None, skip_special_sites=False)
 
-    nmc = 20
-    n_grid = 40
-    rho_min_au = 1e-6
-    rho_max_au = 200.0
+    nmc = int(os.getenv("NMC", "1000"))
+    n_grid = int(os.getenv("NGRID", "40"))
+    rho_min_au = float(os.getenv("RHO_MIN_AU", "1e-6"))
+    rho_max_au = float(os.getenv("RHO_MAX_AU", "200.0"))
+    workers = int(os.getenv("WORKERS", "1"))
+    chunk = int(os.getenv("CHUNK", "200"))
 
     triplet = observations[:3]
-    res = solve_three_point_exact(
+    nominal = solve_three_point_exact(
         triplet,
-        nmc=nmc,
+        nmc=0,
         n_grid=n_grid,
         rho_min_au=rho_min_au,
         rho_max_au=rho_max_au,
         debug=False,
     )
+    nominal_roots = [
+        float(root.rho_km)
+        for root in nominal["roots"]
+        if root.ok and np.isfinite(root.rho_km)
+    ]
+    nominal_roots.sort()
 
     obs_ref = triplet[1]
-    ceres_state = fetch_horizons_state("1", res["epoch"], location="@sun", refplane="earth")
+    ceres_state = fetch_horizons_state("1", nominal["epoch"], location="@sun", refplane="earth")
     _, ceres_rho_km, ceres_rhodot_km_s = attrib_from_state_with_observer_time(
-        ceres_state, obs_ref, res["epoch"]
+        ceres_state, obs_ref, nominal["epoch"]
     )
+    fit = _fit_tangent_plane_quadratic_coeffs(triplet, nominal["epoch"])
+    rho_probe_km = AU_KM
+    debug_data = _compute_accels_for_rho(
+        rho_probe_km, fit, nominal["epoch"], obs_ref, _default_nbody_accel
+    )
+    t1, t2 = _tangent_basis(debug_data["s_em"], debug_data["sdot_em"])
+    t2_sddot = float(np.dot(t2, debug_data["sddot_em"]))
+    rhs = float(np.dot(t2, (-debug_data["a_total"] - debug_data["ddot_earth"])))
+    approx_rho = rhs / t2_sddot if abs(t2_sddot) > 0 else float("nan")
 
-    print("triplet[0] epoch:", res["epoch"].utc.iso)
-    print("s:", res["s"])
-    print("sdot:", res["sdot"])
-    print("sddot:", res["sddot"])
-    print("ceres rho_km:", float(ceres_rho_km))
-    print("ceres rhodot_km_s:", float(ceres_rhodot_km_s))
-    print("n_roots:", len(res["roots"]))
-
-    roots_out = []
-    for idx, root in enumerate(res["roots"]):
-        root_payload = {
-            "rho_km": float(root.rho_km),
-            "rhodot_km_s": float(root.rhodot_km_s),
-            "s_em": np.asarray(root.s_em, dtype=float).tolist(),
-            "sdot_em": np.asarray(root.sdot_em, dtype=float).tolist(),
-            "sddot_em": np.asarray(root.sddot_em, dtype=float).tolist(),
-            "ok": bool(root.ok),
-            "error": root.error,
-            "mc": root.mc,
-        }
-        roots_out.append(root_payload)
-
-        print(f"root[{idx}] rho_km={root_payload['rho_km']:.6f} rhodot_km_s={root_payload['rhodot_km_s']:.6f} ok={root_payload['ok']}")
-        if root.mc and root.mc.get("n_samples", 0) > 0:
-            rho_mean = root.mc["rho_mean"]
-            rho_std = root.mc["rho_std"]
-            rhodot_mean = root.mc["rhodot_mean"]
-            rhodot_std = root.mc["rhodot_std"]
-            z_rho = (float(ceres_rho_km) - rho_mean) / rho_std if rho_std > 0 else float("nan")
-            z_rhodot = (float(ceres_rhodot_km_s) - rhodot_mean) / rhodot_std if rhodot_std > 0 else float("nan")
-            print(
-                "  mc rho_mean/std:",
-                f"{rho_mean:.6f}",
-                f"{rho_std:.6f}",
-                "z:",
-                f"{z_rho:.3f}",
+    def _perturb_triplet(rng: np.random.Generator) -> list[Observation]:
+        perturbed = []
+        for ob in triplet:
+            sigma_arc = max(1e-6, float(ob.sigma_arcsec))
+            sigma_dec_deg = sigma_arc / 3600.0
+            sigma_ra_deg = sigma_arc / 3600.0 / max(1e-8, math.cos(math.radians(ob.dec_deg)))
+            ra_i = float(ob.ra_deg + rng.normal(0.0, sigma_ra_deg))
+            dec_i = float(ob.dec_deg + rng.normal(0.0, sigma_dec_deg))
+            perturbed.append(
+                Observation(
+                    time=ob.time,
+                    ra_deg=ra_i,
+                    dec_deg=dec_i,
+                    sigma_arcsec=ob.sigma_arcsec,
+                    site=ob.site,
+                    observer_pos_km=ob.observer_pos_km,
+                    mag=ob.mag,
+                    sigma_mag=ob.sigma_mag,
+                )
             )
-            print(
-                "  mc rhodot_mean/std:",
-                f"{rhodot_mean:.6f}",
-                f"{rhodot_std:.6f}",
-                "z:",
-                f"{z_rhodot:.3f}",
-            )
+        return perturbed
 
-    out_path = obs_path.parent / "three_point_mc.json"
+    def _worker_mc(args: tuple[int, int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[list[tuple[float, float]]]]:
+        draws, seed, grid = args
+        rng = np.random.default_rng(seed)
+        s_list = []
+        sdot_list = []
+        sddot_list = []
+        roots_list: list[list[tuple[float, float]]] = []
+        for _ in range(draws):
+            perturbed = _perturb_triplet(rng)
+            res = solve_three_point_exact(
+                perturbed,
+                nmc=0,
+                n_grid=grid,
+                rho_min_au=rho_min_au,
+                rho_max_au=rho_max_au,
+                debug=False,
+            )
+            s_list.append(np.asarray(res["s"], dtype=float))
+            sdot_list.append(np.asarray(res["sdot"], dtype=float))
+            sddot_list.append(np.asarray(res["sddot"], dtype=float))
+            roots = []
+            for root in res["roots"]:
+                if root.ok and np.isfinite(root.rho_km) and np.isfinite(root.rhodot_km_s):
+                    roots.append((float(root.rho_km), float(root.rhodot_km_s)))
+            roots_list.append(roots)
+        return np.vstack(s_list), np.vstack(sdot_list), np.vstack(sddot_list), roots_list
+
+    draws_per_task = max(1, chunk)
+    n_full = nmc // draws_per_task
+    remainder = nmc % draws_per_task
+    tasks: list[tuple[int, int, int]] = []
+    seed_base = int(np.random.SeedSequence().entropy)
+    for i in range(n_full):
+        tasks.append((draws_per_task, seed_base + i, n_grid))
+    if remainder:
+        tasks.append((remainder, seed_base + n_full, n_grid))
+
+    s_all = []
+    sdot_all = []
+    sddot_all = []
+    roots_all: list[list[tuple[float, float]]] = []
+
+    if workers > 1:
+        with Pool(processes=workers) as pool:
+            for idx, (s_chunk, sdot_chunk, sddot_chunk, roots_chunk) in enumerate(
+                pool.imap_unordered(_worker_mc, tasks), start=1
+            ):
+                s_all.append(s_chunk)
+                sdot_all.append(sdot_chunk)
+                sddot_all.append(sddot_chunk)
+                roots_all.extend(roots_chunk)
+                print(f"chunk {idx}/{len(tasks)} done")
+    else:
+        for idx, task in enumerate(tasks, start=1):
+            s_chunk, sdot_chunk, sddot_chunk, roots_chunk = _worker_mc(task)
+            s_all.append(s_chunk)
+            sdot_all.append(sdot_chunk)
+            sddot_all.append(sddot_chunk)
+            roots_all.extend(roots_chunk)
+            print(f"chunk {idx}/{len(tasks)} done")
+
+    s_arr = np.vstack(s_all)
+    sdot_arr = np.vstack(sdot_all)
+    sddot_arr = np.vstack(sddot_all)
+
+    root_rho_samples = [[] for _ in nominal_roots]
+    root_rhodot_samples = [[] for _ in nominal_roots]
+    for roots in roots_all:
+        if len(roots) != len(nominal_roots) or not roots:
+            continue
+        roots_sorted = sorted(roots, key=lambda item: item[0])
+        for idx, (rho_val, rhodot_val) in enumerate(roots_sorted):
+            root_rho_samples[idx].append(rho_val)
+            root_rhodot_samples[idx].append(rhodot_val)
+
+    root_stats = []
+    for idx, _ in enumerate(nominal_roots):
+        rho_vals = np.array(root_rho_samples[idx], dtype=float)
+        rhodot_vals = np.array(root_rhodot_samples[idx], dtype=float)
+        if rho_vals.size == 0:
+            root_stats.append({"n_samples": 0})
+            continue
+        rho_mean = float(np.mean(rho_vals))
+        rho_std = float(np.std(rho_vals))
+        rhodot_mean = float(np.mean(rhodot_vals))
+        rhodot_std = float(np.std(rhodot_vals))
+        z_rho = (float(ceres_rho_km) - rho_mean) / rho_std if rho_std > 0 else float("nan")
+        z_rhodot = (
+            (float(ceres_rhodot_km_s) - rhodot_mean) / rhodot_std if rhodot_std > 0 else float("nan")
+        )
+        root_stats.append(
+            {
+                "n_samples": int(rho_vals.size),
+                "rho_mean": rho_mean,
+                "rho_std": rho_std,
+                "rhodot_mean": rhodot_mean,
+                "rhodot_std": rhodot_std,
+                "z_rho": z_rho,
+                "z_rhodot": z_rhodot,
+            }
+        )
+
     payload = {
         "obs_times": [str(ob.time.utc.iso) for ob in triplet],
-        "epoch": str(res["epoch"].utc.iso),
-        "s": np.asarray(res["s"], dtype=float).tolist(),
-        "sdot": np.asarray(res["sdot"], dtype=float).tolist(),
-        "sddot": np.asarray(res["sddot"], dtype=float).tolist(),
+        "epoch": str(nominal["epoch"].utc.iso),
+        "s_mean": np.mean(s_arr, axis=0).tolist(),
+        "s_std": np.std(s_arr, axis=0).tolist(),
+        "sdot_mean": np.mean(sdot_arr, axis=0).tolist(),
+        "sdot_std": np.std(sdot_arr, axis=0).tolist(),
+        "sddot_mean": np.mean(sddot_arr, axis=0).tolist(),
+        "sddot_std": np.std(sddot_arr, axis=0).tolist(),
         "ceres": {
             "rho_km": float(ceres_rho_km),
             "rhodot_km_s": float(ceres_rhodot_km_s),
             "state": np.asarray(ceres_state, dtype=float).tolist(),
         },
-        "roots": roots_out,
+        "roots": root_stats,
+        "nmc": nmc,
+        "n_grid": n_grid,
     }
+    out_path = obs_path.parent / "three_point_mc.json"
     out_path.write_text(json.dumps(payload, indent=2))
+    print("triplet[0] epoch:", payload["epoch"])
+    print("t2·sddot:", t2_sddot)
+    print("t2·(-a_total - ddot_earth):", rhs)
+    print("approx rho from ratio:", approx_rho)
+    print("ceres rho_km:", float(ceres_rho_km))
+    print("ceres rhodot_km_s:", float(ceres_rhodot_km_s))
+    print("root_stats:", root_stats)
     print(f"Wrote {out_path}")

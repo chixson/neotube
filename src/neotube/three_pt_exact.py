@@ -47,46 +47,107 @@ def _radec_to_unit_vector(ra_deg: float, dec_deg: float) -> np.ndarray:
     )
 
 
-def _fit_vector_quadratic_coeffs(
+def _wrap_ra_delta(ra_ref_deg: float, ra_deg: float) -> float:
+    return (ra_deg - ra_ref_deg + 180.0) % 360.0 - 180.0
+
+
+def _fit_tangent_plane_quadratic_coeffs(
     observations: Sequence[Observation], epoch: Time
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if len(observations) != 3:
         raise ValueError("Exactly 3 observations required for quadratic fit.")
+    ref = observations[1]
+    ra0_deg = ref.ra_deg
+    dec0_deg = ref.dec_deg
+    ra0 = math.radians(ra0_deg)
+    dec0 = math.radians(dec0_deg)
+    cos_dec0 = math.cos(dec0)
+    s0 = np.array(
+        [math.cos(dec0) * math.cos(ra0), math.cos(dec0) * math.sin(ra0), math.sin(dec0)],
+        dtype=float,
+    )
+    e_ra = np.array([-math.sin(ra0), math.cos(ra0), 0.0], dtype=float)
+    e_dec = np.array(
+        [-math.cos(ra0) * math.sin(dec0), -math.sin(ra0) * math.sin(dec0), math.cos(dec0)],
+        dtype=float,
+    )
     times = np.array([(ob.time.tdb - epoch.tdb).to_value("s") for ob in observations], dtype=float)
-    return _fit_vector_quadratic_coeffs_with_times(observations, times)
-
-
-def _fit_vector_quadratic_coeffs_with_times(
-    observations: Sequence[Observation], times: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     A = np.vstack([np.ones_like(times), times, times**2]).T
-    V = np.vstack([_radec_to_unit_vector(ob.ra_deg, ob.dec_deg) for ob in observations])
-    coef = np.linalg.solve(A, V)
-    return coef[0, :], coef[1, :], coef[2, :]
+    x = np.empty(3, dtype=float)
+    y = np.empty(3, dtype=float)
+    for i, ob in enumerate(observations):
+        dra_deg = _wrap_ra_delta(ra0_deg, ob.ra_deg)
+        dra_rad = math.radians(dra_deg)
+        ddec_rad = math.radians(ob.dec_deg - dec0_deg)
+        x[i] = cos_dec0 * dra_rad
+        y[i] = ddec_rad
+    coef_x = np.linalg.solve(A, x)
+    coef_y = np.linalg.solve(A, y)
+    return coef_x, coef_y, s0, e_ra, e_dec
 
 
-def _eval_s_and_derivs_at(
-    a: np.ndarray, b: np.ndarray, c: np.ndarray, epoch: Time, t: Time
+def _fit_tangent_plane_quadratic_coeffs_with_times(
+    observations: Sequence[Observation],
+    times: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if len(observations) != 3:
+        raise ValueError("Exactly 3 observations required for quadratic fit.")
+    if times.shape[0] != 3:
+        raise ValueError("Times array must have length 3.")
+    ref = observations[1]
+    ra0_deg = ref.ra_deg
+    dec0_deg = ref.dec_deg
+    ra0 = math.radians(ra0_deg)
+    dec0 = math.radians(dec0_deg)
+    cos_dec0 = math.cos(dec0)
+    s0 = np.array(
+        [math.cos(dec0) * math.cos(ra0), math.cos(dec0) * math.sin(ra0), math.sin(dec0)],
+        dtype=float,
+    )
+    e_ra = np.array([-math.sin(ra0), math.cos(ra0), 0.0], dtype=float)
+    e_dec = np.array(
+        [-math.cos(ra0) * math.sin(dec0), -math.sin(ra0) * math.sin(dec0), math.cos(dec0)],
+        dtype=float,
+    )
+    A = np.vstack([np.ones_like(times), times, times**2]).T
+    x = np.empty(3, dtype=float)
+    y = np.empty(3, dtype=float)
+    for i, ob in enumerate(observations):
+        dra_deg = _wrap_ra_delta(ra0_deg, ob.ra_deg)
+        dra_rad = math.radians(dra_deg)
+        ddec_rad = math.radians(ob.dec_deg - dec0_deg)
+        x[i] = cos_dec0 * dra_rad
+        y[i] = ddec_rad
+    coef_x = np.linalg.solve(A, x)
+    coef_y = np.linalg.solve(A, y)
+    return coef_x, coef_y, s0, e_ra, e_dec
+
+
+def _eval_tangent_plane_derivs(
+    coef_x: np.ndarray,
+    coef_y: np.ndarray,
+    s0: np.ndarray,
+    e_ra: np.ndarray,
+    e_dec: np.ndarray,
+    epoch: Time,
+    t: Time,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     t_rel = (t.tdb - epoch.tdb).to_value("s")
-    v = a + b * t_rel + c * (t_rel**2)
-    v1 = b + 2.0 * c * t_rel
-    v2 = 2.0 * c
-    r = float(np.linalg.norm(v))
-    if r <= 0:
-        raise RuntimeError("Fitted polynomial gave zero norm vector at time.")
-    rdot = float(np.dot(v, v1)) / r
-    rddot = (float(np.dot(v1, v1)) + float(np.dot(v, v2))) / r - (float(np.dot(v, v1)) ** 2) / (
-        r**3
-    )
-    u = v / r
-    u_dot = (v1 / r) - (rdot / (r * r)) * v
-    u_dot = u_dot - np.dot(u, u_dot) * u
-    u_ddot = (v2 / r) - (v * rddot / (r * r)) - 2.0 * rdot * (v1 / (r * r)) + 2.0 * (
-        rdot**2
-    ) * (v / (r * r * r))
-    u_ddot = u_ddot - np.dot(u, u_ddot) * u
-    return u, u_dot, u_ddot
+    a_x, b_x, c_x = coef_x
+    a_y, b_y, c_y = coef_y
+    x = a_x + b_x * t_rel + c_x * (t_rel**2)
+    xdot = b_x + 2.0 * c_x * t_rel
+    xddot = 2.0 * c_x
+    y = a_y + b_y * t_rel + c_y * (t_rel**2)
+    ydot = b_y + 2.0 * c_y * t_rel
+    yddot = 2.0 * c_y
+    s = s0 + x * e_ra + y * e_dec
+    s = s / np.linalg.norm(s)
+    sdot = xdot * e_ra + ydot * e_dec
+    sddot = xddot * e_ra + yddot * e_dec
+    sdot = sdot - np.dot(s, sdot) * s
+    sddot = sddot - np.dot(s, sddot) * s
+    return s, sdot, sddot
 
 
 def _tangent_basis(
@@ -133,19 +194,55 @@ def _emission_epoch_for_rho(rho_km: float, obs_time: Time) -> Time:
 
 def _compute_accels_for_rho(
     rho_km: float,
-    a_coeff: np.ndarray,
-    b_coeff: np.ndarray,
-    c_coeff: np.ndarray,
+    fit: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     epoch: Time,
     obs_ref: Observation,
     accel_func: Callable[[np.ndarray, Time], np.ndarray],
     dt_site_fd: float = 60.0,
     *,
+    light_time_iter: int = 2,
     debug: bool = False,
 ) -> dict[str, object]:
-    t_em = _emission_epoch_for_rho(rho_km, obs_ref.time)
-    s_em, sdot_em, sddot_em = _eval_s_and_derivs_at(a_coeff, b_coeff, c_coeff, epoch, t_em)
+    coef_x, coef_y, s0, e_ra, e_dec = fit
+    t_obs = obs_ref.time
+    t_em = _emission_epoch_for_rho(rho_km, t_obs)
+    site_pos_obs, _ = _site_states(
+        [t_obs],
+        [obs_ref.site],
+        observer_positions_km=[obs_ref.observer_pos_km],
+        observer_velocities_km_s=None,
+        allow_unknown_site=True,
+    )
+    sun_pos_obs, sun_vel_obs = _body_posvel_km_single("sun", t_obs)
+    earth_bary_obs, earth_bary_vel_obs = _body_posvel_km_single("earth", t_obs)
+    earth_helio_obs = earth_bary_obs - sun_pos_obs
+    obs_pos_helio = earth_helio_obs + site_pos_obs[0]
+    for _ in range(max(0, light_time_iter)):
+        s_em, sdot_em, sddot_em = _eval_tangent_plane_derivs(
+            coef_x, coef_y, s0, e_ra, e_dec, epoch, t_em
+        )
+        sun_pos_em, sun_vel_em = _body_posvel_km_single("sun", t_em)
+        earth_bary_em, earth_bary_vel_em = _body_posvel_km_single("earth", t_em)
+        earth_helio = earth_bary_em - sun_pos_em
+        site_pos_arr, site_vel_arr = _site_states(
+            [t_em],
+            [obs_ref.site],
+            observer_positions_km=[obs_ref.observer_pos_km],
+            observer_velocities_km_s=None,
+            allow_unknown_site=True,
+        )
+        site_pos = site_pos_arr[0]
+        site_vel = site_vel_arr[0]
+        r_helio = earth_helio + site_pos + rho_km * s_em
+        dist = float(np.linalg.norm(r_helio - obs_pos_helio))
+        t_new = t_obs - TimeDelta(dist / C_KM_S, format="sec")
+        if abs((t_new - t_em).to_value("s")) < 1e-6:
+            break
+        t_em = t_new
 
+    s_em, sdot_em, sddot_em = _eval_tangent_plane_derivs(
+        coef_x, coef_y, s0, e_ra, e_dec, epoch, t_em
+    )
     site_pos_arr, site_vel_arr = _site_states(
         [t_em],
         [obs_ref.site],
@@ -156,10 +253,10 @@ def _compute_accels_for_rho(
     site_pos = site_pos_arr[0]
     site_vel = site_vel_arr[0]
 
-    sun_pos, _ = _body_posvel_km_single("sun", t_em)
+    sun_pos, sun_vel = _body_posvel_km_single("sun", t_em)
     earth_bary, earth_bary_vel = _body_posvel_km_single("earth", t_em)
     earth_helio = earth_bary - sun_pos
-    earth_helio_vel = earth_bary_vel - _body_posvel_km_single("sun", t_em)[1]
+    earth_helio_vel = earth_bary_vel - sun_vel
 
     r_helio = earth_helio + site_pos + rho_km * s_em
     a_total = accel_func(r_helio, t_em)
@@ -177,7 +274,9 @@ def _compute_accels_for_rho(
 
     _, vel_minus_e = _body_posvel_km_single("earth", times[0])
     _, vel_plus_e = _body_posvel_km_single("earth", times[1])
-    ddot_earth = (vel_plus_e - vel_minus_e) / (2.0 * dt)
+    _, sun_vel_minus = _body_posvel_km_single("sun", times[0])
+    _, sun_vel_plus = _body_posvel_km_single("sun", times[1])
+    ddot_earth = ((vel_plus_e - sun_vel_plus) - (vel_minus_e - sun_vel_minus)) / (2.0 * dt)
 
     if debug:
         print("DEBUG: t_em:", t_em.iso)
@@ -214,14 +313,12 @@ def _compute_accels_for_rho(
 
 def _F_of_rho(
     rho_km: float,
-    a_coeff: np.ndarray,
-    b_coeff: np.ndarray,
-    c_coeff: np.ndarray,
+    fit: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     epoch: Time,
     obs_ref: Observation,
     accel_func: Callable[[np.ndarray, Time], np.ndarray],
 ) -> float:
-    data = _compute_accels_for_rho(rho_km, a_coeff, b_coeff, c_coeff, epoch, obs_ref, accel_func)
+    data = _compute_accels_for_rho(rho_km, fit, epoch, obs_ref, accel_func)
     s_em = data["s_em"]
     sdot_em = data["sdot_em"]
     sddot_em = data["sddot_em"]
@@ -235,9 +332,7 @@ def _F_of_rho(
 
 
 def _find_rho_roots(
-    a_coeff: np.ndarray,
-    b_coeff: np.ndarray,
-    c_coeff: np.ndarray,
+    fit: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     epoch: Time,
     obs_ref: Observation,
     accel_func: Callable[[np.ndarray, Time], np.ndarray],
@@ -251,7 +346,7 @@ def _find_rho_roots(
     fvals = np.zeros(len(grid), dtype=float)
     for i, rho in enumerate(grid):
         try:
-            fvals[i] = _F_of_rho(rho, a_coeff, b_coeff, c_coeff, epoch, obs_ref, accel_func)
+            fvals[i] = _F_of_rho(rho, fit, epoch, obs_ref, accel_func)
         except Exception:
             fvals[i] = np.nan
 
@@ -271,10 +366,10 @@ def _find_rho_roots(
             for _ in range(80):
                 rm = math.sqrt(ra * rb)
                 try:
-                    fm = _F_of_rho(rm, a_coeff, b_coeff, c_coeff, epoch, obs_ref, accel_func)
+                    fm = _F_of_rho(rm, fit, epoch, obs_ref, accel_func)
                 except Exception:
                     rm = 0.5 * (ra + rb)
-                    fm = _F_of_rho(rm, a_coeff, b_coeff, c_coeff, epoch, obs_ref, accel_func)
+                    fm = _F_of_rho(rm, fit, epoch, obs_ref, accel_func)
                 if not np.isfinite(fm):
                     ra = rm
                     continue
@@ -300,14 +395,12 @@ def _find_rho_roots(
 
 def _rhodot_and_state_for_rho(
     rho_km: float,
-    a_coeff: np.ndarray,
-    b_coeff: np.ndarray,
-    c_coeff: np.ndarray,
+    fit: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     epoch: Time,
     obs_ref: Observation,
     accel_func: Callable[[np.ndarray, Time], np.ndarray],
 ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    data = _compute_accels_for_rho(rho_km, a_coeff, b_coeff, c_coeff, epoch, obs_ref, accel_func)
+    data = _compute_accels_for_rho(rho_km, fit, epoch, obs_ref, accel_func)
     s_em = data["s_em"]
     sdot_em = data["sdot_em"]
     sddot_em = data["sddot_em"]
@@ -360,26 +453,22 @@ def solve_three_point_exact(
     if accel_func is None:
         accel_func = _default_nbody_accel
 
-    a_coeff, b_coeff, c_coeff = _fit_vector_quadratic_coeffs(observations, epoch)
-    s0, sdot0, sddot0 = _eval_s_and_derivs_at(a_coeff, b_coeff, c_coeff, epoch, epoch)
+    fit = _fit_tangent_plane_quadratic_coeffs(observations, epoch)
+    s0, sdot0, sddot0 = _eval_tangent_plane_derivs(*fit, epoch, epoch)
 
     rho_min_km = float(rho_min_au) * AU_KM
     rho_max_km = float(rho_max_au) * AU_KM
     if debug:
         rho_probe = math.sqrt(rho_min_km * rho_max_km)
-        _compute_accels_for_rho(
-            rho_probe, a_coeff, b_coeff, c_coeff, epoch, obs_ref, accel_func, debug=True
-        )
+        _compute_accels_for_rho(rho_probe, fit, epoch, obs_ref, accel_func, debug=True)
 
-    roots = _find_rho_roots(
-        a_coeff, b_coeff, c_coeff, epoch, obs_ref, accel_func, rho_min_km, rho_max_km, n_grid
-    )
+    roots = _find_rho_roots(fit, epoch, obs_ref, accel_func, rho_min_km, rho_max_km, n_grid)
 
     root_objs: list[ThreePointRoot] = []
     for rho in roots:
         try:
             rhodot, state, s_em, sdot_em, sddot_em = _rhodot_and_state_for_rho(
-                rho, a_coeff, b_coeff, c_coeff, epoch, obs_ref, accel_func
+                rho, fit, epoch, obs_ref, accel_func
             )
             root_objs.append(
                 ThreePointRoot(
@@ -436,19 +525,11 @@ def solve_three_point_exact(
                     )
                 )
             try:
-                a_p, b_p, c_p = _fit_vector_quadratic_coeffs(perturbed, epoch)
+                fit_p = _fit_tangent_plane_quadratic_coeffs(perturbed, epoch)
             except Exception:
                 continue
             roots_p = _find_rho_roots(
-                a_p,
-                b_p,
-                c_p,
-                epoch,
-                perturbed[1],
-                accel_func,
-                rho_min_km,
-                rho_max_km,
-                n_grid,
+                fit_p, epoch, perturbed[1], accel_func, rho_min_km, rho_max_km, n_grid
             )
             if not roots_p:
                 continue
@@ -460,7 +541,7 @@ def solve_three_point_exact(
                 rho_p = roots_p[best_idx]
                 try:
                     rhodot_p, _, s_em_p, sdot_em_p, sddot_em_p = _rhodot_and_state_for_rho(
-                        rho_p, a_p, b_p, c_p, epoch, perturbed[1], accel_func
+                        rho_p, fit_p, epoch, perturbed[1], accel_func
                     )
                 except Exception:
                     continue
@@ -531,10 +612,8 @@ def solve_three_point_coupled(
     rho_max_km = float(rho_max_au) * AU_KM
 
     times = np.array([(ob.time.tdb - epoch.tdb).to_value("s") for ob in observations], dtype=float)
-    a_coeff, b_coeff, c_coeff = _fit_vector_quadratic_coeffs_with_times(observations, times)
-    roots = _find_rho_roots(
-        a_coeff, b_coeff, c_coeff, epoch, obs_ref, accel_func, rho_min_km, rho_max_km, n_grid
-    )
+    fit = _fit_tangent_plane_quadratic_coeffs_with_times(observations, times)
+    roots = _find_rho_roots(fit, epoch, obs_ref, accel_func, rho_min_km, rho_max_km, n_grid)
     if not roots:
         return {"epoch": epoch, "s": np.nan, "sdot": np.nan, "sddot": np.nan, "roots": []}
 
@@ -542,12 +621,12 @@ def solve_three_point_coupled(
     for rho_guess in roots:
         rho_ref = float(rho_guess)
         t_em = [ob.time for ob in observations]
-        a_it, b_it, c_it = a_coeff, b_coeff, c_coeff
+        fit_it = fit
         for _ in range(max(1, int(n_iter))):
             rho_list: list[float] = []
             for ob in observations:
                 roots_i = _find_rho_roots(
-                    a_it, b_it, c_it, epoch, ob, accel_func, rho_min_km, rho_max_km, n_grid
+                    fit_it, epoch, ob, accel_func, rho_min_km, rho_max_km, n_grid
                 )
                 if roots_i:
                     rho_pick = min(roots_i, key=lambda r: abs(math.log10(r) - math.log10(rho_ref)))
@@ -556,16 +635,16 @@ def solve_three_point_coupled(
                 rho_list.append(float(rho_pick))
             t_em = [ob.time - TimeDelta(r / C_KM_S, format="sec") for ob, r in zip(observations, rho_list)]
             times = np.array([(t.tdb - epoch.tdb).to_value("s") for t in t_em], dtype=float)
-            a_it, b_it, c_it = _fit_vector_quadratic_coeffs_with_times(observations, times)
+            fit_it = _fit_tangent_plane_quadratic_coeffs_with_times(observations, times)
             roots_ref = _find_rho_roots(
-                a_it, b_it, c_it, epoch, obs_ref, accel_func, rho_min_km, rho_max_km, n_grid
+                fit_it, epoch, obs_ref, accel_func, rho_min_km, rho_max_km, n_grid
             )
             if roots_ref:
                 rho_ref = min(roots_ref, key=lambda r: abs(math.log10(r) - math.log10(rho_ref)))
 
         try:
             rhodot, state, s_em, sdot_em, sddot_em = _rhodot_and_state_for_rho(
-                rho_ref, a_it, b_it, c_it, epoch, obs_ref, accel_func
+                rho_ref, fit_it, epoch, obs_ref, accel_func
             )
             root_objs.append(
                 ThreePointRoot(
@@ -592,7 +671,7 @@ def solve_three_point_coupled(
                 )
             )
 
-    s0, sdot0, sddot0 = _eval_s_and_derivs_at(a_it, b_it, c_it, epoch, obs_ref.time)
+    s0, sdot0, sddot0 = _eval_tangent_plane_derivs(*fit_it, epoch, obs_ref.time)
     return {"epoch": epoch, "s": s0, "sdot": sdot0, "sddot": sddot0, "roots": root_objs}
 
 
