@@ -5,6 +5,8 @@ from typing import Sequence
 
 import numpy as np
 from astropy.time import Time, TimeDelta
+from functools import lru_cache
+import multiprocessing as mp
 from scipy import stats
 from scipy.stats import qmc
 
@@ -18,7 +20,7 @@ from .ranging import (
     build_attributable_vector_fit,
     build_state_from_ranging,
 )
-from .propagate import propagate_state_kepler
+from .propagate import propagate_state_kepler, _body_posvel_km_single, _site_states
 from .rng import make_rng
 from .sbdb import fetch_sbdb_covariance
 from .site_checks import filter_special_sites
@@ -67,6 +69,117 @@ def _attrib_vector_from_state(
 def _wrap_deg(delta_deg: float) -> float:
     return (delta_deg + 180.0) % 360.0 - 180.0
 
+
+_MC_CTX: dict[str, object] = {}
+
+
+def _mc_worker_init(ctx: dict[str, object], jd_round_digits: int = 9) -> None:
+    # Install per-process caches and store context.
+    global _MC_CTX
+    _MC_CTX = ctx
+
+    @lru_cache(maxsize=10000)
+    def _body_cache(body: str, jd_rounded: float):
+        t = Time(jd_rounded, format="jd", scale="tdb")
+        return _body_posvel_km_single(body, t)
+
+    def _body_wrapper(body: str, t: Time):
+        jd_key = round(float(t.tdb.jd), jd_round_digits)
+        return _body_cache(body, jd_key)
+
+    @lru_cache(maxsize=10000)
+    def _site_cache(jd_rounded: float, site_code: str, obs_pos_tuple):
+        t = Time(jd_rounded, format="jd", scale="tdb")
+        obs_pos = None if obs_pos_tuple is None else np.asarray(obs_pos_tuple)
+        return _site_states([t], [site_code], observer_positions_km=[obs_pos])
+
+    def _site_wrapper(
+        times,
+        site_codes,
+        observer_positions_km=None,
+        observer_velocities_km_s=None,
+        allow_unknown_site=True,
+    ):
+        if len(times) == 1 and len(site_codes) == 1:
+            t = times[0]
+            site = site_codes[0]
+            obs_pos_tuple = None
+            if observer_positions_km is not None:
+                pos0 = observer_positions_km[0]
+                obs_pos_tuple = None if pos0 is None else tuple(np.asarray(pos0).tolist())
+            jd_key = round(float(t.tdb.jd), jd_round_digits)
+            return _site_cache(jd_key, site, obs_pos_tuple)
+        return _site_states(
+            times,
+            site_codes,
+            observer_positions_km=observer_positions_km,
+            observer_velocities_km_s=observer_velocities_km_s,
+            allow_unknown_site=allow_unknown_site,
+        )
+
+    # Monkey patch in worker to use cached ephemerides/site states.
+    global _body_posvel_km_single, _site_states
+    _body_posvel_km_single = _body_wrapper
+    _site_states = _site_wrapper
+
+
+def _mc_worker(draw_vec: np.ndarray) -> dict[str, object]:
+    ctx = _MC_CTX
+    rho_grid = ctx["rho_grid"]
+    rhodot_grid = ctx["rhodot_grid"]
+    obs_window = ctx["obs_window"]
+    obs_ref = ctx["obs_ref"]
+    epoch = ctx["epoch"]
+    chi2_delta = ctx["chi2_delta"]
+
+    attrib_draw = Attributable(
+        ra_deg=float(draw_vec[0]),
+        dec_deg=float(draw_vec[1]),
+        ra_dot_deg_per_day=float(draw_vec[2]),
+        dec_dot_deg_per_day=float(draw_vec[3]),
+    )
+    chi2_grid = np.full((len(rho_grid), len(rhodot_grid)), np.inf, dtype=float)
+    for i, rho_km in enumerate(rho_grid):
+        for j, rhodot_km_s in enumerate(rhodot_grid):
+            try:
+                state = build_state_from_ranging(
+                    obs_ref, epoch, attrib_draw, float(rho_km), float(rhodot_km_s)
+                )
+            except Exception:
+                continue
+            chi2 = 0.0
+            for ob in obs_window:
+                attrib_pred, _, _ = attrib_from_state_with_observer_time(
+                    state, ob, ob.time
+                )
+                dra = _wrap_deg(ob.ra_deg - attrib_pred.ra_deg)
+                dra *= math.cos(math.radians(ob.dec_deg))
+                ddec = ob.dec_deg - attrib_pred.dec_deg
+                dra_arcsec = dra * 3600.0
+                ddec_arcsec = ddec * 3600.0
+                sigma = float(ob.sigma_arcsec)
+                chi2 += (dra_arcsec / sigma) ** 2 + (ddec_arcsec / sigma) ** 2
+            chi2_grid[i, j] = chi2
+    chi2_min = float(np.nanmin(chi2_grid))
+    min_idx = int(np.nanargmin(chi2_grid))
+    min_i, min_j = np.unravel_index(min_idx, chi2_grid.shape)
+    threshold = chi2_min + chi2_delta
+    mask = chi2_grid <= threshold
+    flat = mask.ravel(order="C")
+    packed = np.packbits(flat).tobytes()
+    return {
+        "packed_mask": packed,
+        "nbits": flat.size,
+        "theta": {
+            "alpha_deg": float(draw_vec[0]),
+            "alpha_dot_deg_per_day": float(draw_vec[2]),
+            "delta_deg": float(draw_vec[1]),
+            "delta_dot_deg_per_day": float(draw_vec[3]),
+            "rho_km": float(rho_grid[min_i]),
+            "rhodot_km_s": float(rhodot_grid[min_j]),
+            "chi2_min": chi2_min,
+        },
+    }
 
 def _state_physicality(
     state: np.ndarray, mu: float = GM_SUN
@@ -512,6 +625,7 @@ if __name__ == "__main__":
     rho_max_au = float(os.getenv("RHO_MAX_AU", "200.0"))
     rhodot_max_km_s = float(os.getenv("RHODOT_MAX", "100.0"))
     conf = float(os.getenv("CONF", "0.99"))
+    workers = int(os.getenv("WORKERS", "1"))
 
     obs_window = observations[:3]
     epoch = _midpoint_time(obs_window)
@@ -540,55 +654,44 @@ if __name__ == "__main__":
 
     chi2_delta = float(stats.chi2.ppf(conf, df=2))
 
-    theta_draws = []
-    for draw_idx in range(n_draws):
+    draw_vecs = []
+    for _ in range(n_draws):
         z = rng.normal(size=4)
-        draw_vec = mean_vec + L @ z
-        attrib_draw = Attributable(
-            ra_deg=float(draw_vec[0]),
-            dec_deg=float(draw_vec[1]),
-            ra_dot_deg_per_day=float(draw_vec[2]),
-            dec_dot_deg_per_day=float(draw_vec[3]),
-        )
-        chi2_grid = np.full((n_rho, n_rhodot), np.inf, dtype=float)
-        for i, rho_km in enumerate(rho_grid):
-            for j, rhodot_km_s in enumerate(rhodot_grid):
-                try:
-                    state = build_state_from_ranging(
-                        obs_ref, epoch, attrib_draw, float(rho_km), float(rhodot_km_s)
-                    )
-                except Exception:
-                    continue
-                chi2 = 0.0
-                for ob in obs_window:
-                    attrib_pred, _, _ = attrib_from_state_with_observer_time(
-                        state, ob, ob.time
-                    )
-                    dra = _wrap_ra_deg(ob.ra_deg - attrib_pred.ra_deg)
-                    dra *= math.cos(math.radians(ob.dec_deg))
-                    ddec = ob.dec_deg - attrib_pred.dec_deg
-                    dra_arcsec = dra * 3600.0
-                    ddec_arcsec = ddec * 3600.0
-                    sigma = float(ob.sigma_arcsec)
-                    chi2 += (dra_arcsec / sigma) ** 2 + (ddec_arcsec / sigma) ** 2
-                chi2_grid[i, j] = chi2
-        chi2_min = float(np.nanmin(chi2_grid))
-        min_idx = int(np.nanargmin(chi2_grid))
-        min_i, min_j = np.unravel_index(min_idx, chi2_grid.shape)
-        theta_draws.append(
-            {
-                "alpha_deg": float(draw_vec[0]),
-                "alpha_dot_deg_per_day": float(draw_vec[2]),
-                "delta_deg": float(draw_vec[1]),
-                "delta_dot_deg_per_day": float(draw_vec[3]),
-                "rho_km": float(rho_grid[min_i]),
-                "rhodot_km_s": float(rhodot_grid[min_j]),
-                "chi2_min": chi2_min,
-            }
-        )
-        threshold = chi2_min + chi2_delta
-        union_mask |= chi2_grid <= threshold
-        print(f"draw {draw_idx + 1}/{n_draws} chi2_min={chi2_min:.3f}")
+        draw_vecs.append(mean_vec + L @ z)
+
+    ctx = {
+        "rho_grid": rho_grid,
+        "rhodot_grid": rhodot_grid,
+        "obs_window": obs_window,
+        "obs_ref": obs_ref,
+        "epoch": epoch,
+        "chi2_delta": chi2_delta,
+    }
+
+    theta_draws = []
+    if workers > 1:
+        with mp.Pool(processes=workers, initializer=_mc_worker_init, initargs=(ctx,)) as pool:
+            for draw_idx, result in enumerate(pool.imap_unordered(_mc_worker, draw_vecs), start=1):
+                packed = np.frombuffer(result["packed_mask"], dtype=np.uint8)
+                bits = np.unpackbits(packed)[: result["nbits"]]
+                draw_mask = bits.reshape((n_rho, n_rhodot), order="C").astype(bool)
+                union_mask |= draw_mask
+                theta_draws.append(result["theta"])
+                print(
+                    f"draw {draw_idx + 1}/{n_draws} chi2_min={result['theta']['chi2_min']:.3f}"
+                )
+    else:
+        _mc_worker_init(ctx)
+        for draw_idx, draw_vec in enumerate(draw_vecs, start=1):
+            result = _mc_worker(draw_vec)
+            packed = np.frombuffer(result["packed_mask"], dtype=np.uint8)
+            bits = np.unpackbits(packed)[: result["nbits"]]
+            draw_mask = bits.reshape((n_rho, n_rhodot), order="C").astype(bool)
+            union_mask |= draw_mask
+            theta_draws.append(result["theta"])
+            print(
+                f"draw {draw_idx + 1}/{n_draws} chi2_min={result['theta']['chi2_min']:.3f}"
+            )
 
     accepted = int(np.sum(union_mask))
     total = int(union_mask.size)
