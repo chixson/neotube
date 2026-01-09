@@ -6,6 +6,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 from astropy.time import Time, TimeDelta
+from scipy.optimize import least_squares
 
 from .constants import AU_KM, C_KM_S, GM_SUN
 from .models import Observation
@@ -165,6 +166,20 @@ def _tangent_basis(
             z = np.array([0.0, 1.0, 0.0])
         t1 = np.cross(s, z)
         t1 = t1 / np.linalg.norm(t1)
+    t2 = np.cross(s, t1)
+    t2 = t2 / np.linalg.norm(t2)
+    return t1, t2
+
+
+def _tangent_basis_independent(s: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    z = np.array([0.0, 0.0, 1.0], dtype=float)
+    if abs(np.dot(s, z)) > 0.9:
+        z = np.array([0.0, 1.0, 0.0], dtype=float)
+    t1 = np.cross(s, z)
+    norm_t1 = np.linalg.norm(t1)
+    if norm_t1 <= 0:
+        raise RuntimeError("Cannot form tangent basis.")
+    t1 = t1 / norm_t1
     t2 = np.cross(s, t1)
     t2 = t2 / np.linalg.norm(t2)
     return t1, t2
@@ -427,6 +442,86 @@ def _rhodot_and_state_for_rho(
     return rhodot_km_s, state, s_em, sdot_em, sddot_em
 
 
+def _solve_rho_rhodot_roots(
+    fit: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    epoch: Time,
+    obs_ref: Observation,
+    accel_func: Callable[[np.ndarray, Time], np.ndarray],
+    rho_min_km: float,
+    rho_max_km: float,
+    n_seeds: int,
+    rhodot_guess_km_s: float = 0.0,
+) -> list[tuple[float, float]]:
+    def f_vec(x: np.ndarray) -> np.ndarray:
+        rho_km, rhodot_km_s = float(x[0]), float(x[1])
+        data = _compute_accels_for_rho(rho_km, fit, epoch, obs_ref, accel_func)
+        s_em = data["s_em"]
+        sdot_em = data["sdot_em"]
+        sddot_em = data["sddot_em"]
+        ddot_site = data["ddot_site"]
+        ddot_earth = data["ddot_earth"]
+        a_total = data["a_total"]
+        t1, t2 = _tangent_basis_independent(s_em)
+        t1_dot_sdot = float(np.dot(t1, sdot_em))
+        t2_dot_sdot = float(np.dot(t2, sdot_em))
+        t1_dot_sddot = float(np.dot(t1, sddot_em))
+        t2_dot_sddot = float(np.dot(t2, sddot_em))
+        t1_dot_site = float(np.dot(t1, ddot_site))
+        t2_dot_site = float(np.dot(t2, ddot_site))
+        t1_dot_earth = float(np.dot(t1, ddot_earth))
+        t2_dot_earth = float(np.dot(t2, ddot_earth))
+        t1_dot_a = float(np.dot(t1, a_total))
+        t2_dot_a = float(np.dot(t2, a_total))
+        f1 = (
+            2.0 * rhodot_km_s * t1_dot_sdot
+            + rho_km * t1_dot_sddot
+            + t1_dot_site
+            - (-t1_dot_a - t1_dot_earth)
+        )
+        f2 = (
+            2.0 * rhodot_km_s * t2_dot_sdot
+            + rho_km * t2_dot_sddot
+            + t2_dot_site
+            - (-t2_dot_a - t2_dot_earth)
+        )
+        return np.array([f1, f2], dtype=float)
+
+    roots: list[tuple[float, float]] = []
+    log_min = math.log(rho_min_km)
+    log_max = math.log(rho_max_km)
+    seeds = np.linspace(log_min, log_max, max(2, int(n_seeds)))
+    for l_rho in seeds:
+        rho0 = float(math.exp(l_rho))
+        x0 = np.array([rho0, float(rhodot_guess_km_s)], dtype=float)
+        try:
+            res = least_squares(
+                f_vec,
+                x0,
+                method="trf",
+                bounds=([rho_min_km, -1e4], [rho_max_km, 1e4]),
+                xtol=1e-12,
+                ftol=1e-12,
+                gtol=1e-12,
+                max_nfev=500,
+            )
+        except Exception:
+            continue
+        rho_sol = float(res.x[0])
+        rhodot_sol = float(res.x[1])
+        if not (rho_min_km <= rho_sol <= rho_max_km):
+            continue
+        is_new = True
+        for r_existing, rd_existing in roots:
+            if abs(math.log10(r_existing) - math.log10(rho_sol)) < 1e-4 and abs(
+                rd_existing - rhodot_sol
+            ) < 1e-6:
+                is_new = False
+                break
+        if is_new:
+            roots.append((rho_sol, rhodot_sol))
+    return roots
+
+
 def solve_three_point_exact(
     observations: Sequence[Observation],
     *,
@@ -462,14 +557,23 @@ def solve_three_point_exact(
         rho_probe = math.sqrt(rho_min_km * rho_max_km)
         _compute_accels_for_rho(rho_probe, fit, epoch, obs_ref, accel_func, debug=True)
 
-    roots = _find_rho_roots(fit, epoch, obs_ref, accel_func, rho_min_km, rho_max_km, n_grid)
+    roots = _solve_rho_rhodot_roots(
+        fit, epoch, obs_ref, accel_func, rho_min_km, rho_max_km, n_grid
+    )
 
     root_objs: list[ThreePointRoot] = []
-    for rho in roots:
+    for rho, rhodot in roots:
         try:
-            rhodot, state, s_em, sdot_em, sddot_em = _rhodot_and_state_for_rho(
-                rho, fit, epoch, obs_ref, accel_func
-            )
+            data = _compute_accels_for_rho(rho, fit, epoch, obs_ref, accel_func)
+            s_em = data["s_em"]
+            sdot_em = data["sdot_em"]
+            sddot_em = data["sddot_em"]
+            site_vel = data["site_vel"]
+            earth_helio_vel = data["earth_helio_vel"]
+            r_helio = data["r_helio"]
+            v_geo = site_vel + rhodot * s_em + rho * sdot_em
+            v_helio = earth_helio_vel + v_geo
+            state = np.hstack([r_helio, v_helio])
             root_objs.append(
                 ThreePointRoot(
                     rho_km=float(rho),
@@ -528,7 +632,7 @@ def solve_three_point_exact(
                 fit_p = _fit_tangent_plane_quadratic_coeffs(perturbed, epoch)
             except Exception:
                 continue
-            roots_p = _find_rho_roots(
+            roots_p = _solve_rho_rhodot_roots(
                 fit_p, epoch, perturbed[1], accel_func, rho_min_km, rho_max_km, n_grid
             )
             if not roots_p:
@@ -536,13 +640,16 @@ def solve_three_point_exact(
             for idx, root in enumerate(root_objs):
                 nominal = root.rho_km
                 best_idx = int(
-                    np.argmin([abs(math.log10(rp) - math.log10(nominal)) for rp in roots_p])
-                )
-                rho_p = roots_p[best_idx]
-                try:
-                    rhodot_p, _, s_em_p, sdot_em_p, sddot_em_p = _rhodot_and_state_for_rho(
-                        rho_p, fit_p, epoch, perturbed[1], accel_func
+                    np.argmin(
+                        [abs(math.log10(rp[0]) - math.log10(nominal)) for rp in roots_p]
                     )
+                )
+                rho_p, rhodot_p = roots_p[best_idx]
+                try:
+                    data_p = _compute_accels_for_rho(rho_p, fit_p, epoch, perturbed[1], accel_func)
+                    s_em_p = data_p["s_em"]
+                    sdot_em_p = data_p["sdot_em"]
+                    sddot_em_p = data_p["sddot_em"]
                 except Exception:
                     continue
                 rho_samples[idx].append(float(rho_p))
