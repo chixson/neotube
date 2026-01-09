@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+import json
 import multiprocessing as mp
+import os
+import time
 from typing import Sequence
 
 import numpy as np
@@ -69,6 +72,10 @@ class SeedConfig:
     # Admissible interval definition: "bound" or "speedcap".
     admissible_cap_mode: str = "bound"
     admissible_speed_cap_km_s: float = C_KM_S
+    admissible_write_diagnostics: bool = True
+    admissible_diagnostics_dir: str | None = None
+    admissible_diagnostics_tag: str = "admissible_atlas"
+    admissible_diagnostics_arrays: bool = True
     # Adaptive mesh refinement over rho (default: enabled).
     refine_levels: int = 2
     refine_fold: int = 4
@@ -419,6 +426,17 @@ def admissible_rho_rhodot_envelope(
         obs_ref, epoch, gamma_samples, cfg, quantiles=(5, 25, 50, 75, 95)
     )
 
+    amr_history = []
+    amr_history.append(
+        {
+            "level": 0,
+            **_capture_amr_snapshot(rho_grid, atlas),
+            "n_rho_before": int(len(rho_grid)),
+            "n_rho_after": int(len(rho_grid)),
+            "n_points_added": 0,
+        }
+    )
+
     env_min = np.full_like(rho_grid, np.inf, dtype=float)
     env_max = np.full_like(rho_grid, -np.inf, dtype=float)
     n_ok = atlas["n_ok"].copy()
@@ -474,6 +492,7 @@ def admissible_rho_rhodot_envelope(
             if not new_rhos:
                 break
 
+            before_n = int(len(rho_grid))
             new_rhos_arr = np.unique(
                 np.concatenate([np.asarray(x).ravel() for x in new_rhos])
             )
@@ -483,6 +502,16 @@ def admissible_rho_rhodot_envelope(
             rho_grid = np.sort(combined)
             atlas = admissible_rho_rhodot_atlas(
                 obs_ref, epoch, gamma_samples, cfg, quantiles=atlas["quantile_levels"]
+            )
+            after_n = int(len(rho_grid))
+            amr_history.append(
+                {
+                    "level": int(_level + 1),
+                    **_capture_amr_snapshot(rho_grid, atlas),
+                    "n_rho_before": before_n,
+                    "n_rho_after": after_n,
+                    "n_points_added": int(after_n - before_n),
+                }
             )
             env_min = np.full_like(rho_grid, np.inf, dtype=float)
             env_max = np.full_like(rho_grid, -np.inf, dtype=float)
@@ -497,7 +526,136 @@ def admissible_rho_rhodot_envelope(
             env_min[~np.isfinite(env_min)] = np.nan
             env_max[~np.isfinite(env_max)] = np.nan
 
+    atlas["amr_history"] = amr_history
+
+    if cfg.admissible_write_diagnostics:
+        out_dir = cfg.admissible_diagnostics_dir
+        if out_dir is None:
+            out_dir = os.getenv("RUN_DIR") or os.path.join("runs", "admissible")
+        write_atlas_diagnostics(atlas, out_dir, tag=cfg.admissible_diagnostics_tag)
+
     return rho_grid, env_min, env_max, n_ok, atlas
+
+
+def _capture_amr_snapshot(rho_grid: np.ndarray, atlas: dict) -> dict:
+    n_rho = len(rho_grid)
+    n_rho_with_unions = int(np.sum([1 for u in atlas["unions"] if u]))
+    union_counts = np.array([len(u) for u in atlas["unions"]], dtype=int)
+    median_union_count = (
+        float(np.nanmedian(union_counts)) if union_counts.size else 0.0
+    )
+    n_ok = atlas.get("n_ok", np.zeros(n_rho, dtype=int))
+    return {
+        "n_rho": int(n_rho),
+        "n_rho_with_unions": int(n_rho_with_unions),
+        "pct_rho_with_unions": float(n_rho_with_unions) / max(1, n_rho),
+        "median_union_count": median_union_count,
+        "median_n_ok": float(np.nanmedian(n_ok)) if n_rho > 0 else 0.0,
+    }
+
+
+def summarize_atlas(atlas: dict) -> dict:
+    rho_grid = atlas["rho_grid"]
+    n_rho = len(rho_grid)
+    dotmin_all = atlas.get("dotmin_all")
+    n_gamma = dotmin_all.shape[0] if dotmin_all is not None and dotmin_all.ndim == 2 else None
+
+    union_counts = np.array([len(u) for u in atlas["unions"]], dtype=int)
+    union_widths = []
+    for unions in atlas["unions"]:
+        if not unions:
+            union_widths.append(0.0)
+        else:
+            widths = [r - l for (l, r) in unions]
+            union_widths.append(float(np.median(widths)))
+
+    qdotmin = atlas["quantiles"]["dotmin_q"]
+    qdotmax = atlas["quantiles"]["dotmax_q"]
+    qwidths = (
+        np.nanmedian(np.abs(qdotmax - qdotmin), axis=0)
+        if qdotmin.size
+        else np.full(n_rho, np.nan)
+    )
+
+    summary = {
+        "n_gamma": int(n_gamma) if n_gamma is not None else None,
+        "n_rho": int(n_rho),
+        "rho_min_km": float(rho_grid[0]) if n_rho > 0 else None,
+        "rho_max_km": float(rho_grid[-1]) if n_rho > 0 else None,
+        "median_n_ok": float(np.nanmedian(atlas["n_ok"])) if n_rho > 0 else 0.0,
+        "median_union_count": float(np.nanmedian(union_counts))
+        if union_counts.size
+        else 0.0,
+        "pct_rho_with_unions": float(np.sum(union_counts > 0)) / max(1, n_rho),
+        "union_counts_hist": {
+            "min": int(union_counts.min()) if union_counts.size else 0,
+            "max": int(union_counts.max()) if union_counts.size else 0,
+            "median": float(np.median(union_counts)) if union_counts.size else 0.0,
+        },
+        "median_union_width_kms": float(np.nanmedian(union_widths))
+        if union_widths
+        else None,
+        "median_quantile_width_kms": float(np.nanmedian(qwidths)) if qwidths.size else None,
+        "n_rho_with_any": int(np.sum(atlas["n_ok"] > 0)),
+    }
+
+    multi_idx = np.where(union_counts >= 2)[0]
+    summary["n_rho_with_multi_unions"] = int(len(multi_idx))
+    if len(multi_idx) > 0:
+        top_multis = []
+        for ir in multi_idx[:10]:
+            top_multis.append(
+                {
+                    "rho_km": float(rho_grid[ir]),
+                    "union_count": int(union_counts[ir]),
+                    "n_ok": int(atlas["n_ok"][ir]),
+                }
+            )
+        summary["multi_union_examples"] = top_multis
+
+    if "amr_history" in atlas:
+        summary["amr_history"] = atlas["amr_history"]
+
+    return summary
+
+
+def write_atlas_diagnostics(atlas: dict, out_dir: str, tag: str = "admissible_atlas") -> None:
+    os.makedirs(out_dir, exist_ok=True)
+    summary = summarize_atlas(atlas)
+    json_path = os.path.join(out_dir, f"{tag}_summary.json")
+    npz_path = os.path.join(out_dir, f"{tag}_debug.npz")
+
+    with open(json_path, "wt") as fh:
+        json.dump(summary, fh, indent=2, sort_keys=True)
+
+    try:
+        unions_len = np.array([len(u) for u in atlas["unions"]], dtype=int)
+        if atlas.get("dotmin_all") is not None:
+            np.savez_compressed(
+                npz_path,
+                rho_grid=np.asarray(atlas["rho_grid"]),
+                unions_len=unions_len,
+                n_ok=np.asarray(atlas["n_ok"]),
+                dotmin_all=atlas.get("dotmin_all", np.array([])),
+                dotmax_all=atlas.get("dotmax_all", np.array([])),
+                quantile_levels=np.asarray(atlas.get("quantile_levels", [])),
+                dotmin_q=atlas["quantiles"].get("dotmin_q", np.array([])),
+                dotmax_q=atlas["quantiles"].get("dotmax_q", np.array([])),
+            )
+        else:
+            np.savez_compressed(
+                npz_path,
+                rho_grid=np.asarray(atlas["rho_grid"]),
+                unions_len=unions_len,
+                n_ok=np.asarray(atlas["n_ok"]),
+            )
+    except Exception:
+        np.savez_compressed(
+            npz_path,
+            rho_grid=np.asarray(atlas["rho_grid"]),
+            unions_len=np.array([len(u) for u in atlas["unions"]], dtype=int),
+            n_ok=np.asarray(atlas["n_ok"]),
+        )
 
 
 def log_rejected_samples(path: str, records: list[dict]) -> None:
@@ -1286,6 +1444,9 @@ def adaptive_sample_admissible_beads(
 
     rho_grid = _rho_grid_from_cfg(cfg)
     print(f"[admissible] gamma_samples={len(gamma_samples)} rho_grid={len(rho_grid)}")
+
+    if cfg.admissible_write_diagnostics:
+        admissible_rho_rhodot_envelope(obs_ref, epoch, gamma_samples, cfg)
 
     accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
     attempted = 0
