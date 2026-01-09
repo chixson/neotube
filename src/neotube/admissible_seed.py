@@ -69,6 +69,12 @@ class SeedConfig:
     # Admissible interval definition: "bound" or "speedcap".
     admissible_cap_mode: str = "bound"
     admissible_speed_cap_km_s: float = C_KM_S
+    # Adaptive mesh refinement over rho (default: enabled).
+    refine_levels: int = 2
+    refine_fold: int = 4
+    refine_width_frac: float = 0.5
+    refine_expand_on_edge: bool = True
+    refine_expand_factor: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -304,31 +310,90 @@ def admissible_rho_rhodot_envelope(
     gamma_samples: list[np.ndarray],
     cfg: SeedConfig,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def _compute_envelope_for_grid(rho_grid: np.ndarray):
+        env_min = np.full(rho_grid.shape, np.inf, dtype=float)
+        env_max = np.full(rho_grid.shape, -np.inf, dtype=float)
+        n_ok = np.zeros(rho_grid.shape, dtype=int)
+
+        for attrib in gamma_samples:
+            dotmin, dotmax = _admissible_intervals(
+                attrib,
+                obs_ref,
+                epoch,
+                rho_grid,
+                bound_only=cfg.admissible_bound_only,
+                cap_mode=cfg.admissible_cap_mode,
+                speed_cap_km_s=cfg.admissible_speed_cap_km_s,
+                rhodot_clip_km_s=cfg.rhodot_max_km_s,
+            )
+            valid = np.isfinite(dotmin) & np.isfinite(dotmax)
+            if not np.any(valid):
+                continue
+            env_min[valid] = np.minimum(env_min[valid], dotmin[valid])
+            env_max[valid] = np.maximum(env_max[valid], dotmax[valid])
+            n_ok[valid] += 1
+
+        env_min[~np.isfinite(env_min)] = np.nan
+        env_max[~np.isfinite(env_max)] = np.nan
+        return env_min, env_max, n_ok
+
     rho_grid = _rho_grid_from_cfg(cfg)
-    env_min = np.full(rho_grid.shape, np.inf, dtype=float)
-    env_max = np.full(rho_grid.shape, -np.inf, dtype=float)
-    n_ok = np.zeros(rho_grid.shape, dtype=int)
+    env_min, env_max, n_ok = _compute_envelope_for_grid(rho_grid)
 
-    for attrib in gamma_samples:
-        dotmin, dotmax = _admissible_intervals(
-            attrib,
-            obs_ref,
-            epoch,
-            rho_grid,
-            bound_only=cfg.admissible_bound_only,
-            cap_mode=cfg.admissible_cap_mode,
-            speed_cap_km_s=cfg.admissible_speed_cap_km_s,
-            rhodot_clip_km_s=cfg.rhodot_max_km_s,
-        )
-        valid = np.isfinite(dotmin) & np.isfinite(dotmax)
-        if not np.any(valid):
-            continue
-        env_min[valid] = np.minimum(env_min[valid], dotmin[valid])
-        env_max[valid] = np.maximum(env_max[valid], dotmax[valid])
-        n_ok[valid] += 1
+    if getattr(cfg, "refine_levels", 0) and len(rho_grid) < int(cfg.rho_grid_max_points):
+        for _level in range(int(cfg.refine_levels)):
+            valid = np.isfinite(env_min) & np.isfinite(env_max)
+            widths = np.where(valid, (env_max - env_min), 0.0)
 
-    env_min[~np.isfinite(env_min)] = np.nan
-    env_max[~np.isfinite(env_max)] = np.nan
+            left_valid = valid[:-1]
+            right_valid = valid[1:]
+            trans_mask = left_valid != right_valid
+
+            both_valid = left_valid & right_valid
+            if np.any(both_valid):
+                lw = widths[:-1][both_valid]
+                rw = widths[1:][both_valid]
+                denom = np.maximum(1e-12, np.maximum(lw, rw))
+                rel_change = np.abs(rw - lw) / denom
+                idxs_both = np.where(both_valid)[0]
+                large_change = rel_change > float(cfg.refine_width_frac)
+                trans_mask[idxs_both[large_change]] = True
+
+            refine_indices = np.where(trans_mask)[0]
+            new_rhos = []
+            for i in refine_indices:
+                r0 = float(rho_grid[i])
+                r1 = float(rho_grid[i + 1])
+                if r1 <= 0.0 or r0 <= 0.0:
+                    continue
+                subs = int(max(1, int(cfg.refine_fold)))
+                pts = np.logspace(math.log10(r0), math.log10(r1), subs + 2)[1:-1]
+                new_rhos.append(pts)
+
+            if getattr(cfg, "refine_expand_on_edge", False):
+                if np.isfinite(env_min[-1]) and np.isfinite(env_max[-1]):
+                    rho_max_curr = float(rho_grid[-1])
+                    rho_max_new = rho_max_curr * float(cfg.refine_expand_factor)
+                    outer_pts = np.logspace(math.log10(rho_max_curr), math.log10(rho_max_new), 4)[
+                        1:
+                    ]
+                    new_rhos.append(outer_pts)
+
+            if not new_rhos:
+                break
+
+            new_rhos_arr = np.unique(
+                np.concatenate([np.asarray(x).ravel() for x in new_rhos])
+            )
+            combined = np.unique(np.concatenate([rho_grid, new_rhos_arr]))
+            if combined.size == rho_grid.size:
+                break
+            if combined.size > int(cfg.rho_grid_max_points):
+                break
+
+            rho_grid = np.sort(combined)
+            env_min, env_max, n_ok = _compute_envelope_for_grid(rho_grid)
+
     return rho_grid, env_min, env_max, n_ok
 
 
