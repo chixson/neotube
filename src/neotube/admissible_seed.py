@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+import multiprocessing as mp
 from typing import Sequence
 
 import numpy as np
@@ -267,6 +268,8 @@ def _build_state_from_sample(
     *,
     v_max_km_s: float | None,
     rate_max_deg_day: float | None,
+    obs_ref_pos: np.ndarray | None = None,
+    obs_ref_vel: np.ndarray | None = None,
 ) -> np.ndarray | None:
     attrib = Attributable(
         ra_deg=float(attrib_vec[0]),
@@ -285,7 +288,10 @@ def _build_state_from_sample(
     if not _basic_state_ok(state):
         return None
     if rate_max_deg_day is not None:
-        attrib_state, _, _ = attrib_from_state_with_observer_time(state, obs_ref, epoch)
+        if obs_ref_pos is None or obs_ref_vel is None:
+            attrib_state, _, _ = attrib_from_state_with_observer_time(state, obs_ref, epoch)
+        else:
+            attrib_state, _, _ = _attrib_from_state_cached(state, obs_ref_pos, obs_ref_vel)
         if (
             abs(attrib_state.ra_dot_deg_per_day) > float(rate_max_deg_day)
             or abs(attrib_state.dec_dot_deg_per_day) > float(rate_max_deg_day)
@@ -416,6 +422,330 @@ def _state_passes_hard_tube(
     return True
 
 
+def _chi2_per_obs_for_state(
+    state: np.ndarray,
+    state_epoch: Time,
+    observations: Sequence[Observation],
+    obs_cache: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    emission_iter: int = 10,
+    tol_sec: float = 1e-3,
+) -> np.ndarray:
+    chi2s = np.empty(len(observations), dtype=float)
+    for idx, ob in enumerate(observations):
+        obs_pos, obs_vel = obs_cache[idx]
+        try:
+            _, st_em = _emission_epoch_for_state(
+                state,
+                state_epoch,
+                ob,
+                ob.time,
+                max_iter=emission_iter,
+                tol_sec=tol_sec,
+                obs_pos=obs_pos,
+                obs_vel=obs_vel,
+            )
+            attrib_pred, _, _ = _attrib_from_state_cached(st_em, obs_pos, obs_vel)
+        except Exception:
+            chi2s[idx] = float("inf")
+            continue
+        dra_deg = _wrap_deg(attrib_pred.ra_deg - ob.ra_deg)
+        dra_deg *= math.cos(math.radians(attrib_pred.dec_deg))
+        ddec_deg = attrib_pred.dec_deg - ob.dec_deg
+        dra_arc = dra_deg * 3600.0
+        ddec_arc = ddec_deg * 3600.0
+        sigma = max(1e-6, float(ob.sigma_arcsec))
+        chi2s[idx] = (dra_arc / sigma) ** 2 + (ddec_arc / sigma) ** 2
+    return chi2s
+
+
+def _linearized_chi2(
+    state: np.ndarray,
+    observations: Sequence[Observation],
+    obs_cache: Sequence[tuple[np.ndarray, np.ndarray]],
+) -> np.ndarray:
+    chi2s = np.empty(len(observations), dtype=float)
+    r_helio = state[:3].astype(float)
+    v_helio = state[3:].astype(float)
+    for idx, ob in enumerate(observations):
+        obs_pos, obs_vel = obs_cache[idx]
+        r_topo = r_helio - obs_pos
+        v_topo = v_helio - obs_vel
+        rho = float(np.linalg.norm(r_topo))
+        if rho <= 0:
+            chi2s[idx] = float("inf")
+            continue
+        s = r_topo / rho
+        rhodot = float(np.dot(v_topo, s))
+        sdot = (v_topo - rhodot * s) / max(rho, 1e-12)
+        x, y, z = s
+        xd, yd, zd = sdot
+        rxy2 = max(x * x + y * y, 1e-12)
+        ra = math.atan2(y, x)
+        dec = math.asin(np.clip(z, -1.0, 1.0))
+        ra_dot = (x * yd - y * xd) / rxy2
+        cosdec = max(math.sqrt(rxy2), 1e-12)
+        dec_dot = (zd - z * (x * xd + y * yd) / rxy2) / cosdec
+        dra_deg = ((math.degrees(ra) % 360.0) - ob.ra_deg + 180.0) % 360.0 - 180.0
+        dra_deg *= math.cos(math.radians(math.degrees(dec)))
+        ddec_deg = math.degrees(dec) - ob.dec_deg
+        dra_arc = dra_deg * 3600.0
+        ddec_arc = ddec_deg * 3600.0
+        sigma = max(1e-6, float(ob.sigma_arcsec))
+        chi2s[idx] = (dra_arc / sigma) ** 2 + (ddec_arc / sigma) ** 2
+    return chi2s
+
+
+def _batch_emission_chi2(
+    states: Sequence[np.ndarray],
+    state_epoch: Time,
+    observations: Sequence[Observation],
+    obs_cache: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    emission_iter: int = 10,
+    tol_sec: float = 1e-3,
+) -> np.ndarray:
+    n = len(states)
+    m = len(observations)
+    out = np.full((n, m), np.inf, dtype=float)
+    for i, st in enumerate(states):
+        per = _chi2_per_obs_for_state(
+            st,
+            state_epoch,
+            observations,
+            obs_cache,
+            emission_iter=emission_iter,
+            tol_sec=tol_sec,
+        )
+        out[i, :] = per
+    return out
+
+
+def _find_true_segments(mask: np.ndarray) -> list[tuple[int, int]]:
+    segs: list[tuple[int, int]] = []
+    if mask.size == 0:
+        return segs
+    in_seg = False
+    start = 0
+    for i, v in enumerate(mask):
+        if v and not in_seg:
+            in_seg = True
+            start = i
+        elif not v and in_seg:
+            in_seg = False
+            segs.append((start, i - 1))
+    if in_seg:
+        segs.append((start, len(mask) - 1))
+    return segs
+
+
+def rhodot_intervals_for_rho(
+    attrib: Attributable,
+    obs_ref: Observation,
+    epoch: Time,
+    rho_km: float,
+    observations: Sequence[Observation],
+    obs_cache: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    k_sigma: float = 3.0,
+    N_coarse: int = 41,
+    refine_tol: float = 1e-6,
+    max_bisect: int = 60,
+    coarse_prefilter: bool = True,
+) -> list[tuple[float, float]]:
+    rho_grid = np.array([rho_km], dtype=float)
+    dotmin, dotmax = _admissible_intervals(
+        attrib,
+        obs_ref,
+        epoch,
+        rho_grid,
+        mu=GM_SUN,
+        rho_min_km=float(6471.0),
+        bound_only=True,
+    )
+    lo_phys = dotmin[0]
+    hi_phys = dotmax[0]
+    if not np.isfinite(lo_phys) or not np.isfinite(hi_phys) or hi_phys <= lo_phys:
+        return []
+
+    zs = np.linspace(lo_phys, hi_phys, N_coarse)
+    pass_mask = np.zeros_like(zs, dtype=bool)
+    gamma_vec = np.array(
+        [
+            attrib.ra_deg,
+            attrib.dec_deg,
+            attrib.ra_dot_deg_per_day,
+            attrib.dec_dot_deg_per_day,
+        ],
+        dtype=float,
+    )
+    for i, z in enumerate(zs):
+        st = _build_state_from_sample(
+            obs_ref,
+            epoch,
+            gamma_vec,
+            float(rho_km),
+            float(z),
+            v_max_km_s=None,
+            rate_max_deg_day=None,
+        )
+        if st is None:
+            pass_mask[i] = False
+            continue
+        if coarse_prefilter:
+            lin_chi2 = _linearized_chi2(st, observations, obs_cache)
+            if np.any(lin_chi2 > (4.0 * (k_sigma ** 2))):
+                pass_mask[i] = False
+                continue
+        chi2s = _chi2_per_obs_for_state(st, epoch, observations, obs_cache)
+        pass_mask[i] = np.all(chi2s <= (k_sigma ** 2))
+
+    segments = _find_true_segments(pass_mask)
+    if not segments:
+        return []
+
+    def G(z_val: float) -> float:
+        st = _build_state_from_sample(
+            obs_ref,
+            epoch,
+            gamma_vec,
+            float(rho_km),
+            float(z_val),
+            v_max_km_s=None,
+            rate_max_deg_day=None,
+        )
+        if st is None:
+            return float("inf")
+        chi2s = _chi2_per_obs_for_state(st, epoch, observations, obs_cache)
+        return float(np.max(chi2s) - (k_sigma ** 2))
+
+    def bisect_root(a: float, b: float) -> float | None:
+        fa = G(a)
+        fb = G(b)
+        if not np.isfinite(fa) or not np.isfinite(fb):
+            return None
+        if fa <= 0 and fb <= 0:
+            return a
+        if fa > 0 and fb > 0:
+            return None
+        lo = a
+        hi = b
+        for _ in range(max_bisect):
+            mid = 0.5 * (lo + hi)
+            fm = G(mid)
+            if not np.isfinite(fm):
+                lo = mid
+                continue
+            if abs(fm) <= refine_tol:
+                return float(mid)
+            if fm > 0:
+                lo = mid
+            else:
+                hi = mid
+        return float(0.5 * (lo + hi))
+
+    intervals: list[tuple[float, float]] = []
+    for (a_idx, b_idx) in segments:
+        if a_idx == 0:
+            left_lo = zs[a_idx]
+            left_hi = zs[a_idx]
+        else:
+            left_lo = zs[a_idx - 1]
+            left_hi = zs[a_idx]
+        if b_idx == len(zs) - 1:
+            right_lo = zs[b_idx]
+            right_hi = zs[b_idx]
+        else:
+            right_lo = zs[b_idx]
+            right_hi = zs[b_idx + 1]
+        left_edge = bisect_root(left_lo, left_hi)
+        right_edge = bisect_root(right_lo, right_hi)
+        if left_edge is None or right_edge is None:
+            left_edge = float(zs[a_idx])
+            right_edge = float(zs[b_idx])
+        intervals.append((left_edge, right_edge))
+
+    intervals.sort()
+    merged: list[tuple[float, float]] = []
+    for lo, hi in intervals:
+        if not merged:
+            merged.append((lo, hi))
+            continue
+        plo, phi = merged[-1]
+        if lo <= phi + 1e-12:
+            merged[-1] = (plo, max(phi, hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _coarse_chunk_worker(
+    gamma_chunk: list[np.ndarray],
+    observations: Sequence[Observation],
+    epoch: Time,
+    obs_ref: Observation,
+    rho_grid: np.ndarray,
+    cfg: SeedConfig,
+    coarse_k_sigma: float,
+    obs_ref_pos: np.ndarray,
+    obs_ref_vel: np.ndarray,
+    seed_offset: int,
+) -> tuple[list[tuple[np.ndarray, np.ndarray, float, float, Attributable]], int]:
+    local_rng = np.random.default_rng(int(cfg.seed or 0) + seed_offset)
+    local_obs_cache = [_observer_helio_state(ob, ob.time) for ob in observations]
+    local_accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
+    local_attempted = 0
+    for gamma_vec in gamma_chunk:
+        attrib = Attributable(
+            ra_deg=float(gamma_vec[0]),
+            dec_deg=float(gamma_vec[1]),
+            ra_dot_deg_per_day=float(gamma_vec[2]),
+            dec_dot_deg_per_day=float(gamma_vec[3]),
+        )
+        dotmin, dotmax = _admissible_intervals(
+            attrib,
+            obs_ref,
+            epoch,
+            rho_grid,
+            rho_min_km=float(cfg.rho_min_km),
+            bound_only=bool(cfg.admissible_bound_only),
+        )
+        valid_idx = np.where(np.isfinite(dotmin) & np.isfinite(dotmax))[0]
+        if valid_idx.size == 0:
+            continue
+        for idx in valid_idx:
+            rho_val = float(rho_grid[idx])
+            lo = float(dotmin[idx])
+            hi = float(dotmax[idx])
+            if hi <= lo:
+                continue
+            nper = int(cfg.admissible_n_per_gamma)
+            rhodot_samples = lo + local_rng.random(nper) * (hi - lo)
+            for rhodot_val in rhodot_samples:
+                local_attempted += 1
+                st = _build_state_from_sample(
+                    obs_ref,
+                    epoch,
+                    gamma_vec,
+                    rho_val,
+                    rhodot_val,
+                    v_max_km_s=cfg.v_max_km_s,
+                    rate_max_deg_day=cfg.rate_max_deg_day,
+                    obs_ref_pos=obs_ref_pos,
+                    obs_ref_vel=obs_ref_vel,
+                )
+                if st is None:
+                    continue
+                ok = _state_passes_hard_tube(
+                    st, epoch, observations, local_obs_cache, k_sigma=coarse_k_sigma
+                )
+                if ok:
+                    r0 = st[:3].astype(float)
+                    v0 = st[3:].astype(float)
+                    local_accepted.append((r0, v0, rho_val, rhodot_val, attrib))
+    return local_accepted, local_attempted
+
+
 def sample_admissible_beads(
     observations: Sequence[Observation],
     epoch: Time,
@@ -459,6 +789,7 @@ def sample_admissible_beads(
     )
 
     obs_ref = _ranging_reference_observation(observations, epoch)
+    obs_ref_pos, obs_ref_vel = _observer_helio_state(obs_ref, epoch)
     obs_cache = [_observer_helio_state(ob, ob.time) for ob in observations]
 
     accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
@@ -505,6 +836,8 @@ def sample_admissible_beads(
                     float(rhodot_val),
                     v_max_km_s=cfg.v_max_km_s,
                     rate_max_deg_day=cfg.rate_max_deg_day,
+                    obs_ref_pos=obs_ref_pos,
+                    obs_ref_vel=obs_ref_vel,
                 )
                 if state is None:
                     continue
@@ -536,6 +869,181 @@ def sample_admissible_beads(
 
     if not accepted:
         return {"accepted_count": 0, "attempted": attempted}
+
+    acc = np.array(accepted, dtype=object)
+    return {
+        "r0": np.vstack(acc[:, 0]),
+        "v0": np.vstack(acc[:, 1]),
+        "rho_km": np.array(list(acc[:, 2]), dtype=float),
+        "rhodot_km_s": np.array(list(acc[:, 3]), dtype=float),
+        "attrib": list(acc[:, 4]),
+        "accepted_count": len(accepted),
+        "attempted": attempted,
+    }
+
+
+def adaptive_sample_admissible_beads(
+    observations: Sequence[Observation],
+    epoch: Time,
+    attrib_mean: Attributable,
+    attrib_cov: np.ndarray,
+    *,
+    cfg: SeedConfig,
+    target: int = 2000,
+    coarse_k_sigma: float = 6.0,
+    final_k_sigma: float = 3.0,
+    bins_logrho: int = 40,
+    bins_rhodot: int = 40,
+    adaptive_rounds: int = 3,
+    adaptive_samples_per_cell: int = 200,
+    N_coarse: int = 41,
+) -> dict[str, object]:
+    rng = np.random.default_rng(cfg.seed)
+    obs_ref = _ranging_reference_observation(observations, epoch)
+    obs_cache = [_observer_helio_state(ob, ob.time) for ob in observations]
+
+    mean_vec = np.array(
+        [
+            attrib_mean.ra_deg,
+            attrib_mean.dec_deg,
+            attrib_mean.ra_dot_deg_per_day,
+            attrib_mean.dec_dot_deg_per_day,
+        ],
+        dtype=float,
+    )
+    gamma_samples: list[np.ndarray] = []
+    if cfg.n_jitter > 0:
+        jitter = rng.normal(size=(cfg.n_jitter, 4))
+        L = _chol_cov(attrib_cov)
+        gamma_samples.extend(list(mean_vec[None, :] + jitter @ L.T))
+    if cfg.n_sobol_local > 0:
+        u = _sobol_samples(
+            cfg.n_sobol_local, 4, seed=cfg.seed, scramble=cfg.sobol_scramble
+        )
+        gamma_samples.extend(list(_sample_attributables(mean_vec, attrib_cov, u)))
+
+    rho_min = max(1e-12, float(cfg.rho_min_km))
+    rho_max = max(rho_min / AU_KM, float(cfg.rho_max_au)) * AU_KM
+    rho_grid = np.logspace(
+        math.log10(rho_min), math.log10(rho_max), int(cfg.admissible_n_rho)
+    )
+
+    accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
+    attempted = 0
+
+    for gamma_vec in gamma_samples:
+        attrib = Attributable(
+            ra_deg=float(gamma_vec[0]),
+            dec_deg=float(gamma_vec[1]),
+            ra_dot_deg_per_day=float(gamma_vec[2]),
+            dec_dot_deg_per_day=float(gamma_vec[3]),
+        )
+        for rho_val in rho_grid:
+            intervals = rhodot_intervals_for_rho(
+                attrib,
+                obs_ref,
+                epoch,
+                float(rho_val),
+                observations,
+                obs_cache,
+                k_sigma=coarse_k_sigma,
+                N_coarse=N_coarse,
+            )
+            if not intervals:
+                continue
+            for (lo, hi) in intervals:
+                if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                    continue
+                nper = int(cfg.admissible_n_per_gamma)
+                for _ in range(nper):
+                    attempted += 1
+                    rhodot_val = lo + rng.random() * (hi - lo)
+                    st = _build_state_from_sample(
+                        obs_ref,
+                        epoch,
+                        gamma_vec,
+                        float(rho_val),
+                        float(rhodot_val),
+                        v_max_km_s=cfg.v_max_km_s,
+                        rate_max_deg_day=cfg.rate_max_deg_day,
+                    )
+                    if st is None:
+                        continue
+                    lin_chi2 = _linearized_chi2(st, observations, obs_cache)
+                    if np.any(lin_chi2 > (16.0 * (coarse_k_sigma**2))):
+                        continue
+                    if _state_passes_hard_tube(
+                        st, epoch, observations, obs_cache, k_sigma=coarse_k_sigma
+                    ):
+                        r0 = st[:3].astype(float)
+                        v0 = st[3:].astype(float)
+                        accepted.append(
+                            (r0, v0, float(rho_val), float(rhodot_val), attrib)
+                        )
+        if len(accepted) >= max(200, target // 4):
+            break
+
+    if len(accepted) == 0:
+        return {"accepted_count": 0, "attempted": attempted}
+
+    arr = np.array([[math.log10(a[2]), a[3]] for a in accepted], dtype=float)
+    for _ in range(adaptive_rounds):
+        hist, xedges, yedges = np.histogram2d(
+            arr[:, 0], arr[:, 1], bins=[bins_logrho, bins_rhodot]
+        )
+        empty = np.where(hist == 0)
+        empty_cells = list(zip(empty[0], empty[1]))
+        if not empty_cells:
+            break
+        n_cells = min(len(empty_cells), max(50, len(empty_cells) // 4))
+        chosen = rng.choice(len(empty_cells), size=n_cells, replace=False)
+        for ci in chosen:
+            ix, iy = empty_cells[ci]
+            logrho_lo, logrho_hi = xedges[ix], xedges[ix + 1]
+            rhodot_lo, rhodot_hi = yedges[iy], yedges[iy + 1]
+            for _ in range(adaptive_samples_per_cell):
+                gamma_vec = gamma_samples[int(rng.integers(len(gamma_samples)))]
+                rho_val = 10 ** (logrho_lo + rng.random() * (logrho_hi - logrho_lo))
+                rhodot_val = rhodot_lo + rng.random() * (rhodot_hi - rhodot_lo)
+                attempted += 1
+                st = _build_state_from_sample(
+                    obs_ref,
+                    epoch,
+                    gamma_vec,
+                    float(rho_val),
+                    float(rhodot_val),
+                    v_max_km_s=cfg.v_max_km_s,
+                    rate_max_deg_day=cfg.rate_max_deg_day,
+                )
+                if st is None:
+                    continue
+                if not _state_passes_hard_tube(
+                    st, epoch, observations, obs_cache, k_sigma=final_k_sigma
+                ):
+                    continue
+                r0 = st[:3].astype(float)
+                v0 = st[3:].astype(float)
+                accepted.append(
+                    (
+                        r0,
+                        v0,
+                        float(rho_val),
+                        float(rhodot_val),
+                        Attributable(
+                            ra_deg=float(gamma_vec[0]),
+                            dec_deg=float(gamma_vec[1]),
+                            ra_dot_deg_per_day=float(gamma_vec[2]),
+                            dec_dot_deg_per_day=float(gamma_vec[3]),
+                        ),
+                    )
+                )
+                arr = np.vstack([arr, [math.log10(rho_val), rhodot_val]])
+                if len(accepted) >= target:
+                    break
+            if len(accepted) >= target:
+                break
+        if len(accepted) >= target:
+            break
 
     acc = np.array(accepted, dtype=object)
     return {
