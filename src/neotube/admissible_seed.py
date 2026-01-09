@@ -44,6 +44,16 @@ class SeedConfig:
     admissible_n_per_gamma: int = 8
     admissible_bound_only: bool = True
     rho_prior_mode: str = "log"
+    # Decouple the rho grid spacing from the rho prior.
+    # None -> use rho_prior_mode for the grid (backwards-compatible).
+    rho_grid_mode: str | None = None
+    rho_grid_points_per_decade: int = 24
+    rho_grid_max_points: int = 20000
+    rho_grid_inner_frac: float = 0.6
+    rho_grid_inner_max_km: float = 1.0e9
+    # Admissible interval definition: "bound" or "speedcap".
+    admissible_cap_mode: str = "bound"
+    admissible_speed_cap_km_s: float = C_KM_S
 
 
 @dataclass(frozen=True)
@@ -84,13 +94,29 @@ def _rho_grid_from_cfg(cfg: SeedConfig) -> np.ndarray:
     rho_min = max(1e-12, float(cfg.rho_min_km))
     rho_max = max(rho_min / AU_KM, float(cfg.rho_max_au)) * AU_KM
     n = int(cfg.admissible_n_rho)
-    mode = str(cfg.rho_prior_mode or "log").lower()
+    mode = str((cfg.rho_grid_mode or cfg.rho_prior_mode or "log")).lower()
     if mode == "log":
         return np.logspace(math.log10(rho_min), math.log10(rho_max), n)
     if mode == "volume":
         # Uniform in volume => CDF proportional to rho^3
         r3 = np.linspace(rho_min**3, rho_max**3, n)
         return np.cbrt(r3)
+    if mode == "skeleton":
+        ppd = max(2, int(cfg.rho_grid_points_per_decade))
+        decades = max(1e-12, math.log10(rho_max) - math.log10(rho_min))
+        n_skel = int(math.ceil(decades * ppd)) + 1
+        n_skel = min(int(cfg.rho_grid_max_points), max(n_skel, 2))
+        return np.logspace(math.log10(rho_min), math.log10(rho_max), n_skel)
+    if mode == "hybrid":
+        inner_frac = float(np.clip(cfg.rho_grid_inner_frac, 0.05, 0.95))
+        n_inner = max(2, int(math.floor(n * inner_frac)))
+        n_outer = max(2, (n - n_inner) + 1)
+        rho_cut = min(rho_max, float(cfg.rho_grid_inner_max_km))
+        rho_cut = max(rho_cut, rho_min * 1.0001)
+        inner = np.logspace(math.log10(rho_min), math.log10(rho_cut), n_inner, endpoint=False)
+        r3 = np.linspace(rho_cut**3, rho_max**3, n_outer)
+        outer = np.cbrt(r3)
+        return np.unique(np.concatenate([inner, outer]))
     raise ValueError(f"Unknown rho_prior_mode: {cfg.rho_prior_mode}")
 
 
@@ -212,6 +238,10 @@ def _admissible_intervals(
     mu: float = GM_SUN,
     rho_min_km: float = 6471.0,
     bound_only: bool = True,
+    cap_mode: str = "bound",
+    speed_cap_km_s: float = C_KM_S,
+    rhodot_clip_km_s: float | None = None,
+    disc_tol: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     s, sdot = s_and_sdot(attrib)
     obs_pos, obs_vel = _observer_helio_state(obs_ref, epoch)
@@ -221,16 +251,22 @@ def _admissible_intervals(
     rnorm = np.linalg.norm(rvec, axis=1)
     b = np.einsum("ij,j->i", vlin, s)
     vlin2 = np.einsum("ij,ij->i", vlin, vlin)
-    disc = b * b - (vlin2 - 2.0 * mu / (rnorm + 1e-300))
+    if not bound_only:
+        cap_mode = "speedcap"
+    if cap_mode == "bound":
+        vcap2 = 2.0 * mu / (rnorm + 1e-300)
+    elif cap_mode == "speedcap":
+        vcap = float(speed_cap_km_s)
+        vcap2 = vcap * vcap
+    else:
+        raise ValueError(f"Unknown cap_mode: {cap_mode}")
+    disc = b * b - (vlin2 - vcap2)
 
     dotmin = np.full_like(rho_grid_km, np.nan, dtype=float)
     dotmax = np.full_like(rho_grid_km, np.nan, dtype=float)
 
     valid = rnorm > float(rho_min_km)
-    if bound_only:
-        valid = valid & (disc >= 0.0)
-    else:
-        valid = valid & np.isfinite(disc)
+    valid = valid & np.isfinite(disc) & (disc >= -float(disc_tol))
 
     if not np.any(valid):
         return dotmin, dotmax
@@ -240,7 +276,45 @@ def _admissible_intervals(
     dot2 = -b[valid] + sqrt_disc
     dotmin[valid] = np.minimum(dot1, dot2)
     dotmax[valid] = np.maximum(dot1, dot2)
+    if rhodot_clip_km_s is not None:
+        clip = float(rhodot_clip_km_s)
+        dotmin = np.maximum(dotmin, -clip)
+        dotmax = np.minimum(dotmax, clip)
     return dotmin, dotmax
+
+
+def admissible_rho_rhodot_envelope(
+    obs_ref: Observation,
+    epoch: Time,
+    gamma_samples: list[np.ndarray],
+    cfg: SeedConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    rho_grid = _rho_grid_from_cfg(cfg)
+    env_min = np.full(rho_grid.shape, np.inf, dtype=float)
+    env_max = np.full(rho_grid.shape, -np.inf, dtype=float)
+    n_ok = np.zeros(rho_grid.shape, dtype=int)
+
+    for attrib in gamma_samples:
+        dotmin, dotmax = _admissible_intervals(
+            attrib,
+            obs_ref,
+            epoch,
+            rho_grid,
+            bound_only=cfg.admissible_bound_only,
+            cap_mode=cfg.admissible_cap_mode,
+            speed_cap_km_s=cfg.admissible_speed_cap_km_s,
+            rhodot_clip_km_s=cfg.rhodot_max_km_s,
+        )
+        valid = np.isfinite(dotmin) & np.isfinite(dotmax)
+        if not np.any(valid):
+            continue
+        env_min[valid] = np.minimum(env_min[valid], dotmin[valid])
+        env_max[valid] = np.maximum(env_max[valid], dotmax[valid])
+        n_ok[valid] += 1
+
+    env_min[~np.isfinite(env_min)] = np.nan
+    env_max[~np.isfinite(env_max)] = np.nan
+    return rho_grid, env_min, env_max, n_ok
 
 
 def _obs_chi2_for_state(
@@ -347,6 +421,7 @@ def seed_local_from_attrib(
         gamma_samples.extend(list(_sample_attributables(mean_vec, attrib_cov, u)))
 
     rho_grid = _rho_grid_from_cfg(cfg)
+    print(f"[admissible] gamma_samples={len(gamma_samples)} rho_grid={len(rho_grid)}")
 
     for gamma_vec in gamma_samples:
         attrib = Attributable(
@@ -1003,6 +1078,7 @@ def adaptive_sample_admissible_beads(
         gamma_samples.extend(list(_sample_attributables(mean_vec, attrib_cov, u)))
 
     rho_grid = _rho_grid_from_cfg(cfg)
+    print(f"[admissible] gamma_samples={len(gamma_samples)} rho_grid={len(rho_grid)}")
 
     accepted: list[tuple[np.ndarray, np.ndarray, float, float, Attributable]] = []
     attempted = 0
