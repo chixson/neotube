@@ -23,6 +23,19 @@ from .ranging import (
 )
 from .sbdb import fetch_sbdb_covariance
 from .site_checks import filter_special_sites
+"""
+Notes (this patch)
+-------------------
+What this patch does:
+- Makes the robust rho-grid + stable admissible-interval primitives the default
+  path by switching the rho grid builder default to the hybrid approach.
+- Adds an explicit `rhodot_max_km_s` config option (None by default) so callers
+  can optionally clip |rhodot| when building admissible envelopes.
+- Raises the default admissible rho resolution to reduce coarse-grid failures.
+
+What this patch DOES NOT do:
+- It does NOT implement adaptive mesh refinement (AMR) over rho.
+"""
 
 
 @dataclass(frozen=True)
@@ -40,17 +53,19 @@ class SeedConfig:
     seed_obs_chi2_conf: float | None = 0.995
     seed_obs_df: int | None = None
     seed_obs_max_keep: int | None = None
-    admissible_n_rho: int = 400
+    admissible_n_rho: int = 1000
     admissible_n_per_gamma: int = 8
     admissible_bound_only: bool = True
     rho_prior_mode: str = "log"
     # Decouple the rho grid spacing from the rho prior.
     # None -> use rho_prior_mode for the grid (backwards-compatible).
-    rho_grid_mode: str | None = None
+    rho_grid_mode: str | None = "hybrid"
     rho_grid_points_per_decade: int = 24
     rho_grid_max_points: int = 20000
     rho_grid_inner_frac: float = 0.6
     rho_grid_inner_max_km: float = 1.0e9
+    # Optional clipping of admissible rhodot intervals.
+    rhodot_max_km_s: float | None = None
     # Admissible interval definition: "bound" or "speedcap".
     admissible_cap_mode: str = "bound"
     admissible_speed_cap_km_s: float = C_KM_S
