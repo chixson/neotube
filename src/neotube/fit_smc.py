@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Sequence
 
 import numpy as np
@@ -99,6 +100,7 @@ def _report_cloud_stats(
     obs_ref: Observation | None = None,
     epoch: Time | None = None,
     jpl_target: str | None = None,
+    output_dir: str | None = None,
 ) -> dict[str, object]:
     states = np.asarray(states, dtype=float)
     weights = np.asarray(weights, dtype=float)
@@ -116,12 +118,15 @@ def _report_cloud_stats(
     logrho = np.log10(rnorm / AU_KM) if n else np.array([])
     rho_pct = _weighted_percentiles(rnorm, weights, [0.5, 5, 16, 50, 84, 95, 99.5])
 
-    # Physicality summary
+    # Physicality and orbital elements summary
     ok_flags = []
     eps_vals = []
     e_vals = []
     a_vals = []
     i_vals = []
+    Omega_vals = []
+    omega_vals = []
+    nu_vals = []
     for st in states:
         ok, eps, a, e, r = _state_physicality(st)
         ok_flags.append(ok)
@@ -137,11 +142,56 @@ def _report_cloud_stats(
             i_vals.append(float(np.degrees(np.arccos(hvec[2] / hnorm))))
         else:
             i_vals.append(float("nan"))
+        # Classical elements
+        rnorm = float(np.linalg.norm(rvec))
+        vnorm = float(np.linalg.norm(vvec))
+        if rnorm <= 0 or hnorm <= 0:
+            Omega_vals.append(float("nan"))
+            omega_vals.append(float("nan"))
+            nu_vals.append(float("nan"))
+            continue
+        # node vector
+        nvec = np.cross([0.0, 0.0, 1.0], hvec)
+        nnorm = float(np.linalg.norm(nvec))
+        # eccentricity vector
+        evec = (np.cross(vvec, hvec) / GM_SUN) - (rvec / (rnorm + 1e-300))
+        enorm = float(np.linalg.norm(evec))
+        # RAAN
+        if nnorm > 0:
+            Omega = math.degrees(math.atan2(nvec[1], nvec[0])) % 360.0
+        else:
+            Omega = float("nan")
+        # argument of periapsis
+        if nnorm > 0 and enorm > 0:
+            omega = math.degrees(
+                math.atan2(
+                    np.dot(np.cross(nvec, evec), hvec) / (nnorm * hnorm + 1e-300),
+                    np.dot(nvec, evec) / (nnorm * enorm + 1e-300),
+                )
+            ) % 360.0
+        else:
+            omega = float("nan")
+        # true anomaly
+        if enorm > 0:
+            nu = math.degrees(
+                math.atan2(
+                    np.dot(np.cross(evec, rvec), hvec) / (enorm * hnorm + 1e-300),
+                    np.dot(evec, rvec) / (enorm * rnorm + 1e-300),
+                )
+            ) % 360.0
+        else:
+            nu = float("nan")
+        Omega_vals.append(Omega)
+        omega_vals.append(omega)
+        nu_vals.append(nu)
     ok_flags = np.array(ok_flags, dtype=bool) if n else np.array([], dtype=bool)
     eps_vals = np.array(eps_vals, dtype=float) if n else np.array([])
     e_vals = np.array(e_vals, dtype=float) if n else np.array([])
     a_vals = np.array(a_vals, dtype=float) if n else np.array([])
     i_vals = np.array(i_vals, dtype=float) if n else np.array([])
+    Omega_vals = np.array(Omega_vals, dtype=float) if n else np.array([])
+    omega_vals = np.array(omega_vals, dtype=float) if n else np.array([])
+    nu_vals = np.array(nu_vals, dtype=float) if n else np.array([])
     frac_ok = float(np.mean(ok_flags)) if n else 0.0
     frac_hyper = float(np.mean(np.isfinite(eps_vals) & (eps_vals >= 0.0))) if n else 0.0
     e_pct = _weighted_percentiles(e_vals, weights, [16, 50, 84])
@@ -285,6 +335,105 @@ def _report_cloud_stats(
                         stats["ra_dec_circle"]["jpl_error"] = str(exc)
         except Exception as exc:
             stats["ra_dec_circle_error"] = str(exc)
+
+    # Write element scatter diagnostics (a/e/i) if requested.
+    if n and output_dir:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            # Prepare JPL elements (optional)
+            jpl_elems = None
+            if jpl_target and epoch is not None:
+                try:
+                    jpl_state = fetch_horizons_state(
+                        jpl_target, epoch, location="@sun", refplane="earth"
+                    )
+                    jpl_state = np.asarray(jpl_state, dtype=float).reshape(6)
+                    rvec = jpl_state[:3]
+                    vvec = jpl_state[3:6]
+                    hvec = np.cross(rvec, vvec)
+                    hnorm = float(np.linalg.norm(hvec))
+                    rnorm = float(np.linalg.norm(rvec))
+                    nvec = np.cross([0.0, 0.0, 1.0], hvec)
+                    nnorm = float(np.linalg.norm(nvec))
+                    evec = (np.cross(vvec, hvec) / GM_SUN) - (rvec / (rnorm + 1e-300))
+                    enorm = float(np.linalg.norm(evec))
+                    energy = 0.5 * float(np.dot(vvec, vvec)) - GM_SUN / (rnorm + 1e-300)
+                    a = -GM_SUN / (2.0 * energy) if energy < 0 else float("inf")
+                    i = float(np.degrees(np.arccos(hvec[2] / (hnorm + 1e-300))))
+                    if nnorm > 0:
+                        Omega = math.degrees(math.atan2(nvec[1], nvec[0])) % 360.0
+                    else:
+                        Omega = float("nan")
+                    if nnorm > 0 and enorm > 0:
+                        omega = math.degrees(
+                            math.atan2(
+                                np.dot(np.cross(nvec, evec), hvec)
+                                / (nnorm * hnorm + 1e-300),
+                                np.dot(nvec, evec) / (nnorm * enorm + 1e-300),
+                            )
+                        ) % 360.0
+                    else:
+                        omega = float("nan")
+                    if enorm > 0:
+                        nu = math.degrees(
+                            math.atan2(
+                                np.dot(np.cross(evec, rvec), hvec)
+                                / (enorm * hnorm + 1e-300),
+                                np.dot(evec, rvec) / (enorm * rnorm + 1e-300),
+                            )
+                        ) % 360.0
+                    else:
+                        nu = float("nan")
+                    jpl_elems = {
+                        "a_km": float(a),
+                        "e": float(enorm),
+                        "i_deg": float(i),
+                        "Omega_deg": float(Omega),
+                        "omega_deg": float(omega),
+                        "nu_deg": float(nu),
+                    }
+                except Exception:
+                    jpl_elems = None
+
+            # Save arrays for plotting / reuse
+            np.savez_compressed(
+                os.path.join(output_dir, f"{label}_elements.npz"),
+                a_km=a_vals,
+                e=e_vals,
+                i_deg=i_vals,
+                Omega_deg=Omega_vals,
+                omega_deg=omega_vals,
+                nu_deg=nu_vals,
+                weights=weights,
+                jpl_elems=jpl_elems,
+            )
+
+            # Plot a/e/i pairwise scatter if matplotlib is available
+            try:
+                import matplotlib.pyplot as plt
+
+                a_au = a_vals / AU_KM
+                fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+                axes[0].scatter(a_au, e_vals, s=6, alpha=0.3)
+                axes[0].set_xlabel("a [AU]")
+                axes[0].set_ylabel("e")
+                axes[1].scatter(a_au, i_vals, s=6, alpha=0.3)
+                axes[1].set_xlabel("a [AU]")
+                axes[1].set_ylabel("i [deg]")
+                axes[2].scatter(e_vals, i_vals, s=6, alpha=0.3)
+                axes[2].set_xlabel("e")
+                axes[2].set_ylabel("i [deg]")
+                if jpl_elems:
+                    axes[0].plot(jpl_elems["a_km"] / AU_KM, jpl_elems["e"], "r*", ms=10)
+                    axes[1].plot(jpl_elems["a_km"] / AU_KM, jpl_elems["i_deg"], "r*", ms=10)
+                    axes[2].plot(jpl_elems["e"], jpl_elems["i_deg"], "r*", ms=10)
+                fig.tight_layout()
+                fig.savefig(os.path.join(output_dir, f"{label}_elements.png"), dpi=150)
+                plt.close(fig)
+            except Exception:
+                pass
+        except Exception as exc:
+            stats["elements_write_error"] = str(exc)
 
     return stats
 
@@ -918,6 +1067,7 @@ def seed_and_test_cloud(
             obs_ref=obs_ref,
             epoch=t0,
             jpl_target=jpl_target,
+            output_dir=os.getenv("RUN_DIR") or os.path.join("runs", "fit_smc"),
         ),
     }
 
